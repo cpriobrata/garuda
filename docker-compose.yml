@@ -1,0 +1,40 @@
+services:
+  api:
+    build:
+      context: ./backend
+    environment:
+      GARUDA_ADDRESS: ":8080"
+      GARUDA_PUBLIC_URL: "http://localhost:8080"
+      GARUDA_DATA_FILE: "/app/data/garuda.json"
+      GARUDA_ALLOWED_ORIGINS: "http://localhost:3000"
+      GARUDA_DEMO_MODE: "true"
+      GARUDA_AUTH_MODE: "local"
+      GARUDA_JWT_SECRET: "local-compose-jwt-secret-change-before-production"
+      GARUDA_VISITOR_HMAC_KEY: "local-compose-visitor-secret-change-before-production"
+      GOOGLE_OAUTH_CLIENT_ID: "${NEXT_PUBLIC_GOOGLE_CLIENT_ID:-}"
+      STRIPE_SUCCESS_URL: "http://localhost:3000/checkout/success?checkout=success"
+      STRIPE_CANCEL_URL: "http://localhost:3000/checkout?checkout=cancelled"
+      STRIPE_PORTAL_RETURN_URL: "http://localhost:3000/app/billing"
+      AUTH_RESET_URL: "http://localhost:3000/auth/reset-password"
+    ports:
+      - "8080:8080"
+    volumes:
+      - garuda-data:/app/data
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: "http://localhost:8080"
+        NEXT_PUBLIC_GOOGLE_CLIENT_ID: "${NEXT_PUBLIC_GOOGLE_CLIENT_ID:-}"
+    environment:
+      NEXT_PUBLIC_API_URL: "http://localhost:8080"
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+volumes:
+  garuda-data:

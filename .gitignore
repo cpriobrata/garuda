@@ -1,0 +1,20 @@
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.env.local
+
+# Backend runtime data and binaries
+backend/data/
+backend/garuda-api
+backend/garuda-api.exe
+backend/.env
+backend/.cache/
+backend/.gocache/
+
+# Local tooling
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+.vscode/

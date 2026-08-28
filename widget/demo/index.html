@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="description" content="Offline preview of the Garuda website assistant widget">
+    <title>Garuda Widget Preview</title>
+    <link rel="stylesheet" href="/demo/styles.css">
+  </head>
+  <body>
+    <header class="nav">
+      <a class="brand" href="#" aria-label="Garuda preview home">
+        <span class="brand-mark" aria-hidden="true">G</span>
+        <span>Garuda</span>
+      </a>
+      <span class="preview-badge">Widget preview</span>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="eyebrow">Dependency-free website assistant</div>
+        <h1>Meet customers while their interest is still warm.</h1>
+        <p class="lede">
+          This page runs the real embeddable widget in offline demo mode. Open the
+          assistant, ask about Garuda, and try a human follow-up request.
+        </p>
+        <div class="actions">
+          <button id="demo-hint" type="button">Show me what to try</button>
+          <span>Look for Mira in the bottom-right corner.</span>
+        </div>
+      </section>
+
+      <section class="proof" aria-label="Product highlights">
+        <article>
+          <span>01</span>
+          <h2>Helpful by default</h2>
+          <p>Fast suggested questions and calm, readable conversation design.</p>
+        </article>
+        <article>
+          <span>02</span>
+          <h2>Memory with a choice</h2>
+          <p>Visitors can opt into agent-scoped continuity on this browser.</p>
+        </article>
+        <article>
+          <span>03</span>
+          <h2>Consent before capture</h2>
+          <p>Contact details are submitted only through an explicit form.</p>
+        </article>
+      </section>
+
+      <aside id="hint" class="hint" hidden>
+        <strong>Try these prompts:</strong>
+        <ul>
+          <li>How much does it cost?</li>
+          <li>How quickly can I launch?</li>
+          <li>Can someone call me?</li>
+        </ul>
+        <p>Reload after a few messages to preview returning-visitor memory.</p>
+      </aside>
+    </main>
+
+    <footer>Offline demo · no contact details leave this browser</footer>
+
+    <script>
+      document.getElementById('demo-hint').addEventListener('click', function () {
+        var hint = document.getElementById('hint');
+        hint.hidden = !hint.hidden;
+      });
+    </script>
+    <script
+      async
+      src="../dist/v1.js"
+      data-agent-key="pub_demo_garuda"
+      data-mode="demo"
+      data-memory-consent="prompt"
+      data-open="true"
+    ></script>
+  </body>
+</html>

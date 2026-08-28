@@ -1,0 +1,6 @@
+.cache
+.gocache
+data
+.env
+*.log
+garuda-api*

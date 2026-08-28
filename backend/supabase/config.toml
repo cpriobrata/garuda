@@ -1,0 +1,6 @@
+[functions.garuda-rag-ingest]
+verify_jwt = false
+
+[functions.garuda-rag-search]
+verify_jwt = false
+

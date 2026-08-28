@@ -1,0 +1,6 @@
+.cache/
+data/
+.env
+garuda-api
+garuda-api.exe
+

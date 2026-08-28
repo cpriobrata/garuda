@@ -1,0 +1,21 @@
+{
+  "name": "@garuda/widget",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Dependency-free embeddable chat widget for Garuda agents",
+  "license": "UNLICENSED",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "node --check src/v1.js",
+    "test": "node --test tests/*.test.cjs",
+    "demo": "node scripts/serve.mjs"
+  },
+  "files": [
+    "dist/v1.js",
+    "README.md"
+  ],
+  "sideEffects": true,
+  "engines": {
+    "node": ">=20"
+  }
+}
