@@ -23,6 +23,8 @@ type Config struct {
 	AuthResetURL          string
 	AuthVerifyURL         string
 	AllowedOrigins        []string
+	TrustedProxies        []string
+	Environment           string
 	DemoMode              bool
 	ExposeResetToken      bool
 	AuthMode              string
@@ -80,6 +82,8 @@ func Load() (Config, error) {
 		AuthResetURL:          env("AUTH_RESET_URL", "http://localhost:3000/auth/reset-password"),
 		AuthVerifyURL:         env("AUTH_VERIFY_URL", "http://localhost:3000/auth/verify-email"),
 		AllowedOrigins:        csv(env("GARUDA_ALLOWED_ORIGINS", "http://localhost:3000")),
+		TrustedProxies:        csv(os.Getenv("GARUDA_TRUSTED_PROXIES")),
+		Environment:           strings.ToLower(env("GARUDA_ENVIRONMENT", "development")),
 		DemoMode:              boolean("GARUDA_DEMO_MODE", true),
 		ExposeResetToken:      boolean("GARUDA_EXPOSE_RESET_TOKEN", true),
 		AuthMode:              authMode,
@@ -109,6 +113,36 @@ func Load() (Config, error) {
 	}
 	if (cfg.SupabaseURL == "") != (cfg.SupabaseAnonKey == "") {
 		return Config{}, fmt.Errorf("SUPABASE_URL and SUPABASE_ANON_KEY must be configured together")
+	}
+	switch cfg.Environment {
+	case "development", "staging", "production":
+	default:
+		return Config{}, fmt.Errorf("GARUDA_ENVIRONMENT must be development, staging, or production")
+	}
+	// Demo mode disables entitlement checks, the widget domain allowlist, email
+	// verification, and secret-strength assertions, and it exposes password-reset
+	// tokens in unauthenticated responses. It defaults to true so the documented
+	// zero-credential local demo keeps working -- which means the dangerous mistake
+	// is deploying without turning it off. These guards make that impossible to do
+	// silently: any signal that this is a real deployment refuses to start.
+	if cfg.DemoMode {
+		if cfg.Environment != "development" {
+			return Config{}, fmt.Errorf("GARUDA_DEMO_MODE must be false when GARUDA_ENVIRONMENT=%s: demo mode grants every account an active subscription", cfg.Environment)
+		}
+		if publicURL, err := url.Parse(cfg.PublicURL); err == nil && publicURL.Scheme == "https" {
+			return Config{}, fmt.Errorf("GARUDA_DEMO_MODE must be false when GARUDA_PUBLIC_URL is https (%s): demo mode grants every account an active subscription", cfg.PublicURL)
+		}
+		for _, origin := range cfg.AllowedOrigins {
+			if origin == "*" || strings.HasPrefix(origin, "https://") {
+				return Config{}, fmt.Errorf("GARUDA_DEMO_MODE must be false when GARUDA_ALLOWED_ORIGINS contains %q: demo mode grants every account an active subscription", origin)
+			}
+		}
+	}
+	// Exposing reset tokens is a demo affordance only. Clamp rather than reject, so
+	// a leftover GARUDA_EXPOSE_RESET_TOKEN=true in a deployed environment silently
+	// loses its effect instead of either leaking tokens or blocking startup.
+	if !cfg.DemoMode {
+		cfg.ExposeResetToken = false
 	}
 	if cfg.AuthMode != "local" && cfg.AuthMode != "supabase" {
 		return Config{}, fmt.Errorf("GARUDA_AUTH_MODE must be local or supabase")

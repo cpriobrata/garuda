@@ -48,7 +48,7 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, lead := range state.Leads {
 			if lead.AccountID == identity.AccountID {
-				leads = append(leads, lead)
+				leads = append(leads, lead.Clone())
 				if index, ok := dayIndex[lead.CreatedAt.UTC().Format("2006-01-02")]; ok {
 					days[index].Leads++
 				}
@@ -108,7 +108,7 @@ func (s *Server) listLeads(w http.ResponseWriter, r *http.Request) {
 			if query != "" && !strings.Contains(strings.ToLower(strings.Join([]string{lead.Name, lead.Email, lead.Phone, lead.Company}, " ")), query) {
 				continue
 			}
-			items = append(items, lead)
+			items = append(items, lead.Clone())
 		}
 		return nil
 	})
@@ -252,12 +252,12 @@ func (s *Server) getConversation(w http.ResponseWriter, r *http.Request) {
 		if found {
 			for _, message := range state.Messages {
 				if message.SessionID == session.ID && message.AccountID == identity.AccountID {
-					messages = append(messages, message)
+					messages = append(messages, message.Clone())
 				}
 			}
 			for _, candidate := range state.Leads {
 				if candidate.SessionID == session.ID && candidate.AccountID == identity.AccountID {
-					copy := candidate
+					copy := candidate.Clone()
 					lead = &copy
 					break
 				}

@@ -32,7 +32,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		for index := len(state.Agents) - 1; index >= 0; index-- {
 			agent := state.Agents[index]
 			if agent.AccountID == identity.AccountID && agent.Status != "archived" {
-				items = append(items, agent)
+				items = append(items, agent.Clone())
 			}
 		}
 		return nil
@@ -105,7 +105,7 @@ func (s *Server) generateAgent(w http.ResponseWriter, r *http.Request) {
 	_ = s.store.View(func(state *model.State) error {
 		for _, candidate := range state.Onboarding {
 			if candidate.AccountID == identity.AccountID {
-				onboarding = candidate
+				onboarding = candidate.Clone()
 				break
 			}
 		}
@@ -360,6 +360,10 @@ type previewMessageRequest struct {
 
 func (s *Server) previewAgentMessage(w http.ResponseWriter, r *http.Request) {
 	identity := identityFrom(r.Context())
+	if !s.hasEntitlement(identity.AccountID) {
+		s.writeError(w, r, http.StatusPaymentRequired, "subscription_required", "An active subscription is required to preview agents", nil)
+		return
+	}
 	var input previewMessageRequest
 	if !s.decodeJSON(w, r, &input) {
 		return

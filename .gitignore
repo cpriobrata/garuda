@@ -18,3 +18,7 @@ Thumbs.db
 *.log
 .idea/
 .vscode/
+
+# Stray Go build artifacts
+backend/*.exe
+backend/*.test

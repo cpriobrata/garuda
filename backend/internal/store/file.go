@@ -13,6 +13,15 @@ import (
 	"garuda/backend/internal/model"
 )
 
+// Store is the persistence boundary.
+//
+// View and Update both hand the callback the LIVE state. Copying a struct out of
+// either copies only map and slice HEADERS, so a value that outlives the callback
+// still aliases data another goroutine may write. Anything that escapes -- most
+// often a value JSON-encoded after the call returns -- must be deep-copied first
+// with the model Clone helpers. This matters more than the usual aliasing bug:
+// reading a Go map while another goroutine writes it is a fatal error, not a
+// panic, so it cannot be recovered and it terminates the process.
 type Store interface {
 	View(func(*model.State) error) error
 	Update(func(*model.State) error) error
@@ -43,10 +52,17 @@ func OpenFile(path string) (*FileStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open data file: %w", err)
 	}
-	defer file.Close()
 	decoder := json.NewDecoder(io.LimitReader(file, 64<<20))
-	if err := decoder.Decode(&store.state); err != nil {
-		return nil, fmt.Errorf("decode data file: %w", err)
+	decodeErr := decoder.Decode(&store.state)
+	// Close before any rename. persistLocked below replaces this exact path, and
+	// Windows refuses os.Rename over a handle that is still open -- a deferred
+	// Close here made every schema migration fail on that platform.
+	closeErr := file.Close()
+	if decodeErr != nil {
+		return nil, fmt.Errorf("decode data file: %w", decodeErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("close data file: %w", closeErr)
 	}
 	if store.state.Version == 0 {
 		store.state.Version = 1

@@ -466,10 +466,10 @@ func (s *Server) chatHistory(session model.Session, limit int) []llm.ChatMessage
 			}
 			if session.MemoryConsent {
 				if message.VisitorID == session.VisitorID {
-					messages = append(messages, message)
+					messages = append(messages, message.Clone())
 				}
 			} else if message.SessionID == session.ID {
-				messages = append(messages, message)
+				messages = append(messages, message.Clone())
 			}
 		}
 		return nil

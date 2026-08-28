@@ -563,7 +563,7 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, candidate := range state.Onboarding {
 			if candidate.AccountID == identity.AccountID {
-				copy := candidate
+				copy := candidate.Clone()
 				onboarding = &copy
 			}
 		}

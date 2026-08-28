@@ -32,7 +32,7 @@ func (s *Server) getOnboarding(w http.ResponseWriter, r *http.Request) {
 	_ = s.store.View(func(state *model.State) error {
 		for _, candidate := range state.Onboarding {
 			if candidate.AccountID == identity.AccountID {
-				onboarding = candidate
+				onboarding = candidate.Clone()
 				if onboarding.Answers == nil {
 					onboarding.Answers = legacyOnboardingAnswers(candidate)
 				}

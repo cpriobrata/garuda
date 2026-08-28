@@ -1,6 +1,8 @@
 package api
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/subtle"
 	"embed"
@@ -33,16 +35,17 @@ import (
 var assets embed.FS
 
 type Server struct {
-	cfg      config.Config
-	store    store.Store
-	llm      *llm.Client
-	stripe   *billing.StripeClient
-	rag      *rag.Client
-	supabase *supabase.Client
-	google   googleIdentityVerifier
-	mailer   *mailer.Client
-	logger   *slog.Logger
-	limiter  *fixedWindowLimiter
+	cfg            config.Config
+	store          store.Store
+	llm            *llm.Client
+	stripe         *billing.StripeClient
+	rag            *rag.Client
+	supabase       *supabase.Client
+	google         googleIdentityVerifier
+	mailer         *mailer.Client
+	logger         *slog.Logger
+	limiter        *fixedWindowLimiter
+	trustedProxies []*net.IPNet
 }
 
 type googleIdentityVerifier interface {
@@ -88,16 +91,17 @@ func New(cfg config.Config, dataStore store.Store, logger *slog.Logger) *Server 
 		supabaseAnonKey = cfg.SupabaseAnonKey
 	}
 	return &Server{
-		cfg:      cfg,
-		store:    dataStore,
-		llm:      llm.New(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel),
-		stripe:   billing.NewStripe(cfg.StripeSecretKey, cfg.StripeWebhookSecret, cfg.StripePriceID, cfg.StripeAPIURL, cfg.StripeSuccessURL, cfg.StripeCancelURL),
-		rag:      rag.New(cfg.RAGEdgeURL, cfg.RAGBearerToken),
-		supabase: supabase.New(supabaseURL, supabaseAnonKey),
-		google:   googleauth.New(cfg.GoogleOAuthClientID),
-		mailer:   mailer.New(cfg.SendGridAPIKey, cfg.SendGridAPIURL, cfg.SendGridFromEmail, cfg.SendGridFromName, cfg.SendGridReplyTo),
-		logger:   logger,
-		limiter:  newFixedWindowLimiter(),
+		cfg:            cfg,
+		store:          dataStore,
+		llm:            llm.New(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel),
+		stripe:         billing.NewStripe(cfg.StripeSecretKey, cfg.StripeWebhookSecret, cfg.StripePriceID, cfg.StripeAPIURL, cfg.StripeSuccessURL, cfg.StripeCancelURL),
+		rag:            rag.New(cfg.RAGEdgeURL, cfg.RAGBearerToken),
+		supabase:       supabase.New(supabaseURL, supabaseAnonKey),
+		google:         googleauth.New(cfg.GoogleOAuthClientID),
+		mailer:         mailer.New(cfg.SendGridAPIKey, cfg.SendGridAPIURL, cfg.SendGridFromEmail, cfg.SendGridFromName, cfg.SendGridReplyTo),
+		logger:         logger,
+		limiter:        newFixedWindowLimiter(),
+		trustedProxies: parseCIDRs(cfg.TrustedProxies),
 	}
 }
 
@@ -125,24 +129,30 @@ func (s *Server) Handler() http.Handler {
 	protected := func(pattern string, handler http.HandlerFunc) {
 		mux.Handle(pattern, s.requireAuth(handler))
 	}
+	// protectedLimited is protected() plus a per-IP quota. Authenticated routes that
+	// reach a paid provider must never be unmetered: without this an account can loop
+	// requests against the shared model key.
+	protectedLimited := func(pattern, bucket string, limit int, window time.Duration, handler http.HandlerFunc) {
+		mux.Handle(pattern, s.rateLimit(bucket, limit, window, s.requireAuth(handler)))
+	}
 	protected("GET /v1/me", s.me)
 	protected("POST /v1/auth/google/link", s.googleLink)
 	protected("PATCH /v1/profile", s.updateProfile)
 	protected("GET /v1/onboarding/questions", s.onboardingQuestions)
 	protected("GET /v1/onboarding", s.getOnboarding)
 	protected("PUT /v1/onboarding", s.saveOnboarding)
-	protected("POST /v1/onboarding/messages", s.onboardingMessage)
+	protectedLimited("POST /v1/onboarding/messages", "onboarding.message", 120, time.Minute, s.onboardingMessage)
 	protected("POST /v1/onboarding/complete", s.completeOnboarding)
 	protected("GET /v1/jobs/{jobID}", s.getJob)
 	protected("GET /v1/agents", s.listAgents)
 	protected("POST /v1/agents", s.createAgent)
-	protected("POST /v1/agents/generate", s.generateAgent)
+	protectedLimited("POST /v1/agents/generate", "agents.generate", 20, time.Hour, s.generateAgent)
 	protected("GET /v1/agents/{agentID}", s.getAgent)
 	protected("PATCH /v1/agents/{agentID}", s.updateAgent)
 	protected("DELETE /v1/agents/{agentID}", s.archiveAgent)
 	protected("POST /v1/agents/{agentID}/publish", s.publishAgent)
 	protected("POST /v1/agents/{agentID}/unpublish", s.unpublishAgent)
-	protected("POST /v1/agents/{agentID}/preview/messages", s.previewAgentMessage)
+	protectedLimited("POST /v1/agents/{agentID}/preview/messages", "agents.preview", 60, time.Minute, s.previewAgentMessage)
 	protected("GET /v1/agents/{agentID}/embed", s.agentEmbed)
 	protected("GET /v1/agents/{agentID}/sources", s.listKnowledgeSources)
 	protected("POST /v1/agents/{agentID}/sources", s.createKnowledgeSource)
@@ -176,16 +186,80 @@ func (s *Server) ready(w http.ResponseWriter, _ *http.Request) {
 	s.writeData(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
+// widgetAsset caches the embedded widget and its gzip encoding. The bytes are
+// immutable for the life of the process, so compressing once at first request
+// costs nothing per request afterwards.
+var widgetAsset struct {
+	once    sync.Once
+	raw     []byte
+	gzipped []byte
+	readErr error
+}
+
+func loadWidgetAsset() ([]byte, []byte, error) {
+	widgetAsset.once.Do(func() {
+		content, err := assets.ReadFile("assets/widget.js")
+		if err != nil {
+			widgetAsset.readErr = err
+			return
+		}
+		widgetAsset.raw = content
+		var buffer bytes.Buffer
+		writer, err := gzip.NewWriterLevel(&buffer, gzip.BestCompression)
+		if err != nil {
+			return
+		}
+		if _, err := writer.Write(content); err != nil {
+			return
+		}
+		if err := writer.Close(); err != nil {
+			return
+		}
+		widgetAsset.gzipped = buffer.Bytes()
+	})
+	return widgetAsset.raw, widgetAsset.gzipped, widgetAsset.readErr
+}
+
 func (s *Server) widgetScript(w http.ResponseWriter, r *http.Request) {
-	content, err := assets.ReadFile("assets/widget.js")
+	raw, gzipped, err := loadWidgetAsset()
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "asset_unavailable", "Widget asset is unavailable", nil)
 		return
 	}
 	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=300")
+	// This script is fetched by every visitor on every customer page. Uncompressed
+	// it is roughly four times larger, and that cost lands on the customer's own
+	// page-speed scores, not ours.
+	if len(gzipped) > 0 && acceptsGzip(r.Header.Get("Accept-Encoding")) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Vary", "Accept-Encoding")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(gzipped)
+		return
+	}
+	w.Header().Set("Vary", "Accept-Encoding")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(content)
+	_, _ = w.Write(raw)
+}
+
+// acceptsGzip reports whether the client advertised gzip without explicitly
+// disabling it via "gzip;q=0".
+func acceptsGzip(header string) bool {
+	for _, part := range strings.Split(header, ",") {
+		fields := strings.Split(strings.TrimSpace(part), ";")
+		if !strings.EqualFold(strings.TrimSpace(fields[0]), "gzip") {
+			continue
+		}
+		for _, parameter := range fields[1:] {
+			parameter = strings.ReplaceAll(strings.TrimSpace(parameter), " ", "")
+			if strings.EqualFold(parameter, "q=0") || strings.EqualFold(parameter, "q=0.0") || strings.EqualFold(parameter, "q=0.00") {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func (s *Server) middleware(next http.Handler) http.Handler {
@@ -425,7 +499,8 @@ func constantStringEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-func clientIP(r *http.Request) string {
+// peerIP is the address of the immediate TCP peer, ignoring every header.
+func peerIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err == nil && host != "" {
 		return host
@@ -434,6 +509,100 @@ func clientIP(r *http.Request) string {
 		return remote
 	}
 	return "unknown"
+}
+
+// bucketIP normalizes an address for rate-limit keying. IPv6 clients are bucketed
+// to their /64: a single subscriber is routinely handed a whole /64 and could
+// otherwise walk it to defeat every per-IP limit.
+func bucketIP(value string) string {
+	parsed := net.ParseIP(strings.TrimSpace(value))
+	if parsed == nil {
+		return strings.TrimSpace(value)
+	}
+	if parsed.To4() != nil {
+		return parsed.String()
+	}
+	return parsed.Mask(net.CIDRMask(64, 128)).String() + "/64"
+}
+
+// clientIP resolves the address a rate limit keys on.
+//
+// X-Forwarded-For is attacker-controlled, so it is honoured ONLY when the
+// immediate peer is a configured trusted proxy. With GARUDA_TRUSTED_PROXIES
+// unset -- the default -- the header is ignored entirely and the peer address is
+// used, so a direct-to-internet deployment cannot be tricked into handing each
+// spoofed header its own bucket.
+func (s *Server) clientIP(r *http.Request) string {
+	peer := peerIP(r)
+	if len(s.trustedProxies) == 0 || !s.trustedProxy(peer) {
+		return bucketIP(peer)
+	}
+	// Every X-Forwarded-For field line must be considered, not just the first.
+	// RFC 7230 makes repeated field lines equivalent to one comma-joined value,
+	// and some proxies (HAProxy's `option forwardfor`) add their own line rather
+	// than appending to the client's. Reading only the first line would let an
+	// attacker's line outrank the one our own proxy wrote.
+	hops := strings.Split(strings.Join(r.Header.Values("X-Forwarded-For"), ","), ",")
+	// Trim from the FRONT. The rightmost entries are the ones trusted infrastructure
+	// appended; the leftmost are whatever the client sent. Dropping the tail would
+	// hand the attacker the bucket, and let them rotate junk for a fresh bucket per
+	// request -- which defeats rate limiting entirely.
+	if len(hops) > maxForwardedHops {
+		hops = hops[len(hops)-maxForwardedHops:]
+	}
+	// Walk right to left: every hop to the right of the client must itself be a
+	// trusted proxy, and the first untrusted address is the real client.
+	for index := len(hops) - 1; index >= 0; index-- {
+		candidate := normalizeForwardedHop(hops[index])
+		if candidate == "" {
+			break
+		}
+		if !s.trustedProxy(candidate) {
+			return bucketIP(candidate)
+		}
+	}
+	// Every hop was trusted, or the chain was malformed. Deliberately do not fall
+	// back to the proxy address -- that would silently put the whole internet in
+	// one bucket. A distinct sentinel keeps the failure visible.
+	return "unresolved"
+}
+
+const maxForwardedHops = 12
+
+// normalizeForwardedHop accepts the shapes proxies actually emit: a bare address,
+// an "ip:port" pair, or a bracketed IPv6 literal. It returns "" for anything that
+// is not a parseable address, which stops the right-to-left walk.
+func normalizeForwardedHop(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	value = strings.Trim(value, `"`)
+	if parsed := net.ParseIP(value); parsed != nil {
+		return parsed.String()
+	}
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		if parsed := net.ParseIP(strings.Trim(host, "[]")); parsed != nil {
+			return parsed.String()
+		}
+	}
+	if parsed := net.ParseIP(strings.Trim(value, "[]")); parsed != nil {
+		return parsed.String()
+	}
+	return ""
+}
+
+func (s *Server) trustedProxy(address string) bool {
+	parsed := net.ParseIP(strings.TrimSpace(address))
+	if parsed == nil {
+		return false
+	}
+	for _, network := range s.trustedProxies {
+		if network != nil && network.Contains(parsed) {
+			return true
+		}
+	}
+	return false
 }
 
 type fixedWindow struct {
@@ -459,7 +628,7 @@ func newFixedWindowLimiter() *fixedWindowLimiter {
 
 func (s *Server) rateLimit(bucket string, limit int, window time.Duration, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		key := clientIP(r) + "|" + bucket
+		key := s.clientIP(r) + "|" + bucket
 		now := time.Now()
 		s.limiter.mu.Lock()
 		entry, exists := s.limiter.windows[key]
@@ -598,3 +767,29 @@ func (s *Server) storageFailure(w http.ResponseWriter, r *http.Request, err erro
 }
 
 var _ = fmt.Sprintf
+
+// parseCIDRs turns GARUDA_TRUSTED_PROXIES entries into networks. A bare address
+// is accepted and treated as a single host. Unparseable entries are skipped
+// rather than failing startup, because an operator typo must not take the API
+// down -- it degrades to ignoring X-Forwarded-For, which is the safe direction.
+func parseCIDRs(values []string) []*net.IPNet {
+	networks := make([]*net.IPNet, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, network, err := net.ParseCIDR(value); err == nil {
+			networks = append(networks, network)
+			continue
+		}
+		if parsed := net.ParseIP(value); parsed != nil {
+			bits := 32
+			if parsed.To4() == nil {
+				bits = 128
+			}
+			networks = append(networks, &net.IPNet{IP: parsed, Mask: net.CIDRMask(bits, bits)})
+		}
+	}
+	return networks
+}
