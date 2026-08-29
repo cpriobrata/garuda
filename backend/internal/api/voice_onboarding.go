@@ -26,12 +26,15 @@ import (
 // Transcription is billed by the minute against one shared provider key, so every
 // limit below exists to bound what one signed-in account can spend.
 const (
-	// maxVoiceNoteBytes caps the upload before a byte of it is read. Three minutes
-	// is the longest recording the product asks for -- an owner describing their
-	// business runs one to two minutes -- and MediaRecorder encodes mono speech to
-	// webm/opus at roughly 24 to 64 kbps, so three minutes is 0.5 to 1.4 MB. Four
-	// megabytes leaves room for a browser that encodes at up to about 180 kbps while
-	// staying far below what an hour of audio would need.
+	// maxVoiceNoteSeconds is the recording length the portal is told to allow. An
+	// owner describing their business runs one to two minutes; past that they are
+	// repeating themselves and the transcript gets harder to read back.
+	maxVoiceNoteSeconds = 120
+	// maxVoiceNoteBytes caps the upload before a byte of it is read. MediaRecorder
+	// encodes mono speech to webm/opus at roughly 24 to 64 kbps, so two minutes is
+	// 0.4 to 1 MB. Four megabytes is two minutes at about 260 kbps, far above what
+	// any browser produces for speech, which leaves the limit generous for a real
+	// recording while staying nowhere near what an hour of audio would need.
 	maxVoiceNoteBytes = 4 << 20
 	// minVoiceNoteBytes rejects a body too small to hold speech in any container we
 	// accept: a webm/opus header plus a second of audio is already several kilobytes.
@@ -143,9 +146,12 @@ func (s *Server) transcribeVoiceOnboarding(w http.ResponseWriter, r *http.Reques
 	}
 	mediaType, accepted := acceptedVoiceContentType(r.Header.Get("Content-Type"))
 	if !accepted {
-		s.writeError(w, r, http.StatusUnsupportedMediaType, "unsupported_audio_type", "Send the recording as an audio body such as audio/webm", nil)
+		s.writeError(w, r, http.StatusUnsupportedMediaType, "unsupported_media_type", "Send the recording as an audio body such as audio/webm", nil)
 		return
 	}
+	// The portal also sends the length it recorded. It is not read: a number the
+	// caller chose cannot be what a bill is measured against. The length that counts
+	// is the one the provider measures, settled below.
 	// The limit goes on the body BEFORE the first read, so an oversized upload is cut
 	// off at the socket rather than buffered and measured afterwards. decodeJSON's cap
 	// cannot be reused here: audio is not JSON, and a base64 field inside a 1 MB JSON
@@ -209,11 +215,9 @@ func (s *Server) transcribeVoiceOnboarding(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	s.writeData(w, http.StatusCreated, map[string]any{
-		"transcript": map[string]any{
-			"text": text, "language": transcript.Language, "confidence": transcript.Confidence,
-			"duration_seconds": math.Round(transcript.AudioDuration.Seconds()*10) / 10,
-			"recorded_at":      now,
-		},
+		"transcript": text, "language": transcript.Language, "confidence": transcript.Confidence,
+		"duration_seconds":    math.Round(transcript.AudioDuration.Seconds()*10) / 10,
+		"recorded_at":         now,
 		"usage":               usage,
 		"follow_up_questions": voiceFollowUpQuestions,
 		"details":             voiceDetailsView(onboarding),
@@ -234,17 +238,24 @@ func (s *Server) getVoiceOnboarding(w http.ResponseWriter, r *http.Request) {
 		usedMilliseconds, _ = voiceUsageInWindow(state, identity.AccountID, time.Now().UTC())
 		return nil
 	})
-	s.writeData(w, http.StatusOK, map[string]any{
-		"available":           newVoiceTranscriber(s.cfg).Enabled(),
-		"transcript":          voiceTranscriptView(onboarding),
-		"follow_up_questions": voiceFollowUpQuestions,
-		"details":             voiceDetailsView(onboarding),
-		"usage":               voiceUsageView(usedMilliseconds),
-		"limits": map[string]any{
-			"max_bytes": maxVoiceNoteBytes, "min_bytes": minVoiceNoteBytes,
-			"accepted_content_types": acceptedVoiceContentTypeList(),
-		},
-	})
+	payload := map[string]any{
+		// enabled, max_duration_seconds and max_bytes are what the recorder reads
+		// before it offers a microphone at all: an unconfigured workspace shows the
+		// typed questions instead, and the recorder stops itself at the length and
+		// size the server will actually accept rather than failing after the fact.
+		"enabled":                newVoiceTranscriber(s.cfg).Enabled(),
+		"max_duration_seconds":   maxVoiceNoteSeconds,
+		"max_bytes":              maxVoiceNoteBytes,
+		"min_bytes":              minVoiceNoteBytes,
+		"accepted_content_types": acceptedVoiceContentTypeList(),
+		"follow_up_questions":    voiceFollowUpQuestions,
+		"details":                voiceDetailsView(onboarding),
+		"usage":                  voiceUsageView(usedMilliseconds),
+	}
+	for field, value := range voiceTranscriptView(onboarding) {
+		payload[field] = value
+	}
+	s.writeData(w, http.StatusOK, payload)
 }
 
 type saveVoiceDetailsRequest struct {
@@ -295,11 +306,14 @@ func (s *Server) saveVoiceOnboardingDetails(w http.ResponseWriter, r *http.Reque
 		s.storageFailure(w, r, err)
 		return
 	}
-	s.writeData(w, http.StatusOK, map[string]any{
+	saved := map[string]any{
 		"follow_up_questions": voiceFollowUpQuestions,
 		"details":             voiceDetailsView(result),
-		"transcript":          voiceTranscriptView(result),
-	})
+	}
+	for field, value := range voiceTranscriptView(result) {
+		saved[field] = value
+	}
+	s.writeData(w, http.StatusOK, saved)
 }
 
 // reserveVoiceTranscription checks the hourly budget and records the spend in the
@@ -464,13 +478,13 @@ func (s *Server) onboardingFor(accountID string) (model.Onboarding, bool) {
 	return result, found
 }
 
+// voiceTranscriptView is the stored transcript in the same field names the
+// transcribe response uses, so the portal reads one shape whether the owner has
+// just recorded or has come back to a refreshed page.
 func voiceTranscriptView(onboarding model.Onboarding) map[string]any {
-	text := onboarding.Answers[voiceTranscriptAnswerKey]
-	if text == "" {
-		return nil
-	}
 	return map[string]any{
-		"text": text, "language": onboarding.Answers[voiceTranscriptLanguageAnswerKey],
+		"transcript":  onboarding.Answers[voiceTranscriptAnswerKey],
+		"language":    onboarding.Answers[voiceTranscriptLanguageAnswerKey],
 		"recorded_at": onboarding.Answers[voiceTranscriptRecordedAtAnswerKey],
 	}
 }

@@ -153,6 +153,13 @@ func (s *Server) Handler() http.Handler {
 	protected("PUT /v1/onboarding", s.saveOnboarding)
 	protectedLimited("POST /v1/onboarding/messages", "onboarding.message", 120, time.Minute, s.onboardingMessage)
 	protected("POST /v1/onboarding/complete", s.completeOnboarding)
+
+	// Voice onboarding: the owner talks about their business instead of typing.
+	// Transcription is billed per minute, so the POST is capped tightly and the
+	// handler additionally enforces a per-account hourly audio budget.
+	protected("GET /v1/onboarding/voice", s.getVoiceOnboarding)
+	protectedLimited("POST /v1/onboarding/voice/transcribe", "onboarding.voice.transcribe", 12, time.Hour, s.transcribeVoiceOnboarding)
+	protected("PUT /v1/onboarding/voice/details", s.saveVoiceOnboardingDetails)
 	protected("GET /v1/jobs/{jobID}", s.getJob)
 	protected("GET /v1/agents", s.listAgents)
 	protected("POST /v1/agents", s.createAgent)
