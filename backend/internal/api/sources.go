@@ -70,7 +70,10 @@ func (s *Server) createKnowledgeSource(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if input.Text == "" {
-			s.writeError(w, r, http.StatusUnprocessableEntity, "source_fetch_not_enabled", "Provide extracted text with the URL; secure server-side URL fetching is not enabled in this MVP", nil)
+			// The text comes from POST /v1/agents/{agentID}/sources/fetch, which
+			// reads the page behind the SSRF guards in internal/fetcher and hands
+			// it back for the customer to review before it becomes knowledge.
+			s.writeError(w, r, http.StatusUnprocessableEntity, "validation_failed", "Import the page first, then save the text it returned", map[string]string{"text": "required"})
 			return
 		}
 	}

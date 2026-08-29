@@ -23,6 +23,7 @@ import (
 	"garuda/backend/internal/billing"
 	"garuda/backend/internal/composio"
 	"garuda/backend/internal/config"
+	"garuda/backend/internal/fetcher"
 	"garuda/backend/internal/googleauth"
 	"garuda/backend/internal/llm"
 	"garuda/backend/internal/mailer"
@@ -46,6 +47,7 @@ type Server struct {
 	google         googleIdentityVerifier
 	mailer         *mailer.Client
 	alerts         *alerts.Notifier
+	fetcher        *fetcher.Client
 	logger         *slog.Logger
 	limiter        *fixedWindowLimiter
 	composio       *composio.Client
@@ -106,6 +108,7 @@ func New(cfg config.Config, dataStore store.Store, logger *slog.Logger) *Server 
 		// WhatsApp is the owner's stated channel; the generic webhook keeps
 		// alerting working on a deployment whose WhatsApp credentials have not
 		// arrived yet. Neither configured means no alerts and no startup failure.
+		fetcher: fetcher.New(),
 		alerts: alerts.New(alerts.Options{
 			Service: "garuda-api (" + cfg.Environment + ")",
 			Transport: alerts.First(
@@ -205,6 +208,9 @@ func (s *Server) Handler() http.Handler {
 	protected("GET /v1/agents/{agentID}/embed", s.agentEmbed)
 	protected("GET /v1/agents/{agentID}/sources", s.listKnowledgeSources)
 	protected("POST /v1/agents/{agentID}/sources", s.createKnowledgeSource)
+	// Reading a page is a network call to an address the customer chose, so it
+	// is capped far tighter than the routes that only touch our own state.
+	protectedLimited("POST /v1/agents/{agentID}/sources/fetch", "sources.fetch", 20, time.Hour, s.fetchKnowledgeSource)
 	protected("DELETE /v1/agents/{agentID}/sources/{sourceID}", s.deleteKnowledgeSource)
 	protected("GET /v1/dashboard", s.dashboard)
 	protected("GET /v1/integrations/catalog", s.listIntegrationCatalog)
