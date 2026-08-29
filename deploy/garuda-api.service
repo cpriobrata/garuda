@@ -1,0 +1,38 @@
+[Unit]
+Description=Garuda API
+Documentation=https://github.com/cpriobrata/garuda
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=garuda
+Group=garuda
+WorkingDirectory=/opt/garuda
+ExecStart=/opt/garuda/garuda-api
+EnvironmentFile=/opt/garuda/.env
+Restart=always
+RestartSec=2
+
+# The JSON store is the whole database. It is the only path that must be writable.
+StateDirectory=garuda
+ReadWritePaths=/opt/garuda/data
+
+# The service is a plain HTTP listener behind Caddy; it needs nothing else.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

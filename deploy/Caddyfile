@@ -1,0 +1,21 @@
+# Caddy terminates TLS and proxies to the Go API on loopback.
+# Requires an A record: api.garuda.ravan.ai -> this server's public IP.
+api.garuda.ravan.ai {
+	encode gzip zstd
+
+	# The API sets its own CORS, security and cache headers. Do not duplicate them
+	# here -- two sources of Access-Control-Allow-Origin is how origins get
+	# silently widened.
+	reverse_proxy 127.0.0.1:8080 {
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+
+		# The widget streams replies. Buffering them defeats the point.
+		flush_interval -1
+	}
+
+	log {
+		output file /var/log/caddy/garuda-api.log
+		format json
+	}
+}
