@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -330,4 +331,84 @@ func TestCompleteOnboardingDoesNotAliasLiveState(t *testing.T) {
 	readers.Wait()
 	close(stop)
 	writer.Wait()
+}
+
+// Generating an agent takes seconds, so a double click or a client retry sends
+// several completes at once. All of them pass the pre-check before any writes,
+// then every loser used to answer 500 -- after each had already paid for a full
+// model generation. Completing is idempotent, so losers must get the winner's
+// agent back.
+func TestCompleteOnboardingIsIdempotentUnderConcurrency(t *testing.T) {
+	server, dataStore := newTestServer(t)
+	const accountID = "org_race"
+	identity := Identity{UserID: "usr_race", AccountID: accountID, Email: "race@example.com", Role: "owner"}
+
+	if err := dataStore.Update(func(state *model.State) error {
+		state.Accounts = append(state.Accounts, model.Account{ID: accountID, Name: "Race", BillingStatus: "active"})
+		state.Onboarding = append(state.Onboarding, model.Onboarding{
+			AccountID: accountID,
+			Answers: map[string]string{
+				"business_profile":   "Acme sells roofing in Toronto.",
+				"primary_outcome":    "qualify_leads",
+				"audience_and_offer": "Homeowners needing a new roof.",
+				"voice_and_capture":  "Friendly; collect name and email.",
+			},
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	const callers = 4
+	codes := make([]int, callers)
+	agents := make([]string, callers)
+	var waitGroup sync.WaitGroup
+	for index := 0; index < callers; index++ {
+		waitGroup.Add(1)
+		go func(slot int) {
+			defer waitGroup.Done()
+			request := httptest.NewRequest(http.MethodPost, "/v1/onboarding/complete", nil)
+			request = request.WithContext(context.WithValue(request.Context(), identityKey, identity))
+			response := httptest.NewRecorder()
+			server.completeOnboarding(response, request)
+			codes[slot] = response.Code
+			var envelope struct {
+				Data struct {
+					Agent struct {
+						ID string `json:"id"`
+					} `json:"agent"`
+				} `json:"data"`
+			}
+			_ = json.Unmarshal(response.Body.Bytes(), &envelope)
+			agents[slot] = envelope.Data.Agent.ID
+		}(index)
+	}
+	waitGroup.Wait()
+
+	for slot, code := range codes {
+		if code != http.StatusAccepted {
+			t.Errorf("caller %d returned %d, want 202", slot, code)
+		}
+		if agents[slot] == "" {
+			t.Errorf("caller %d returned no agent id", slot)
+		}
+	}
+	// Every caller must be pointed at the same agent, and only one may exist.
+	for slot := 1; slot < callers; slot++ {
+		if agents[slot] != agents[0] {
+			t.Errorf("callers disagree on the agent: %q vs %q", agents[0], agents[slot])
+		}
+	}
+	_ = dataStore.View(func(state *model.State) error {
+		count := 0
+		for _, agent := range state.Agents {
+			if agent.AccountID == accountID {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("expected exactly one generated agent, got %d", count)
+		}
+		return nil
+	})
 }

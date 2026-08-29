@@ -278,6 +278,13 @@ func onboardingFieldAnsweredBy(onboarding model.Onboarding, content string) stri
 	return ""
 }
 
+// onboardingRaceError reports that a concurrent request already generated the
+// agent, and carries the winner's id so the loser can return that instead of
+// failing. Generation takes seconds, so several clicks routinely overlap.
+type onboardingRaceError struct{ agentID string }
+
+func (e onboardingRaceError) Error() string { return "onboarding agent already generated" }
+
 func (s *Server) completeOnboarding(w http.ResponseWriter, r *http.Request) {
 	identity := identityFrom(r.Context())
 	if !s.hasEntitlement(identity.AccountID) {
@@ -325,7 +332,7 @@ func (s *Server) completeOnboarding(w http.ResponseWriter, r *http.Request) {
 		for index := range state.Onboarding {
 			if state.Onboarding[index].AccountID == identity.AccountID {
 				if state.Onboarding[index].GeneratedAgentID != "" {
-					return errors.New("already generated")
+					return onboardingRaceError{agentID: state.Onboarding[index].GeneratedAgentID}
 				}
 				state.Onboarding[index].GeneratedAgentID = agent.ID
 				state.Onboarding[index].CompletedAt = &now
@@ -336,6 +343,20 @@ func (s *Server) completeOnboarding(w http.ResponseWriter, r *http.Request) {
 		state.Jobs = append(state.Jobs, job)
 		return nil
 	})
+	var raced onboardingRaceError
+	if errors.As(err, &raced) {
+		// A concurrent request won. Answer with the agent it created rather than a
+		// 500: completing onboarding is idempotent from the caller's point of view.
+		var existing model.Agent
+		_ = s.store.View(func(state *model.State) error {
+			if winner, ok := findAgent(state, identity.AccountID, raced.agentID); ok {
+				existing = winner.Clone()
+			}
+			return nil
+		})
+		s.writeData(w, http.StatusAccepted, map[string]any{"job": map[string]any{"id": "completed_" + existing.ID, "type": "generate_agent", "status": "succeeded"}, "agent": existing})
+		return
+	}
 	if err != nil {
 		s.storageFailure(w, r, err)
 		return
