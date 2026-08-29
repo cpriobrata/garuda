@@ -117,6 +117,11 @@ func (s *FileStore) Update(fn func(*model.State) error) error {
 		return fmt.Errorf("snapshot state: %w", err)
 	}
 	if err := fn(&s.state); err != nil {
+		// The callback may have mutated state before deciding to fail. Without this
+		// restore those mutations survive in memory while disk still holds the old
+		// value, so a rejected request is silently applied and the next successful
+		// write persists it.
+		_ = json.Unmarshal(backup, &s.state)
 		return err
 	}
 	if err := s.persistLocked(); err != nil {

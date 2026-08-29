@@ -133,7 +133,10 @@ func (s *Server) Handler() http.Handler {
 	// reach a paid provider must never be unmetered: without this an account can loop
 	// requests against the shared model key.
 	protectedLimited := func(pattern, bucket string, limit int, window time.Duration, handler http.HandlerFunc) {
-		mux.Handle(pattern, s.rateLimit(bucket, limit, window, s.requireAuth(handler)))
+		// requireAuth OUTSIDE the limiter: an unauthenticated request must be rejected
+		// without consuming quota, or anyone could spend a real user's allowance from
+		// the same address without ever holding a credential.
+		mux.Handle(pattern, s.requireAuth(s.rateLimit(bucket, limit, window, handler)))
 	}
 	protected("GET /v1/me", s.me)
 	protected("POST /v1/auth/google/link", s.googleLink)
@@ -414,6 +417,12 @@ func (s *Server) authenticate(ctx context.Context, token string) (Identity, erro
 	externalUser, err := s.supabase.User(ctx, token)
 	if err != nil {
 		return Identity{}, err
+	}
+	// A blank subject must never match. Users created through local auth carry an
+	// empty ExternalAuthID, so a provider response without an id would otherwise
+	// authenticate the caller as the first such account.
+	if strings.TrimSpace(externalUser.ID) == "" {
+		return Identity{}, errors.New("authentication provider returned no subject")
 	}
 	var identity Identity
 	err = s.store.View(func(state *model.State) error {
@@ -733,6 +742,10 @@ func unixTime(value any) *time.Time {
 	return &result
 }
 
+// maxPageNumber keeps (page-1)*pageSize far below overflow while still exceeding
+// any real dataset this service holds.
+const maxPageNumber = 1 << 20
+
 func parsePage(r *http.Request) (page, pageSize int) {
 	page, _ = strconv.Atoi(r.URL.Query().Get("page"))
 	pageSize, _ = strconv.Atoi(r.URL.Query().Get("page_size"))
@@ -745,12 +758,17 @@ func parsePage(r *http.Request) (page, pageSize int) {
 	if pageSize > 100 {
 		pageSize = 100
 	}
+	if page > maxPageNumber {
+		page = maxPageNumber
+	}
 	return page, pageSize
 }
 
 func paginate[T any](items []T, page, pageSize int) []T {
 	start := (page - 1) * pageSize
-	if start >= len(items) {
+	// A huge page number overflows the multiplication to a negative value, which
+	// would slice out of range and turn a query string into a 500.
+	if start < 0 || start >= len(items) {
 		return []T{}
 	}
 	end := min(start+pageSize, len(items))
