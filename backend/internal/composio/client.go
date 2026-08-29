@@ -71,6 +71,66 @@ func New(baseURL, apiKey string) *Client {
 // integration surface has to degrade to "not available" rather than fail.
 func (c *Client) Enabled() bool { return c != nil && c.apiKey != "" && c.baseURL != "" }
 
+// ToolkitPage is one page of the catalogue. The catalogue is large -- over 1,400
+// toolkits -- so it is always paged rather than fetched whole.
+type ToolkitPage struct {
+	Items      []Toolkit `json:"items"`
+	NextCursor string    `json:"next_cursor,omitempty"`
+	TotalItems int       `json:"total_items"`
+}
+
+// Category groups the catalogue for browsing.
+type Category struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// Categories lists the catalogue groupings.
+func (c *Client) Categories(ctx context.Context) ([]Category, error) {
+	if !c.Enabled() {
+		return nil, errors.New("integrations are not configured")
+	}
+	var payload struct {
+		Items []Category `json:"items"`
+	}
+	if err := c.request(ctx, http.MethodGet, "/toolkits/categories", nil, &payload); err != nil {
+		return nil, err
+	}
+	return payload.Items, nil
+}
+
+// Browse returns one page of the catalogue, optionally filtered.
+func (c *Client) Browse(ctx context.Context, search, category, cursor string, limit int) (ToolkitPage, error) {
+	if !c.Enabled() {
+		return ToolkitPage{}, errors.New("integrations are not configured")
+	}
+	if limit < 1 || limit > 100 {
+		limit = 30
+	}
+	query := url.Values{}
+	query.Set("limit", strconv.Itoa(limit))
+	if search = strings.TrimSpace(search); search != "" {
+		if len(search) > 100 {
+			search = search[:100]
+		}
+		query.Set("search", search)
+	}
+	if category = strings.TrimSpace(category); category != "" {
+		query.Set("category", category)
+	}
+	if cursor = strings.TrimSpace(cursor); cursor != "" {
+		if len(cursor) > 200 {
+			return ToolkitPage{}, errors.New("invalid cursor")
+		}
+		query.Set("cursor", cursor)
+	}
+	var page ToolkitPage
+	if err := c.request(ctx, http.MethodGet, "/toolkits?"+query.Encode(), nil, &page); err != nil {
+		return ToolkitPage{}, err
+	}
+	return page, nil
+}
+
 // Toolkits lists what a customer can connect, optionally filtered by search term.
 func (c *Client) Toolkits(ctx context.Context, search string, limit int) ([]Toolkit, error) {
 	if !c.Enabled() {

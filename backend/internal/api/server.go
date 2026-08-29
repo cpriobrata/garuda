@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"garuda/backend/internal/billing"
+	"garuda/backend/internal/composio"
 	"garuda/backend/internal/config"
 	"garuda/backend/internal/googleauth"
 	"garuda/backend/internal/llm"
@@ -45,6 +46,7 @@ type Server struct {
 	mailer         *mailer.Client
 	logger         *slog.Logger
 	limiter        *fixedWindowLimiter
+	composio       *composio.Client
 	trustedProxies []*net.IPNet
 }
 
@@ -101,6 +103,7 @@ func New(cfg config.Config, dataStore store.Store, logger *slog.Logger) *Server 
 		mailer:         mailer.New(cfg.SendGridAPIKey, cfg.SendGridAPIURL, cfg.SendGridFromEmail, cfg.SendGridFromName, cfg.SendGridReplyTo),
 		logger:         logger,
 		limiter:        newFixedWindowLimiter(),
+		composio:       composio.New(cfg.ComposioBaseURL, cfg.ComposioAPIKey),
 		trustedProxies: parseCIDRs(cfg.TrustedProxies),
 	}
 }
@@ -162,6 +165,11 @@ func (s *Server) Handler() http.Handler {
 	protected("POST /v1/agents/{agentID}/sources", s.createKnowledgeSource)
 	protected("DELETE /v1/agents/{agentID}/sources/{sourceID}", s.deleteKnowledgeSource)
 	protected("GET /v1/dashboard", s.dashboard)
+	protected("GET /v1/integrations/catalog", s.listIntegrationCatalog)
+	protected("GET /v1/integrations/categories", s.listIntegrationCategories)
+	protected("GET /v1/integrations/connections", s.listIntegrationConnections)
+	protectedLimited("POST /v1/integrations/connections", "integrations.connect", 30, time.Minute, s.connectIntegration)
+	protected("DELETE /v1/integrations/connections/{connectionID}", s.disconnectIntegration)
 	protected("GET /v1/analytics/overview", s.analyticsOverview)
 	protected("GET /v1/leads", s.listLeads)
 	protected("GET /v1/leads/{leadID}", s.getLead)
