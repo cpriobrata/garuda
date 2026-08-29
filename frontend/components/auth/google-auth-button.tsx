@@ -101,7 +101,10 @@ export function GoogleAuthButton({ mode }: { mode: "sign-in" | "sign-up" }) {
         size: "large",
         shape: "rectangular",
         text: mode === "sign-up" ? "signup_with" : "signin_with",
-        width: Math.min(400, Math.max(260, container.clientWidth || 400)),
+        // Google renders a fixed-width iframe, so the floor has to be its own
+        // 200px minimum rather than 260 — on a narrow phone a 260px button was
+        // wider than the column holding it.
+        width: Math.min(400, Math.max(200, container.clientWidth || 400)),
         logo_alignment: "left",
       });
     } catch {
@@ -118,7 +121,7 @@ export function GoogleAuthButton({ mode }: { mode: "sign-in" | "sign-up" }) {
 
   if (linkRequest) {
     return <div className="space-y-3 rounded-xl border border-indigo-200 bg-indigo-50 p-4">
-      <div><p className="text-sm font-semibold text-indigo-950">Link your existing account</p><p className="mt-1 text-xs leading-5 text-indigo-700">Google matches <span className="font-semibold">{linkRequest.email}</span>. Confirm your existing Garuda password once to link it securely.</p></div>
+      <div><p className="text-sm font-semibold text-indigo-950">Link your existing account</p><p className="mt-1 break-words text-xs leading-5 text-indigo-700">Google matches <span className="font-semibold">{linkRequest.email}</span>. Confirm your existing Garuda password once to link it securely.</p></div>
       <div className="space-y-1.5"><Label htmlFor={`google-link-password-${mode}`}>Garuda password</Label><Input id={`google-link-password-${mode}`} type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void linkExistingAccount(); } }} required /></div>
       {error && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
       <Button type="button" className="w-full" disabled={working || !password} onClick={() => void linkExistingAccount()}>{working ? "Linking account..." : "Sign in and link Google"}</Button>

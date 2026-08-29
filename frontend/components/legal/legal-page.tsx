@@ -78,7 +78,9 @@ export function LegalPage({ eyebrow, title, intro, lastUpdated, breadcrumb, cont
               </Link>
             ))}
           </nav>
-          <Button size="sm" asChild>
+          {/* The one header CTA on a phone, so it gets a 44px target there and
+              keeps the compact desktop size from sm up. */}
+          <Button size="sm" className="h-11 px-4 text-sm sm:h-8 sm:px-3 sm:text-xs" asChild>
             <Link href="/auth/sign-up">Start building</Link>
           </Button>
         </div>

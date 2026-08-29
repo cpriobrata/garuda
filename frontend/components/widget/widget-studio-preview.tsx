@@ -66,7 +66,7 @@ export function WidgetStudioPreview({ draft, presets, agentName }: { draft: Stud
 
         <div className={cn("absolute flex flex-col gap-2.5", anchor)}>
           <div
-            className={cn("w-[228px] overflow-hidden rounded-2xl border shadow-[0_20px_60px_rgba(15,23,42,.18)]", draft.toggles.is_transparent && "backdrop-blur")}
+            className={cn("w-[228px] max-w-full overflow-hidden rounded-2xl border shadow-[0_20px_60px_rgba(15,23,42,.18)]", draft.toggles.is_transparent && "backdrop-blur")}
             style={{ backgroundColor: draft.toggles.is_transparent ? `${colors.background}D9` : colors.background, borderColor: `${colors.text}1A` }}
           >
             <div className="flex items-center gap-2 px-3 py-2.5" style={{ backgroundColor: colors.primary, color: colors.on_primary }}>

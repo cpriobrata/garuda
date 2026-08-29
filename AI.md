@@ -2,9 +2,9 @@
 
 Working notes for an AI assistant picking up this project. Read this first.
 
-**Updated:** 2026-08-30. Three build workflows were running when this was written, so
-files under `frontend/`, `backend/internal/api/` and `widget/` may be mid-change.
-Architecture and deployment facts below are stable.
+**Updated:** 2026-08-30, late. Several build agents were running when this was
+written, so files under `frontend/` may be mid-change. Everything below is
+verified against the code or against production.
 
 **No secrets here.** Values live in `backend/.env` and `frontend/.env.local`, both
 gitignored. Only variable names and public identifiers appear below.
@@ -123,6 +123,55 @@ per-provider integration code.
 
 ---
 
+## 6b. Human handoff over WhatsApp — built 2026-08-30
+
+When the model runs out, the visitor is handed to the site owner on WhatsApp.
+
+- Config lives on the agent: `model.HandoffConfig` (number, label, pre-typed
+  message, availability, trigger phrases, auto-offer-after-N, notify email).
+- **The number never appears in the widget bootstrap.** That payload is public,
+  served to every allowed origin. The widget is told only that a handoff exists;
+  `POST /widget/v1/sessions/{id}/handoff` builds the wa.me link after checking
+  the session token. `TestPublicAgentNeverCarriesTheOwnersNumber` enforces it.
+- The link pre-types a message and appends the page URL. **The visitor presses
+  send** — nothing is messaged on their behalf.
+- Recorded once per conversation as a `role: system` message with
+  `metadata.event = handoff`, so the inbox can tell a bored visitor from one now
+  waiting on WhatsApp. `publicWidgetHistory` filters system rows, so it never
+  reaches the visitor or the model.
+- Numbers are stored as E.164 digits. A leading zero is rejected: wa.me accepts
+  the link and then silently fails to open a chat.
+
+## 6c. Team replies — built 2026-08-30
+
+`POST /v1/conversations/{sessionID}/messages` (owner) and
+`GET /widget/v1/sessions/{sessionID}/messages?after={id}` (visitor poll).
+
+- The reply is stored with role `assistant` and `metadata.author = operator`, so
+  the widget renders it unchanged and the model reads it as its own prior turn.
+- The poll cursor is a **message id, not a timestamp**. Two messages written in
+  the same millisecond are indistinguishable by time.
+- The widget polls every 12s only while the panel is open, and stops on
+  `visibilitychange`. An open panel used to hold the interval forever — the
+  Node test runner hanging is what surfaced it.
+
+## 6d. Alerting — built 2026-08-30
+
+`internal/alerts` pages the owner on WhatsApp when the service itself fails.
+
+- **Only panics and 5xx.** A 404/401/422 is the service working correctly.
+- Deduplicated by fingerprint (kind|where|status) with a 15-minute cooldown and
+  a suppressed count; hard capped at 12/hour with the last slot reserved for a
+  message saying it has gone quiet.
+- Alerts carry a route with ids stripped (`safeRoute`), a status, an error class
+  and a request id. Never a prompt, transcript, email or token.
+- WhatsApp Cloud API needs an **approved template** to reach a phone outside the
+  24-hour service window, which is when alerts actually fire. Set
+  `ALERT_WHATSAPP_TEMPLATE`. Without it, alerts only arrive inside the window.
+- Credentials absent → `Enabled()` false → the service runs exactly as before.
+
+---
+
 ## 7. Providers
 
 | | State |
@@ -171,6 +220,7 @@ on Linux instead.
 - The Composio API key has no IP restriction
 - Designed but unbuilt: Postgres repository, jobs worker, file upload with vision,
   visitor memory, admin panel, widget design system
+- Alerting and Meta conversion tracking are built but have no credentials yet
 
 ---
 

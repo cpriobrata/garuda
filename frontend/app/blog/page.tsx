@@ -101,7 +101,7 @@ export default function BlogIndexPage() {
                 Garuda builds a knowledge-grounded chat agent for your website from a short conversation
                 about your business. You edit it, test it, and publish it when you are happy.
               </p>
-              <Button size="lg" className="mt-7 bg-white text-slate-950 hover:bg-slate-100" asChild>
+              <Button size="lg" className="mt-7 w-full bg-white text-slate-950 hover:bg-slate-100 sm:w-auto" asChild>
                 <Link href="/auth/sign-up">
                   Create my Garuda agent
                   <ArrowRight aria-hidden="true" className="ml-2 h-4 w-4" />

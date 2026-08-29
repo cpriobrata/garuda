@@ -68,7 +68,7 @@ export function SignUpForm() {
         <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-5">
           <div className="flex items-start gap-3">
             <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-emerald-600 text-white"><MailCheck className="h-5 w-5" /></span>
-            <div><p className="text-sm font-semibold text-emerald-950">Verify your email</p><p className="mt-1 text-xs leading-5 text-emerald-800">We sent a secure verification link to <span className="font-semibold">{pendingEmail}</span>. Open it to continue to your plan.</p></div>
+            <div><p className="text-sm font-semibold text-emerald-950">Verify your email</p><p className="mt-1 break-words text-xs leading-5 text-emerald-800">We sent a secure verification link to <span className="font-semibold">{pendingEmail}</span>. Open it to continue to your plan.</p></div>
           </div>
         </div>
         {resendMessage && <p role="status" className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs text-indigo-700">{resendMessage}</p>}

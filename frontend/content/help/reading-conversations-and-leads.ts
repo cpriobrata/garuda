@@ -5,9 +5,9 @@ export const article: HelpArticle = {
   category: "operating",
   title: "Reading conversations and leads",
   description:
-    "Conversations holds every stored transcript with its page metadata; Leads holds the contacts captured with consent. Both screens are read-only in this release.",
+    "Conversations holds every stored transcript with its page metadata; Leads holds the contacts captured with consent. Both screens are read-only: you cannot type a reply into a visitor's chat from here.",
   answer:
-    "Conversations shows every stored transcript with the page it happened on; Leads shows the contacts captured with consent. Both are read-only today, so you read them and act elsewhere.",
+    "Conversations shows every stored transcript with the page it happened on; Leads shows the contacts captured with consent. Both are read-only, so you read them here and reach people elsewhere.",
   updated: "2026-08-30",
   keywords: [
     "conversation inbox",
@@ -15,6 +15,7 @@ export const article: HelpArticle = {
     "leads table",
     "lead details",
     "chat history",
+    "reply to a visitor",
   ],
   intro: [
     {
@@ -88,6 +89,16 @@ export const article: HelpArticle = {
           ],
         },
         {
+          kind: "p",
+          text: [
+            "A message badged ",
+            { kind: "strong", text: "Team" },
+            " is one Garuda recorded rather than one either side typed. The one you will actually see is ",
+            { kind: "strong", text: "The visitor asked to continue with a person on WhatsApp" },
+            ", written once when somebody used the handoff button, so a thread that moved to WhatsApp does not look like a visitor who simply stopped replying.",
+          ],
+        },
+        {
           kind: "note",
           tone: "tip",
           title: "Conversations can be linked to directly",
@@ -134,8 +145,20 @@ export const article: HelpArticle = {
             " and ",
             {
               kind: "link",
-              text: "Connecting an integration",
-              href: "/help/connecting-an-integration",
+              text: "Sending leads to your CRM with a webhook",
+              href: "/help/sending-leads-to-your-crm-with-a-webhook",
+            },
+            ".",
+          ],
+        },
+        {
+          kind: "p",
+          text: [
+            "To reach somebody while they are still on the site, the route is the WhatsApp handoff rather than this screen. Switch it on in the agent's Handoff rules and visitors get a button that opens a WhatsApp chat with you: see ",
+            {
+              kind: "link",
+              text: "Handing a conversation to a person on WhatsApp",
+              href: "/help/handing-a-conversation-to-a-person-on-whatsapp",
             },
             ".",
           ],
@@ -146,10 +169,20 @@ export const article: HelpArticle = {
   after: [
     {
       kind: "note",
-      tone: "caution",
-      title: "Both screens are read-only",
+      tone: "tip",
+      title: "You can answer a visitor yourself",
       body: [
-        "Conversations shows a Read-only badge and the reply box is replaced by a note saying team replies are coming soon, with the button disabled. The Leads table is badged Read-only too: you can add a lead by hand and export the table, but you cannot edit or re-status a lead from the portal in this release.",
+        "Type into the reply box under the transcript and press Enter, or Shift and Enter for a new line. Your answer appears in the visitor’s widget within about twelve seconds, in the same conversation, provided their chat panel is still open — the widget checks for new messages while it is open and stops while the tab is hidden. If they have closed the panel, they will see your reply the next time they open it.",
+        "Your replies are marked Team in the transcript so you can tell them apart from the agent’s own answers. The agent reads them as part of the conversation, so it will not contradict what you just said. A reply is capped at 4,000 characters.",
+        "If the visitor has already left the page, the WhatsApp handoff is the way to reach them instead.",
+      ],
+    },
+    {
+      kind: "note",
+      tone: "caution",
+      title: "Leads is read-only too",
+      body: [
+        "The Leads table carries the same badge. You can add a lead by hand and export the table, but you cannot edit or re-status an existing lead from the portal.",
       ],
     },
     {
@@ -217,5 +250,9 @@ export const article: HelpArticle = {
       ],
     },
   ],
-  related: ["exporting-your-leads", "pausing-or-unpublishing-an-agent", "setting-up-lead-capture-and-consent"],
+  related: [
+    "handing-a-conversation-to-a-person-on-whatsapp",
+    "exporting-your-leads",
+    "pausing-or-unpublishing-an-agent",
+  ],
 };

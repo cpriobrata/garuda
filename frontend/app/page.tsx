@@ -600,7 +600,7 @@ export default function LandingPage() {
                 <p className="mx-auto mt-5 max-w-xl text-base leading-7 text-slate-300">
                   Nothing appears on your website until you publish it, and the whole plan is USD $17 a month.
                 </p>
-                <Button size="lg" className="mt-8 bg-white text-slate-950 hover:bg-slate-100" asChild>
+                <Button size="lg" className="mt-8 w-full bg-white text-slate-950 hover:bg-slate-100 sm:w-auto" asChild>
                   <Link href={CTA_HREF}>
                     {CTA_LABEL} <ArrowRight className="ml-2 h-4 w-4" aria-hidden="true" />
                   </Link>

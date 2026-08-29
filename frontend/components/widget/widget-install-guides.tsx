@@ -70,8 +70,8 @@ export function SnippetBlock({ code, blocked, blockedLabel }: { code: string; bl
   const copy = useCopyText();
   return (
     <div>
-      <div className="relative overflow-hidden rounded-xl bg-slate-950 p-4">
-        <pre className="overflow-x-auto whitespace-pre-wrap font-mono text-[11px] leading-6 text-slate-300"><code>{code}</code></pre>
+      <div className="relative overflow-hidden rounded-xl bg-slate-950 p-4 pt-12 sm:pt-4">
+        <pre className="overflow-x-auto whitespace-pre-wrap break-all font-mono text-[11px] leading-6 text-slate-300"><code>{code}</code></pre>
         <Button size="sm" variant="secondary" className="absolute right-3 top-3 h-7 bg-white/10 text-[10px] text-white hover:bg-white/20" disabled={blocked} loading={copy.busy} loadingLabel="Copying the snippet" onClick={() => void copy.copy(code)}>
           {copy.state === "copied" ? <Check className="mr-1.5 h-3.5 w-3.5" /> : <Copy className="mr-1.5 h-3.5 w-3.5" />}
           {blocked ? blockedLabel || "Not ready" : copy.state === "copied" ? "Copied" : "Copy"}
@@ -219,7 +219,7 @@ function GuideBody({ guide, embedCode, published, domains }: { guide: PlatformGu
       </DialogHeader>
       <div className={cn("rounded-xl border p-3 text-[10px] leading-5", ready ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-800")}>
         <p className="font-semibold">{ready ? "This agent is ready to install" : "Two things have to be true first"}</p>
-        <ul className="mt-1 list-disc space-y-0.5 pl-4">
+        <ul className="mt-1 list-disc space-y-0.5 break-words pl-4">
           <li>{published ? "The agent is published, so its snippet serves a live widget." : "Publish the agent. Until then its snippet has nothing to load."}</li>
           <li>{domains.length ? `Approved domains: ${domains.join(", ")}. Install it on one of those; the widget refuses every other origin.` : "Add the site's domain to the agent's allowed domains in its Appearance settings, or the widget will refuse to load there."}</li>
         </ul>

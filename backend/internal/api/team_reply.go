@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"garuda/backend/internal/model"
 )
@@ -26,6 +27,9 @@ import (
 // last message it holds, and only while its panel is open.
 
 const (
+	// Counted in RUNES, not bytes. Go's len() on a string is a byte count, and a
+	// 4,000-byte cap is barely 1,300 characters of Hindi or Chinese -- it would
+	// reject an ordinary reply in most of the languages this product serves.
 	maxTeamReplyLength = 4000
 	// widgetPollLimit bounds one poll response. A visitor who left a tab open
 	// overnight comes back to the tail of the conversation, not to a payload
@@ -45,7 +49,7 @@ func (s *Server) postTeamReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	content := strings.TrimSpace(input.Content)
-	if content == "" || len(content) > maxTeamReplyLength {
+	if content == "" || utf8.RuneCountInString(content) > maxTeamReplyLength {
 		s.writeError(w, r, http.StatusUnprocessableEntity, "validation_failed", "A reply must contain between 1 and 4,000 characters", map[string]string{
 			"content": "must contain between 1 and 4,000 characters",
 		})

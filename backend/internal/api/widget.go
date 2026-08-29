@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"garuda/backend/internal/config"
 	"garuda/backend/internal/llm"
@@ -159,7 +160,11 @@ func (s *Server) widgetMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.Content = strings.TrimSpace(input.Content)
-	if input.Content == "" || len(input.Content) > 4_000 {
+	// Runes, not bytes: len() on a string counts bytes, so a byte cap silently
+	// halves or thirds the message a visitor may send in any language that is not
+	// mostly ASCII. The widget textarea caps at 4,000 characters, so a byte check
+	// here rejects text the visitor was allowed to type.
+	if input.Content == "" || utf8.RuneCountInString(input.Content) > 4_000 {
 		s.writeError(w, r, http.StatusUnprocessableEntity, "validation_failed", "Message must contain 1 to 4,000 characters", nil)
 		return
 	}
@@ -380,6 +385,15 @@ const (
 	widgetLeadCustomFieldLimit      = 20
 	widgetLeadCustomFieldKeyLimit   = 64
 	widgetLeadCustomFieldValueLimit = 500
+	// capture_id and notice_version are copied straight into the stored lead, and
+	// were bounded only by the 1MB body cap. That was enough for one anonymous
+	// visitor to add 800KB of permanent state per accepted request and, in a few
+	// minutes of ordinary rate-limited traffic, push the data file past the 64MiB
+	// the store can read back -- at which point the API cannot boot at all and
+	// systemd restarts it forever. Both are opaque client identifiers; a UUID is
+	// 36 characters and a version string is shorter still.
+	widgetCaptureIDLimit     = 128
+	widgetNoticeVersionLimit = 64
 )
 
 // The widget deployed today posts contact details inside a "fields" object and
@@ -478,6 +492,17 @@ func (s *Server) widgetLead(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, http.StatusUnprocessableEntity, "validation_failed", "Custom lead fields are too long", nil)
 			return
 		}
+	}
+	// Everything below reaches the persisted lead. Nothing a visitor controls may
+	// enter the state file without a bound: the file is rewritten in full on every
+	// write and read back through a fixed-size limit at boot.
+	if len(input.ClientCaptureID) > widgetCaptureIDLimit || (input.ClientCaptureID != "" && !safeClientMessageID(input.ClientCaptureID)) {
+		s.writeError(w, r, http.StatusUnprocessableEntity, "validation_failed", "The capture id is not valid", map[string]string{"client_capture_id": "invalid"})
+		return
+	}
+	if len(input.Consent.NoticeVersion) > widgetNoticeVersionLimit {
+		s.writeError(w, r, http.StatusUnprocessableEntity, "validation_failed", "The consent notice version is too long", map[string]string{"consent.notice_version": "too long"})
+		return
 	}
 	now := time.Now().UTC()
 	metadata := map[string]string{"consent": "granted", "notice_version": input.Consent.NoticeVersion, "capture_id": input.ClientCaptureID}

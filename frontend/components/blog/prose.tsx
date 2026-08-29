@@ -8,7 +8,9 @@ function InlineRun({ run }: { run: Inline }) {
   if (run.kind === "em") return <em className="italic">{run.text}</em>;
   if (run.kind === "code") {
     return (
-      <code className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[.85em] text-slate-800">
+      // Inline code is often an unbroken identifier or path; without a break it
+      // would widen the article past a narrow viewport.
+      <code className="break-words rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[.85em] text-slate-800">
         {run.text}
       </code>
     );

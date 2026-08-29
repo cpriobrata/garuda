@@ -77,7 +77,7 @@ export function WidgetSettings() {
               <div className="mt-5"><SnippetBlock code={embedCode} blocked={!published} blockedLabel="Publish first" /></div>
               {loadingEmbed ? <p className="mt-3 flex items-center gap-1.5 text-[10px] text-slate-500"><Loader2 className="h-3 w-3 animate-spin" /> Checking this workspace for a published agent…</p> : null}
               {loadFailed ? (
-                <div className="mt-3 flex items-center gap-2 rounded-lg bg-red-50 p-3 text-[10px] text-red-700">
+                <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg bg-red-50 p-3 text-[10px] text-red-700">
                   <AlertCircle className="h-3.5 w-3.5 shrink-0" />
                   <span>The embed code could not be loaded.</span>
                   <AsyncButton size="sm" variant="outline" className="ml-auto h-7 border-red-200 bg-white text-[10px] text-red-700" pendingLabel="Retrying…" onClick={loadEmbed}>Try again</AsyncButton>
@@ -87,7 +87,7 @@ export function WidgetSettings() {
             </section>
 
             <section className="rounded-xl border bg-white p-5 shadow-sm sm:p-6">
-              <div className="flex items-center justify-between"><div><h2 className="text-sm font-semibold text-slate-900">Publishing & domain access</h2><p className="mt-1 text-xs text-slate-500">Only approved domains may start widget sessions</p></div><Badge variant={published ? "success" : "warning"}>{published ? "Agent published" : "Publish first"}</Badge></div>
+              <div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><h2 className="text-sm font-semibold text-slate-900">Publishing & domain access</h2><p className="mt-1 text-xs text-slate-500">Only approved domains may start widget sessions</p></div><Badge variant={published ? "success" : "warning"}>{published ? "Agent published" : "Publish first"}</Badge></div>
               <div className="mt-5 divide-y rounded-xl border">{domains.length ? domains.map((domain) => <DomainRow key={domain} domain={domain} />) : <div className="p-4 text-xs text-slate-500">No allowed domain is configured. Add one in the agent’s Appearance settings before publishing.</div>}</div>
             </section>
 

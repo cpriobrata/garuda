@@ -17,7 +17,10 @@ function InlineRun({ run }: { run: Inline }) {
   if (run.kind === "strong") return <strong className="font-semibold text-slate-900">{run.text}</strong>;
   if (run.kind === "code") {
     return (
-      <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[.85em] text-slate-800">{run.text}</code>
+      // Inline code carries file names and header names with no spaces in them
+      // (garuda-leads-qualified-2026-08-30.csv is wider than a 320px column),
+      // so it has to be allowed to break rather than push the page sideways.
+      <code className="break-words rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[.85em] text-slate-800">{run.text}</code>
     );
   }
   // An in-app path or an external address is written as a plain anchor; an

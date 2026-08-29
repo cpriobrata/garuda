@@ -163,12 +163,12 @@ export function WidgetStudio({ agentId }: { agentId: string }) {
 
   return (
     <div className="space-y-5">
-      <div className="sticky top-0 z-20 -mx-1 flex flex-wrap items-center gap-3 rounded-xl border bg-white/90 px-4 py-3 shadow-sm backdrop-blur">
+      <div className="sticky top-16 z-20 -mx-1 flex flex-wrap items-center gap-3 rounded-xl border bg-white/90 px-4 py-3 shadow-sm backdrop-blur">
         <div className="min-w-0">
           <p className="truncate text-xs font-semibold text-slate-900">{record.name}</p>
           <p className="mt-0.5 text-[10px] text-slate-500">Revision {record.revision}{record.status === "published" ? " · published" : " · draft"}</p>
         </div>
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
           {state === "saved" && !dirty ? <span className="flex items-center gap-1 text-[11px] font-semibold text-emerald-600"><Check className="h-3.5 w-3.5" /> Saved</span> : null}
           {dirty ? <Badge variant="warning">Unsaved changes</Badge> : null}
           <Button
@@ -223,12 +223,12 @@ export function WidgetStudio({ agentId }: { agentId: string }) {
           <TogglesSection draft={draft} messages={messages} onToggle={toggleSwitch} />
           <LeadFormBuilder draft={draft} fieldTypes={record.lead_form_field_types} reservedIDs={record.reserved_lead_field_ids} messages={messages} onChange={changeDraft} />
         </div>
-        <aside className="xl:sticky xl:top-20 h-fit overflow-hidden rounded-xl border bg-white shadow-sm">
+        <aside className="h-fit overflow-hidden rounded-xl border bg-white shadow-sm xl:sticky xl:top-[7.5rem]">
           <WidgetStudioPreview draft={draft} presets={record.theme_presets} agentName={record.name} />
         </aside>
       </div>
 
-      <div className="flex items-center justify-end gap-2 rounded-xl border bg-white p-4 shadow-sm">
+      <div className="flex flex-wrap items-center justify-end gap-2 rounded-xl border bg-white p-4 shadow-sm">
         {dirty ? <p className="mr-auto text-[11px] text-slate-500">These changes are not saved yet.</p> : <p className="mr-auto text-[11px] text-slate-500">Everything here is saved.</p>}
         <AsyncButton
           icon={<Save className="mr-2 h-4 w-4" />}

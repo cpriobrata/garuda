@@ -57,7 +57,7 @@ export function SiteNav() {
         <Button
           variant="ghost"
           size="icon"
-          className="lg:hidden"
+          className="h-11 w-11 lg:hidden"
           onClick={() => setOpen(!open)}
           aria-label={open ? "Close navigation" : "Open navigation"}
           aria-expanded={open}
@@ -73,12 +73,15 @@ export function SiteNav() {
               key={link.href}
               href={link.href}
               onClick={() => setOpen(false)}
-              className="rounded-lg px-3 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
+              className="rounded-lg px-3 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
             >
               {link.label}
             </Link>
           ))}
-          <div className="mt-3 grid grid-cols-2 gap-2 border-t pt-4">
+          {/* One column below sm: a Button is whitespace-nowrap, and "Create your
+              agent" needs ~156px, which two columns cannot give on a 320–375px
+              screen without pushing the whole page into horizontal scroll. */}
+          <div className="mt-3 grid grid-cols-1 gap-2 border-t pt-4 sm:grid-cols-2">
             <Button variant="outline" asChild>
               <Link href="/auth/sign-in" onClick={() => setOpen(false)}>
                 Sign in

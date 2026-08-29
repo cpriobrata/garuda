@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
+  Blocks,
   Bot,
   ChevronDown,
   CircleHelp,
@@ -37,6 +38,7 @@ const nav = [
   { label: "Conversations", href: "/app/conversations", icon: MessageSquareText },
   { label: "Leads", href: "/app/leads", icon: UsersRound },
   { label: "Widget", href: "/app/widget", icon: Inbox },
+  { label: "Integrations", href: "/app/integrations", icon: Blocks },
 ];
 
 const lowerNav = [

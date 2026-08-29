@@ -192,5 +192,9 @@ export const article: HelpArticle = {
       ],
     },
   ],
-  related: ["reading-conversations-and-leads", "connecting-an-integration", "building-a-custom-lead-form"],
+  related: [
+    "reading-conversations-and-leads",
+    "sending-leads-to-your-crm-with-a-webhook",
+    "building-a-custom-lead-form",
+  ],
 };

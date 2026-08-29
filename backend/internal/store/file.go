@@ -34,6 +34,11 @@ type FileStore struct {
 	state model.State
 }
 
+// maxDataFileBytes bounds what is read back at boot. Everything the product
+// stores lives in this one file, so the limit is also, in effect, the product
+// limit -- see the size check in OpenFile for why it is enforced twice.
+const maxDataFileBytes = 64 << 20
+
 func OpenFile(path string) (*FileStore, error) {
 	if path == "" {
 		return nil, errors.New("data file path is required")
@@ -52,7 +57,18 @@ func OpenFile(path string) (*FileStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open data file: %w", err)
 	}
-	decoder := json.NewDecoder(io.LimitReader(file, 64<<20))
+	// The read limit exists so a corrupt or hostile file cannot exhaust memory at
+	// boot. On its own it is a trap: a file one byte past the limit is silently
+	// truncated mid-JSON, the decode fails with "unexpected EOF", main exits 1,
+	// and systemd -- configured for unlimited restarts so the service never stays
+	// down -- loops forever on a failure no restart can fix. The size is checked
+	// first so an oversized store is an operator-readable error naming the actual
+	// size and the actual limit, rather than a crash loop that reads like corruption.
+	if info, statErr := file.Stat(); statErr == nil && info.Size() > maxDataFileBytes {
+		_ = file.Close()
+		return nil, fmt.Errorf("data file is %d bytes, larger than the %d this build can read: restore a smaller backup or raise the limit", info.Size(), int64(maxDataFileBytes))
+	}
+	decoder := json.NewDecoder(io.LimitReader(file, maxDataFileBytes))
 	decodeErr := decoder.Decode(&store.state)
 	// Close before any rename. persistLocked below replaces this exact path, and
 	// Windows refuses os.Rename over a handle that is still open -- a deferred
@@ -117,18 +133,44 @@ func (s *FileStore) Update(fn func(*model.State) error) error {
 		return fmt.Errorf("snapshot state: %w", err)
 	}
 	if err := fn(&s.state); err != nil {
-		// The callback may have mutated state before deciding to fail. Without this
+		// The callback may have mutated state before deciding to fail. Without a
 		// restore those mutations survive in memory while disk still holds the old
 		// value, so a rejected request is silently applied and the next successful
 		// write persists it.
-		_ = json.Unmarshal(backup, &s.state)
+		s.restore(backup)
 		return err
 	}
 	if err := s.persistLocked(); err != nil {
-		_ = json.Unmarshal(backup, &s.state)
+		s.restore(backup)
 		return err
 	}
 	return nil
+}
+
+// restore puts the snapshot back. It decodes into a FRESH State and assigns,
+// which looks like a pointless extra allocation and is not.
+//
+// encoding/json MERGES into an existing value rather than replacing it: a struct
+// field whose key is absent from the JSON is left exactly as it was, and slice
+// elements are decoded field by field on top of whatever is already there. Every
+// field in model.go carrying omitempty disappears from the snapshot when it is
+// empty -- so decoding onto the live, already-mutated state restored nothing at
+// all for precisely those fields. A rejected 422 kept the allowed_domains and the
+// lead form it had just written, and on a published agent that reached the
+// customer widget: a save the server had refused was live on their website.
+//
+// Decoding into a zero State and assigning cannot merge with anything, because
+// there is nothing to merge with.
+func (s *FileStore) restore(backup []byte) {
+	var restored model.State
+	if err := json.Unmarshal(backup, &restored); err != nil {
+		// The snapshot came from json.Marshal of this same type moments ago, so a
+		// failure here is not recoverable by retrying. Keeping the mutated state is
+		// still wrong, but discarding it for a zero State would drop every account
+		// in the process, which is worse.
+		return
+	}
+	s.state = restored
 }
 
 func (s *FileStore) persistLocked() error {

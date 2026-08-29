@@ -5,9 +5,9 @@ export const article: HelpArticle = {
   category: "getting-started",
   title: "Installing the widget on your website",
   description:
-    "Copy the one-line script from Widget, Install and paste it before the closing body tag on every page that should show the chat. The snippet only appears once the agent is published.",
+    "Copy the one-line script from Widget, Install and paste it before the closing body tag on every page that should show the chat. Step-by-step guides for Webflow, WordPress, Shopify and Framer are on the same tab.",
   answer:
-    "Publish the agent, copy the script tag from Widget, Install, and paste it immediately before the closing body tag of every page you want the chat to appear on.",
+    "Publish the agent, copy the script tag from Widget, Install, and paste it immediately before the closing body tag of every page you want the chat to appear on — or open the guide for your website builder, which carries the same snippet.",
   updated: "2026-08-30",
   keywords: [
     "install chat widget",
@@ -15,6 +15,7 @@ export const article: HelpArticle = {
     "script tag",
     "add chatbot to website",
     "data-agent-key",
+    "webflow wordpress shopify framer",
   ],
   intro: [
     {
@@ -47,6 +48,12 @@ export const article: HelpArticle = {
             "The page opens on the ",
             { kind: "strong", text: "Install" },
             " tab. Garuda looks for a live agent in your workspace and shows its snippet; if none is live it falls back to the first agent in the list.",
+          ],
+        },
+        {
+          kind: "p",
+          text: [
+            "Everything you need is on that one tab: the snippet, the domains the agent is allowed to run on, a guide for each of the popular website builders, a panel for handing the job to somebody else, and a checklist of what is still outstanding.",
           ],
         },
       ],
@@ -91,6 +98,44 @@ export const article: HelpArticle = {
           title: "Once per page, not once per site section",
           body: [
             "If the same snippet ends up on the page twice, Garuda still mounts one widget: it records what is already mounted on the page itself, which also keeps single-page applications from stacking a new launcher on every navigation.",
+          ],
+        },
+      ],
+    },
+    {
+      title: "Or open the guide for your website builder",
+      body: [
+        {
+          kind: "p",
+          text: [
+            "Under ",
+            { kind: "strong", text: "Platform guides" },
+            " there is a tile for Webflow, WordPress, Shopify, Framer and one for any hand-written site or framework. Choosing one opens a dialog with your own snippet at the top and numbered steps beneath it, naming the site-wide custom-code or footer field to paste into rather than a menu path that moves between releases.",
+          ],
+        },
+        {
+          kind: "p",
+          text: [
+            "Each guide also states the awkward part of that platform: Webflow and Framer run site-wide custom code only on paid plans and only on the published site, never in the canvas or preview; WordPress.com allows custom scripts only on its higher plans; and Shopify's theme code does not run on checkout pages, so the launcher appears across the storefront but not during checkout.",
+          ],
+        },
+      ],
+    },
+    {
+      title: "Check the site's domain is approved",
+      body: [
+        {
+          kind: "p",
+          text: [
+            "The widget starts only on domains the agent allows, and refuses every other origin — so the snippet on an unapproved domain does nothing at all. ",
+            { kind: "strong", text: "Publishing & domain access" },
+            " on the same tab lists the approved domains; it is a display, and the editable field is in the agent editor under Appearance. See ",
+            {
+              kind: "link",
+              text: "Approving the domains your agent may run on",
+              href: "/help/approving-the-domains-your-agent-may-run-on",
+            },
+            ".",
           ],
         },
       ],
@@ -162,10 +207,24 @@ export const article: HelpArticle = {
     },
     {
       kind: "note",
-      tone: "caution",
-      title: "Platform guides and email sharing are not built",
+      tone: "tip",
+      title: "Handing the job to whoever manages the site",
       body: [
-        "The Webflow, WordPress, Shopify and Framer tiles on the Install tab are disabled and marked Coming soon, and so is the button for emailing the snippet to a developer. Copy the snippet and send it yourself.",
+        "The panel headed ",
+        { kind: "strong", text: "Need a teammate to install it?" },
+        " has two buttons that hand over the same note. ",
+        { kind: "strong", text: "Email the install steps" },
+        " opens your own mail client with it already written, for you to address and send; ",
+        { kind: "strong", text: "Copy install instructions" },
+        " puts the identical text on the clipboard. The note carries your snippet, that it belongs in the shared layout rather than on one page, that it loads asynchronously, the domains this agent is allowed to run on, and the reminder to republish the site afterwards. Both are inactive until the agent is published, because until then there is no live snippet to hand over.",
+      ],
+    },
+    {
+      kind: "note",
+      tone: "note",
+      title: "If a copy button reports it was blocked",
+      body: [
+        "Copying needs a secure origin and the browser's permission. Where it is refused, the text you were copying appears in a box below the button, selected, so you can copy it by hand rather than being told it worked when it did not.",
       ],
     },
   ],

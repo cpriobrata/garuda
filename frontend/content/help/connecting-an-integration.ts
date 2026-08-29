@@ -5,193 +5,126 @@ export const article: HelpArticle = {
   category: "configuring",
   title: "Connecting an integration such as Google Calendar or a CRM",
   description:
-    "Today the working route is a signed outbound webhook from the Integrations screen into Zapier, Make, n8n or your CRM. The in-portal account catalogue is not built yet.",
+    "Integrations in the workspace sidebar holds a searchable catalogue of third-party apps. Choose one, sign in with the provider in its own tab, and the connection belongs to your workspace.",
   answer:
-    "Register a signed webhook endpoint at /app/integrations and point it at your CRM or an automation tool such as Zapier, Make, n8n or Pipedream. There is no in-portal catalogue for connecting a Google or CRM account yet.",
+    "Open Integrations in the sidebar, search the catalogue for the app you want, and choose Connect. You sign in on the provider's own site, and the connection appears against your workspace when you come back.",
   updated: "2026-08-30",
   keywords: [
+    "connect an app",
     "crm integration",
-    "webhook",
-    "zapier",
     "google calendar",
+    "slack",
     "hubspot",
-    "signed webhook",
+    "connected accounts",
   ],
   intro: [
     {
-      kind: "note",
-      tone: "caution",
-      title: "Read this before you go looking for a Connect button",
-      body: [
-        "Garuda has server-side support for customers connecting their own third-party accounts, but no screen in the workspace browses that catalogue or lists connections yet. The Integrations tab under Settings shows HubSpot, Slack, Google Calendar and Zapier as Coming soon cards with disabled buttons, and that is accurate. What does work today is outbound webhooks, and that is what this article covers.",
+      kind: "p",
+      text: [
+        "You connect your own accounts. Garuda does not hold a shared company account for Slack or Google that everybody borrows: you sign in at the provider, the authorisation is stored against your workspace, and no other Garuda customer can see or use it.",
       ],
     },
     {
       kind: "p",
       text: [
-        "A webhook means Garuda posts a small JSON message to a URL you own the moment something happens. Every automation tool and most CRMs accept one, which is how a captured lead ends up as a contact, a calendar hold or a row in a sheet.",
+        "The Integrations screen has two halves. This article covers the top one, ",
+        { kind: "strong", text: "Connect your apps" },
+        ". The other half, outbound webhooks, is the route for pushing captured leads into a CRM or an automation tool, and has ",
+        {
+          kind: "link",
+          text: "its own article",
+          href: "/help/sending-leads-to-your-crm-with-a-webhook",
+        },
+        ".",
       ],
     },
   ],
   steps: [
     {
-      title: "Open the Integrations screen",
+      title: "Open Integrations",
       body: [
         {
           kind: "p",
           text: [
-            "It lives at ",
+            "It is in the workspace sidebar, under Widget, at ",
             { kind: "code", text: "/app/integrations" },
-            " in the workspace. There is no sidebar link to it yet — the sidebar holds Overview, Agents, Conversations, Leads, Widget, Billing and Settings — so type or bookmark the path.",
+            ". Settings, Integrations also links to it.",
           ],
         },
       ],
     },
     {
-      title: "Get a destination URL",
+      title: "Find the app",
       body: [
         {
           kind: "p",
           text: [
-            "In Zapier create a Catch Hook trigger; in Make a Custom webhook; in n8n or Pipedream a webhook trigger. Some CRMs publish an inbound URL of their own. Copy whatever URL the tool gives you.",
-          ],
-        },
-        {
-          kind: "p",
-          text: [
-            "It has to be https on the default port and resolve to a public address. Garuda refuses anything else, including a private or internal address.",
+            "The catalogue runs to well over a thousand products, so it arrives a page at a time rather than all at once. Type into ",
+            { kind: "strong", text: "Search apps" },
+            " — the results update as you stop typing — or narrow it with the ",
+            { kind: "strong", text: "Category" },
+            " dropdown. ",
+            { kind: "strong", text: "Show more apps" },
+            " at the foot of the grid fetches the next page, and the line above the grid tells you how many apps are available and how many you have connected.",
           ],
         },
       ],
     },
     {
-      title: "Add the endpoint",
+      title: "Choose Connect",
       body: [
         {
           kind: "p",
           text: [
-            "Paste the URL into ",
-            { kind: "strong", text: "Add an endpoint" },
-            ", give it a label you will recognise later, tick the events you want, and choose ",
-            { kind: "strong", text: "Add endpoint" },
-            ". At least one event is required.",
-          ],
-        },
-        {
-          kind: "table",
-          caption: "The events an endpoint can subscribe to",
-          columns: ["Event", "When it fires"],
-          rows: [
-            {
-              header: "lead.created",
-              cells: [["A visitor completed the lead form on one of your agents."]],
-            },
-            {
-              header: "conversation.started",
-              cells: [["A visitor sent their first message to one of your agents."]],
-            },
-            {
-              header: "conversation.ended",
-              cells: [["A conversation went quiet and is considered finished."]],
-            },
-          ],
-        },
-      ],
-    },
-    {
-      title: "Copy the signing secret now",
-      body: [
-        {
-          kind: "p",
-          text: [
-            "The secret is shown once, immediately after the endpoint is created. Copy it into your receiver before you leave the page. If you lose it, ",
-            { kind: "strong", text: "Rotate secret" },
-            " issues a new one — which invalidates the old one.",
-          ],
-        },
-      ],
-    },
-    {
-      title: "Send a test",
-      body: [
-        {
-          kind: "p",
-          text: [
-            { kind: "strong", text: "Send test" },
-            " queues a ",
-            { kind: "code", text: "webhook.test" },
-            " event. It is delivered in the background and goes to the endpoint whatever it is subscribed to, because its whole job is to prove the wiring. Open ",
-            { kind: "strong", text: "Recent deliveries" },
-            " on the endpoint a moment later to see the attempt, its status and any response code.",
-          ],
-        },
-      ],
-    },
-    {
-      title: "Verify the signature in your receiver",
-      body: [
-        {
-          kind: "p",
-          text: [
-            "Garuda signs every delivery. The scheme is identical to Stripe's, so a Stripe verifier works unchanged.",
-          ],
-        },
-        {
-          kind: "table",
-          caption: "How a Garuda webhook delivery is signed and delivered",
-          columns: ["Detail", "Value"],
-          rows: [
-            { header: "Signature header", cells: [[{ kind: "code", text: "Garuda-Signature" }]] },
-            {
-              header: "Header format",
-              cells: [[{ kind: "code", text: "t=<unix seconds>,v1=<hex HMAC-SHA256>" }]],
-            },
-            { header: "Signed value", cells: [[{ kind: "code", text: "<t>.<raw request body>" }]] },
-            { header: "Clock tolerance", cells: [["300 seconds"]] },
-            { header: "Method", cells: [["POST, application/json"]] },
-            {
-              header: "Retries",
-              cells: [["5 retries with exponential backoff after the first attempt"]],
-            },
-            {
-              header: "Guarantee",
-              cells: [
-                [
-                  "At least once. De-duplicate on the ",
-                  { kind: "code", text: "Garuda-Event-Id" },
-                  " header.",
-                ],
-              ],
-            },
-            {
-              header: "Expected reply",
-              cells: [
-                [
-                  "Any 2xx. Reply ",
-                  { kind: "code", text: "410 Gone" },
-                  " to have Garuda stop retrying immediately.",
-                ],
-              ],
-            },
+            "Garuda asks the provider for a sign-in link and opens it in a new tab. You authenticate and approve the access on the provider's own site — Garuda never sees or asks for that password.",
           ],
         },
         {
           kind: "note",
           tone: "caution",
-          title: "Sign the raw bytes",
+          title: "Allow pop-ups if nothing opens",
           body: [
-            "Verify against the body exactly as it arrived, not against a re-encoding of the parsed JSON, and reject a timestamp further than the tolerance from your own clock.",
+            "The sign-in has to open in a new tab. If your browser blocks it, the card says so and nothing else happens: allow pop-ups for the workspace and choose Connect again.",
           ],
         },
       ],
     },
     {
-      title: "Build the rest in your own tool",
+      title: "Finish signing in, then come back",
       body: [
         {
           kind: "p",
           text: [
-            "Once the payload is arriving, everything downstream is the automation tool's job: create the HubSpot contact, add the Google Calendar event, append the sheet row. Garuda's part ends at a signed, retried POST.",
+            "Until the provider confirms, the card reads ",
+            { kind: "strong", text: "Awaiting sign-in" },
+            ". Nothing is authorised at that point — a started link is not a connection. Finish in the provider's tab and return to Garuda; the screen rechecks your accounts when you come back to it, and ",
+            { kind: "strong", text: "Refresh" },
+            " does the same on demand.",
+          ],
+        },
+        {
+          kind: "p",
+          text: [
+            "A card that got interrupted keeps ",
+            { kind: "strong", text: "Finish connecting" },
+            " and a ",
+            { kind: "strong", text: "Cancel" },
+            " beside it, so an abandoned attempt can be discarded rather than left sitting there.",
+          ],
+        },
+      ],
+    },
+    {
+      title: "Confirm it says Connected",
+      body: [
+        {
+          kind: "p",
+          text: [
+            "A live connection carries a green ",
+            { kind: "strong", text: "Connected" },
+            " badge and its button changes to ",
+            { kind: "strong", text: "Disconnect" },
+            ". Disconnecting removes the authorisation at the provider and takes effect immediately; connecting again means signing in again.",
           ],
         },
       ],
@@ -201,59 +134,75 @@ export const article: HelpArticle = {
     {
       kind: "note",
       tone: "caution",
-      title: "Agents cannot use third-party tools during a conversation",
+      title: "Agents cannot use these connections during a conversation",
       body: [
-        "Even where an account connection exists, nothing in the chat pipeline calls a third-party tool. An agent cannot check your calendar or write to your CRM mid-conversation. Webhooks fire after the fact, which is a different thing and worth being clear about before you promise a visitor anything.",
+        "Connecting an account does not give the agent a tool. Nothing in the chat pipeline calls out to a third party, so an agent cannot check your calendar, look up a contact or write to your CRM mid-conversation. A connection is an authorisation Garuda holds for your workspace, not something the model can reach for while a visitor is typing.",
+      ],
+    },
+    {
+      kind: "note",
+      tone: "note",
+      title: "Connecting an app needs an active subscription",
+      body: [
+        "Browsing the catalogue is free. Starting a connection is refused without a live plan, with a message saying so. Check Billing if you see it.",
       ],
     },
     {
       kind: "p",
       text: [
-        "An account may register up to 10 endpoints. An endpoint that exhausts its retries five times in a row is suspended for an hour, so a receiver that goes down does not keep costing deliveries; the log shows the failures and the endpoint resumes on its own.",
+        "Your connections are scoped to your workspace on the server, not just hidden in the interface: the account is taken from your session rather than from anything the browser sends, and a disconnect request for a connection that is not yours comes back as though it does not exist.",
       ],
     },
   ],
   stuck: [
     {
-      problem: "The URL is rejected when you add it",
+      problem: "The screen says there is no app catalogue here",
       body: [
         {
           kind: "p",
           text: [
-            "It must be https, on the default port, and resolve to a public address. Localhost, a private range and a custom port are all refused.",
+            "This deployment has no integration credentials configured, so there is nothing to browse. That is a property of the installation rather than of your account, and outbound webhooks remain available on the same screen.",
           ],
         },
       ],
     },
     {
-      problem: "Deliveries show as failed",
+      problem: "The catalogue will not load",
       body: [
         {
           kind: "p",
           text: [
-            "Open Recent deliveries and read the response status and error. A 401 or 403 usually means your receiver is rejecting the signature; a 404 means the URL has moved; a 5xx means the receiver itself is failing.",
+            "A red bar carries the reason. The catalogue is fetched live from the integration provider, so a failure there shows up here; try again in a moment. If it persists, sign out and back in, because an expired session produces the same symptom.",
           ],
         },
       ],
     },
     {
-      problem: "The endpoint shows failures in a row and nothing new arrives",
+      problem: "The card still says Awaiting sign-in after you signed in",
       body: [
         {
           kind: "p",
           text: [
-            "It has been suspended by the circuit breaker. Fix the receiver, then use Send test to confirm it is answering again.",
+            "Nothing tells the workspace tab when the provider's tab finishes. Choose ",
+            { kind: "strong", text: "Refresh" },
+            ". If it stays that way, the provider did not complete the authorisation: use Cancel and start again.",
           ],
         },
       ],
     },
     {
-      problem: "You need an account connection rather than a webhook",
+      problem: "The app you need is not in the catalogue",
       body: [
         {
           kind: "p",
           text: [
-            "There is no way to do that from the workspace today. Write to ",
+            "Search a shorter word first — the catalogue lists products under their own names. If it genuinely is not there, an outbound webhook reaches anything with an HTTP endpoint; see ",
+            {
+              kind: "link",
+              text: "Sending leads to your CRM with a webhook",
+              href: "/help/sending-leads-to-your-crm-with-a-webhook",
+            },
+            ", or write to ",
             { kind: "link", text: "info@ravan.ai", href: "mailto:info@ravan.ai" },
             " and describe what you are trying to connect.",
           ],
@@ -261,5 +210,9 @@ export const article: HelpArticle = {
       ],
     },
   ],
-  related: ["reading-conversations-and-leads", "exporting-your-leads", "setting-up-lead-capture-and-consent"],
+  related: [
+    "sending-leads-to-your-crm-with-a-webhook",
+    "reading-conversations-and-leads",
+    "exporting-your-leads",
+  ],
 };

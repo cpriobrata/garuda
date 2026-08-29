@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"garuda/backend/internal/model"
 	"garuda/backend/internal/security"
@@ -247,5 +248,37 @@ func TestPollRejectsAMalformedCursor(t *testing.T) {
 	response := pollMessages(t, server, sessionID, sessionToken, "not%20a%20message%20id%3Cscript%3E")
 	if response.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("expected 422, got %d: %s", response.Code, response.Body.String())
+	}
+}
+
+// Garuda's own onboarding transcribes in any language Deepgram supports, so a
+// message limit counted in bytes is a limit that quietly shrinks to a third for
+// the customers this product is being sold to. Both the visitor's message and
+// the owner's reply are capped in characters.
+func TestMessageLimitsAreCountedInCharactersNotBytes(t *testing.T) {
+	server, dataStore := newTestServer(t)
+	sessionID, _ := seedReplyFixture(t, dataStore)
+
+	// Three bytes per character in UTF-8. At the byte cap this is three times
+	// over; at the character cap it is comfortably inside.
+	hindi := strings.Repeat("न", maxTeamReplyLength-100)
+	encoded, err := json.Marshal(map[string]string{"content": hindi})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	response := postReply(t, server, sessionID, "org_reply", string(encoded))
+	if response.Code != http.StatusCreated {
+		t.Fatalf("a %d-character Hindi reply was rejected with %d: %s",
+			utf8.RuneCountInString(hindi), response.Code, response.Body.String())
+	}
+
+	// The cap itself still holds.
+	tooLong, err := json.Marshal(map[string]string{"content": strings.Repeat("न", maxTeamReplyLength+1)})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if code := postReply(t, server, sessionID, "org_reply", string(tooLong)).Code; code != http.StatusUnprocessableEntity {
+		t.Fatalf("an over-length reply was accepted with %d", code)
 	}
 }

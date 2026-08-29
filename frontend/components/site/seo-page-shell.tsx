@@ -77,7 +77,9 @@ export function SeoPageShell({ eyebrow, title, summary, breadcrumb, reviewed, st
             <Button variant="ghost" size="sm" className="hidden sm:inline-flex" asChild>
               <Link href="/auth/sign-in">Log in</Link>
             </Button>
-            <Button size="sm" asChild>
+            {/* The one header CTA on a phone, so it gets a 44px target there and
+                keeps the compact desktop size from sm up. */}
+            <Button size="sm" className="h-11 px-4 text-sm sm:h-8 sm:px-3 sm:text-xs" asChild>
               <Link href="/auth/sign-up">Start building</Link>
             </Button>
           </div>
@@ -172,8 +174,11 @@ export function AnswerSection({
   return (
     <section id={id} className="scroll-mt-24 border-t border-slate-100 py-9 first:border-t-0 first:pt-0">
       <h2 className="text-pretty text-xl font-semibold tracking-[-0.02em] text-slate-950 sm:text-2xl">{question}</h2>
-      <p className="mt-3 text-base font-medium leading-7 text-slate-900">{answer}</p>
-      {children ? <div className="mt-4 space-y-4 text-[15px] leading-7 text-slate-600">{children}</div> : null}
+      {/* Answers quote script tags and URLs verbatim; without break-words a run
+          like https://api.garuda.ravan.ai/widget.js scrolls the page sideways
+          on any screen under about 400px. */}
+      <p className="mt-3 break-words text-base font-medium leading-7 text-slate-900">{answer}</p>
+      {children ? <div className="mt-4 space-y-4 break-words text-[15px] leading-7 text-slate-600">{children}</div> : null}
     </section>
   );
 }

@@ -152,7 +152,7 @@ function LeadFieldRow({ field, index, total, fieldTypes, reservedIDs, messages, 
         </div>
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-2">
-        <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[9px] text-slate-500">{field.id || "no identifier"}</span>
+        <span className="break-all rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[9px] text-slate-500">{field.id || "no identifier"}</span>
         {reserved ? <Badge variant="secondary" className="text-[9px]">Saved on the lead record</Badge> : <span className="text-[9px] text-slate-400">Saved as a custom answer</span>}
       </div>
       <FieldMessage message={messages[`${prefix}.id`]} />

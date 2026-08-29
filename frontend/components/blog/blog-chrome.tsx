@@ -10,8 +10,9 @@ import { Button } from "@/components/ui/button";
 // A blog-local copy of the site header. The marketing nav points at in-page
 // anchors that only exist on the landing page; these are absolute so they work
 // from an article URL.
+// "How it works" appeared twice here, which rendered the item twice and gave two
+// list children the same React key.
 const links = [
-  { label: "How it works", href: "/#how-it-works" },
   { label: "How it works", href: "/#how-it-works" },
   { label: "Pricing", href: "/#pricing" },
   { label: "Blog", href: "/blog" },
@@ -55,7 +56,7 @@ export function BlogNav() {
         <Button
           variant="ghost"
           size="icon"
-          className="md:hidden"
+          className="h-11 w-11 md:hidden"
           onClick={() => setOpen(!open)}
           aria-expanded={open}
           aria-label="Toggle navigation"
@@ -72,7 +73,7 @@ export function BlogNav() {
                 href={link.href}
                 onClick={() => setOpen(false)}
                 aria-current={link.href === "/blog" && pathname.startsWith("/blog") ? "page" : undefined}
-                className="rounded-lg px-3 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                className="rounded-lg px-3 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
               >
                 {link.label}
               </Link>

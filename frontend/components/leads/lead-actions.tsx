@@ -136,7 +136,7 @@ export function LeadActions({ connected, onLeadAdded }: { connected: boolean; on
     {addedName && <p className="flex items-center gap-1.5 text-[10px] font-medium text-emerald-600"><Check className="h-3 w-3" /> {addedName} was added as a manual lead</p>}
 
     <Dialog open={addOpen} onOpenChange={(open) => { if (!saving) { setAddOpen(open); if (!open) setAddError(""); } }}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Add a lead by hand</DialogTitle>
           <DialogDescription>Stored with the source &ldquo;manual&rdquo; so it is never counted as a consented widget capture. Record consent separately before contacting this person.</DialogDescription>

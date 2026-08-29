@@ -7,7 +7,9 @@ import { article as approvingDomains } from "./approving-the-domains-your-agent-
 import { article as customisingAppearance } from "./customising-the-widget-appearance";
 import { article as leadCaptureAndConsent } from "./setting-up-lead-capture-and-consent";
 import { article as customLeadForm } from "./building-a-custom-lead-form";
+import { article as whatsAppHandoff } from "./handing-a-conversation-to-a-person-on-whatsapp";
 import { article as connectingAnIntegration } from "./connecting-an-integration";
+import { article as outboundWebhooks } from "./sending-leads-to-your-crm-with-a-webhook";
 import { article as conversationsAndLeads } from "./reading-conversations-and-leads";
 import { article as exportingLeads } from "./exporting-your-leads";
 import { article as pausingAnAgent } from "./pausing-or-unpublishing-an-agent";
@@ -15,7 +17,7 @@ import { article as widgetNotShowing } from "./my-widget-is-not-showing-up";
 
 export const HELP_TITLE = "Garuda help centre";
 export const HELP_DESCRIPTION =
-  "Task-shaped guides to running a Garuda agent: creating one, teaching it, installing the widget, capturing leads with consent, and fixing the widget when it does not appear.";
+  "Task-shaped guides to running a Garuda agent: creating one, teaching it, installing the widget, capturing leads with consent, handing a conversation to a person, and fixing the widget when it does not appear.";
 
 /** The four groups, in the order the index renders them. */
 export const helpCategories: readonly HelpCategory[] = [
@@ -55,7 +57,9 @@ export const helpArticles: readonly HelpArticle[] = [
   customisingAppearance,
   leadCaptureAndConsent,
   customLeadForm,
+  whatsAppHandoff,
   connectingAnIntegration,
+  outboundWebhooks,
   conversationsAndLeads,
   exportingLeads,
   pausingAnAgent,
