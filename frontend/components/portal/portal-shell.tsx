@@ -43,6 +43,44 @@ const lowerNav = [
   { label: "Settings", href: "/app/settings", icon: Settings },
 ];
 
+type Bootstrap = Awaited<ReturnType<typeof garudaApi.me>>;
+
+export type PortalAccount = { name: string; email: string; organization: string; planStatus: string };
+
+// "granted" is the only decision that renders the workspace. A bootstrap that
+// did not arrive is never treated as permission to continue.
+export type PortalAccess =
+  | { state: "granted" }
+  | { state: "redirect"; destination: string }
+  | { state: "blocked" };
+
+export function accountFromBootstrap(bootstrap: Bootstrap): PortalAccount {
+  return {
+    name: bootstrap.user.name?.trim() || bootstrap.user.email.split("@")[0] || "Account",
+    email: bootstrap.user.email,
+    organization: bootstrap.organization.name || "Workspace",
+    planStatus: bootstrap.subscription.status,
+  };
+}
+
+export function evaluatePortalAccess(bootstrap: Bootstrap, pathname: string): PortalAccess {
+  if (!bootstrap.subscription.entitled) return { state: "redirect", destination: "/checkout" };
+  if (bootstrap.onboarding.status !== "completed" && pathname !== "/app/onboarding" && pathname !== "/app/generating") {
+    return { state: "redirect", destination: "/app/onboarding" };
+  }
+  return { state: "granted" };
+}
+
+// The entitlement decision rests on the bootstrap call alone. The agent list is
+// only sidebar decoration, so losing it must never let an unchecked visitor in,
+// and a bootstrap that failed blocks the workspace rather than opening it.
+export async function resolvePortalAccess(pathname: string): Promise<{ access: PortalAccess; account: PortalAccount | null; agents: Agent[] | null }> {
+  const [bootstrapResult, agentsResult] = await Promise.allSettled([garudaApi.me(), garudaApi.listAgents()]);
+  const agents = agentsResult.status === "fulfilled" ? agentsResult.value : null;
+  if (bootstrapResult.status !== "fulfilled") return { access: { state: "blocked" }, account: null, agents: null };
+  return { access: evaluatePortalAccess(bootstrapResult.value, pathname), account: accountFromBootstrap(bootstrapResult.value), agents };
+}
+
 export function PortalShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
@@ -50,47 +88,62 @@ export function PortalShell({ children }: { children: React.ReactNode }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [agentItems, setAgentItems] = useState<Agent[]>(connected ? [] : demoAgents);
   const [selectedAgentId, setSelectedAgentId] = useState(connected ? "" : demoAgents[0]?.id || "");
-  const [account, setAccount] = useState(
+  // A connected workspace starts closed and only opens once the bootstrap call
+  // confirms the account is entitled and past onboarding.
+  const [access, setAccess] = useState<PortalAccess | null>(connected ? null : { state: "granted" });
+  const [attempt, setAttempt] = useState(0);
+  const [account, setAccount] = useState<PortalAccount>(
     connected
       ? { name: "Account", email: "", organization: "Workspace", planStatus: "" }
       : { name: "Maya Chen", email: "demo@garuda.ai", organization: "Northstar Labs", planStatus: "active" },
   );
 
   useEffect(() => {
-    if (connected && !window.sessionStorage.getItem("garuda_access_token")) {
+    if (!connected) return;
+    if (!window.sessionStorage.getItem("garuda_access_token")) {
+      setAccess({ state: "redirect", destination: `/auth/sign-in?next=${encodeURIComponent(pathname)}` });
       router.replace(`/auth/sign-in?next=${encodeURIComponent(pathname)}`);
       return;
     }
-    if (!connected) return;
 
+    // The last decision is kept while a later check runs, so moving between
+    // workspace pages does not blank the screen on every navigation.
     let active = true;
-    Promise.all([garudaApi.me(), garudaApi.listAgents()])
-      .then(([bootstrap, items]) => {
-        if (!active) return;
-        if (!bootstrap.subscription.entitled) {
-          router.replace("/checkout");
-          return;
-        }
-        if (bootstrap.onboarding.status !== "completed" && pathname !== "/app/onboarding" && pathname !== "/app/generating") {
-          router.replace("/app/onboarding");
-          return;
-        }
-        const fallbackName = bootstrap.user.email.split("@")[0] || "Account";
-        setAccount({
-          name: bootstrap.user.name?.trim() || fallbackName,
-          email: bootstrap.user.email,
-          organization: bootstrap.organization.name || "Workspace",
-          planStatus: bootstrap.subscription.status,
-        });
-        setAgentItems(items);
-        setSelectedAgentId((current) => current || items[0]?.id || "");
-      })
-      .catch(() => undefined);
+    resolvePortalAccess(pathname).then((resolved) => {
+      if (!active) return;
+      setAccess(resolved.access);
+      if (resolved.access.state === "redirect") {
+        router.replace(resolved.access.destination);
+        return;
+      }
+      if (resolved.account) setAccount(resolved.account);
+      if (resolved.agents) {
+        setAgentItems(resolved.agents);
+        setSelectedAgentId((current) => current || resolved.agents?.[0]?.id || "");
+      }
+    }).catch(() => {
+      // An unreadable bootstrap is still an unanswered gate, so offer the
+      // retry rather than leaving the workspace waiting forever.
+      if (active) setAccess({ state: "blocked" });
+    });
     return () => { active = false; };
-  }, [connected, pathname, router]);
+  }, [attempt, connected, pathname, router]);
 
   const selectedAgent = agentItems.find((item) => item.id === selectedAgentId) || agentItems[0];
   const accountInitials = account.name.split(/\s+/).filter(Boolean).map((part) => part[0]).join("").slice(0, 2).toUpperCase() || "A";
+
+  if (!access) return <PortalGateNotice title="Checking your workspace access…" />;
+  if (access.state === "redirect") return <PortalGateNotice title="Taking you to the right place…" />;
+  if (access.state === "blocked") {
+    return (
+      <PortalGateNotice title="We could not confirm your workspace access." description="Garuda keeps the workspace closed until the server confirms your subscription. Check your connection and try again.">
+        <div className="mt-5 flex justify-center gap-2">
+          <Button size="sm" onClick={() => { setAccess(null); setAttempt((current) => current + 1); }}>Try again</Button>
+          <Button variant="outline" size="sm" asChild><Link href="/auth/sign-in" onClick={clearAuthSession}>Sign out</Link></Button>
+        </div>
+      </PortalGateNotice>
+    );
+  }
 
   if (pathname === "/app/onboarding" || pathname === "/app/generating") return <>{children}</>;
 
@@ -147,6 +200,19 @@ export function PortalShell({ children }: { children: React.ReactNode }) {
           </div>
         </header>
         <main className="dashboard-height p-4 sm:p-6 lg:p-8">{children}</main>
+      </div>
+    </div>
+  );
+}
+
+function PortalGateNotice({ title, description, children }: { title: string; description?: string; children?: React.ReactNode }) {
+  return (
+    <div className="grid min-h-screen place-items-center bg-[#f7f8fb] p-6">
+      <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-sm">
+        <Brand href="/app" />
+        <p className="mt-6 text-sm font-semibold text-slate-900">{title}</p>
+        {description && <p className="mt-2 text-xs leading-5 text-slate-500">{description}</p>}
+        {children}
       </div>
     </div>
   );

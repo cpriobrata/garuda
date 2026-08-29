@@ -22,7 +22,14 @@ export default function DashboardPage() {
   const [activity, setActivity] = useState<number[]>(connected ? [] : chartData);
   const [agentItems, setAgentItems] = useState<Agent[]>(connected ? [] : seededAgents);
   const [conversationItems, setConversationItems] = useState<Conversation[]>(connected ? [] : seededConversations);
-  const today = new Intl.DateTimeFormat(undefined, { weekday: "long", day: "numeric", month: "long" }).format(new Date());
+  // The date has to be produced in the browser after mount. Formatting it while
+  // rendering bakes the build date into the prerendered page and then disagrees
+  // with the browser during hydration.
+  const [today, setToday] = useState("");
+
+  useEffect(() => {
+    setToday(new Intl.DateTimeFormat(undefined, { weekday: "long", day: "numeric", month: "long" }).format(new Date()));
+  }, []);
 
   useEffect(() => {
     if (!connected) return;
@@ -45,7 +52,7 @@ export default function DashboardPage() {
   ];
 
   return <div className="mx-auto max-w-[1440px] space-y-6">
-    <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end"><div><p className="text-xs font-medium text-indigo-600">{today}</p><h1 className="mt-1 text-2xl font-bold tracking-[-.03em] text-slate-950 sm:text-3xl">Welcome back, {name}.</h1><p className="mt-1.5 text-sm text-slate-500">Your workspace activity and customer conversations at a glance.</p></div><div className="flex gap-2"><Button variant="outline" size="sm" asChild><Link href="/app/widget"><MousePointerClick className="mr-1.5 h-3.5 w-3.5" /> Install widget</Link></Button><Button size="sm" asChild><Link href="/app/agents/new"><Plus className="mr-1.5 h-3.5 w-3.5" /> Create agent</Link></Button></div></div>
+    <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end"><div><p className="text-xs font-medium text-indigo-600">{today || "\u00A0"}</p><h1 className="mt-1 text-2xl font-bold tracking-[-.03em] text-slate-950 sm:text-3xl">Welcome back, {name}.</h1><p className="mt-1.5 text-sm text-slate-500">Your workspace activity and customer conversations at a glance.</p></div><div className="flex gap-2"><Button variant="outline" size="sm" asChild><Link href="/app/widget"><MousePointerClick className="mr-1.5 h-3.5 w-3.5" /> Install widget</Link></Button><Button size="sm" asChild><Link href="/app/agents/new"><Plus className="mr-1.5 h-3.5 w-3.5" /> Create agent</Link></Button></div></div>
 
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{stats.map((stat) => <Card key={stat.label} className="shadow-none"><CardContent className="p-5"><div className="flex items-start justify-between"><div><p className="text-xs text-slate-500">{stat.label}</p><p className="mt-2 text-2xl font-bold tracking-tight text-slate-950">{typeof stat.value === "number" ? stat.value.toLocaleString() : "—"}</p></div><span className="grid h-9 w-9 place-items-center rounded-xl bg-indigo-50 text-indigo-600"><stat.icon className="h-4 w-4" /></span></div><p className="mt-3 text-[10px] text-slate-400">{stat.note}</p></CardContent></Card>)}</div>
 

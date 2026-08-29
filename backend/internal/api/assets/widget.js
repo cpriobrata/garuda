@@ -10,6 +10,7 @@
   var MAX_HISTORY = 50;
   var REQUEST_TIMEOUT_MS = 20000;
   var MESSAGE_REQUEST_TIMEOUT_MS = 60000;
+  var STREAM_IDLE_TIMEOUT_MS = 30000;
   var DEFAULT_ACCENT = '#4F46E5';
   var ALLOWED_LEAD_FIELDS = ['name', 'email', 'phone', 'company'];
 
@@ -360,16 +361,52 @@
     return new WidgetError(code, message, response.status);
   }
 
+  // A deadline owns the abort controller for one request and the single timer
+  // that fires it. Streaming responses keep the deadline alive past the response
+  // headers and push it out on every chunk, because a header timeout on its own
+  // is cleared the moment the headers arrive: a stream that stalls after that
+  // left the widget waiting on a read that never resolved, with the composer
+  // disabled and no retry notice, until the visitor reloaded the page.
+  function createRequestDeadline(timeoutMs) {
+    var controller = typeof AbortController === 'function' ? new AbortController() : null;
+    var timer = null;
+    var deadline = {
+      signal: controller ? controller.signal : null,
+      expired: false,
+      clear: function () {
+        if (timer === null) return;
+        global.clearTimeout(timer);
+        timer = null;
+      },
+      extend: function (milliseconds) {
+        deadline.clear();
+        timer = global.setTimeout(function () {
+          timer = null;
+          deadline.expired = true;
+          if (controller) controller.abort();
+        }, milliseconds);
+      }
+    };
+    deadline.extend(timeoutMs || REQUEST_TIMEOUT_MS);
+    return deadline;
+  }
+
+  function streamFailure(error, deadline) {
+    var stalled = Boolean(deadline && deadline.expired) ||
+      Boolean(error && error.name === 'AbortError');
+    if (stalled) {
+      return new WidgetError('stream_timeout', 'The assistant stopped responding. Please try again.', 0);
+    }
+    return new WidgetError('stream_error', 'The response was interrupted. Please try again.', 0);
+  }
+
   function LiveAPI(config) {
     this.origin = config.apiOrigin;
     this.agentKey = config.agentKey;
   }
 
-  LiveAPI.prototype.request = async function request(path, options, timeoutMs) {
-    var controller = typeof AbortController === 'function' ? new AbortController() : null;
-    var timeout = controller
-      ? global.setTimeout(function () { controller.abort(); }, timeoutMs || REQUEST_TIMEOUT_MS)
-      : null;
+  LiveAPI.prototype.request = async function request(path, options, timeoutMs, deadline) {
+    var activeDeadline = deadline || createRequestDeadline(timeoutMs);
     var settings = Object.assign({
       method: 'GET',
       credentials: 'omit',
@@ -377,7 +414,7 @@
       cache: 'no-store',
       referrerPolicy: 'strict-origin-when-cross-origin'
     }, options || {});
-    if (controller) settings.signal = controller.signal;
+    if (activeDeadline.signal) settings.signal = activeDeadline.signal;
     try {
       return await global.fetch(this.origin + path, settings);
     } catch (error) {
@@ -386,7 +423,8 @@
       }
       throw new WidgetError('network_error', 'We could not reach the assistant. Check your connection and try again.', 0);
     } finally {
-      if (timeout) global.clearTimeout(timeout);
+      // A caller that supplied the deadline keeps it running for the response body.
+      if (!deadline) activeDeadline.clear();
     }
   };
 
@@ -424,41 +462,47 @@
   };
 
   LiveAPI.prototype.sendMessage = async function sendMessage(session, request, handlers) {
-    var response = await this.request(
-      '/widget/v1/sessions/' + encodeURIComponent(session.sessionID) + '/messages',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'text/event-stream, application/json',
-          'X-Garuda-Session-Token': session.sessionToken
+    var deadline = createRequestDeadline(MESSAGE_REQUEST_TIMEOUT_MS);
+    try {
+      var response = await this.request(
+        '/widget/v1/sessions/' + encodeURIComponent(session.sessionID) + '/messages',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'text/event-stream, application/json',
+            'X-Garuda-Session-Token': session.sessionToken
+          },
+          body: JSON.stringify({
+            client_message_id: request.clientMessageID,
+            content: request.content
+          })
         },
-        body: JSON.stringify({
-          client_message_id: request.clientMessageID,
-          content: request.content
-        })
-      },
-      MESSAGE_REQUEST_TIMEOUT_MS
-    );
-    if (!response.ok) throw await safeErrorFromResponse(response);
-    var contentType = (response.headers.get('Content-Type') || '').toLowerCase();
-    if (contentType.indexOf('text/event-stream') === -1) {
-      var json = await response.json();
-      var data = isRecord(json) && isRecord(json.data) ? json.data : json;
-      data = isRecord(data) ? data : {};
-      var assistant = normalizeMessage(data.assistant_message);
-      if (!assistant) {
-        throw new WidgetError('invalid_response', 'The assistant returned an invalid message.', 502);
+        MESSAGE_REQUEST_TIMEOUT_MS,
+        deadline
+      );
+      if (!response.ok) throw await safeErrorFromResponse(response);
+      var contentType = (response.headers.get('Content-Type') || '').toLowerCase();
+      if (contentType.indexOf('text/event-stream') === -1) {
+        var json = await response.json();
+        var data = isRecord(json) && isRecord(json.data) ? json.data : json;
+        data = isRecord(data) ? data : {};
+        var assistant = normalizeMessage(data.assistant_message);
+        if (!assistant) {
+          throw new WidgetError('invalid_response', 'The assistant returned an invalid message.', 502);
+        }
+        handlers.onStart(assistant.id);
+        handlers.onDelta(assistant.content);
+        if (data.lead_capture_requested === true) {
+          handlers.onLead(isRecord(data.lead_capture) ? data.lead_capture : {});
+        }
+        handlers.onDone(data);
+        return { message: assistant, leadRequested: data.lead_capture_requested === true };
       }
-      handlers.onStart(assistant.id);
-      handlers.onDelta(assistant.content);
-      if (data.lead_capture_requested === true) {
-        handlers.onLead(isRecord(data.lead_capture) ? data.lead_capture : {});
-      }
-      handlers.onDone(data);
-      return { message: assistant, leadRequested: data.lead_capture_requested === true };
+      return await consumeEventStream(response, handlers, deadline);
+    } finally {
+      deadline.clear();
     }
-    return consumeEventStream(response, handlers);
   };
 
   LiveAPI.prototype.captureLead = async function captureLead(session, request) {
@@ -485,7 +529,7 @@
     return isRecord(json) && isRecord(json.data) ? json.data : json;
   };
 
-  async function consumeEventStream(response, handlers) {
+  async function consumeEventStream(response, handlers, deadline) {
     var assembled = '';
     var messageID = '';
     var finalData = {};
@@ -539,19 +583,33 @@
     if (response.body && typeof response.body.getReader === 'function') {
       var reader = response.body.getReader();
       var decoder = new TextDecoder();
-      while (true) {
-        var chunk = await reader.read();
-        if (chunk.done) break;
-        parser.push(decoder.decode(chunk.value, { stream: true }));
-        if (streamError) {
-          try { await reader.cancel(); } catch (_error) { /* no-op */ }
-          break;
+      // Every chunk buys the stream another quiet period. When one does not
+      // arrive in time the deadline aborts the request, the pending read rejects,
+      // and the visible retry notice takes over instead of the widget hanging.
+      if (deadline) deadline.extend(STREAM_IDLE_TIMEOUT_MS);
+      try {
+        while (true) {
+          var chunk = await reader.read();
+          if (chunk.done) break;
+          if (deadline) deadline.extend(STREAM_IDLE_TIMEOUT_MS);
+          parser.push(decoder.decode(chunk.value, { stream: true }));
+          if (streamError) {
+            try { await reader.cancel(); } catch (_error) { /* no-op */ }
+            break;
+          }
         }
+        parser.push(decoder.decode());
+      } catch (error) {
+        try { await reader.cancel(); } catch (_cancelError) { /* no-op */ }
+        throw streamFailure(error, deadline);
       }
-      parser.push(decoder.decode());
       parser.finish();
     } else {
-      parser.push(await response.text());
+      try {
+        parser.push(await response.text());
+      } catch (error) {
+        throw streamFailure(error, deadline);
+      }
       parser.finish();
     }
     if (streamError) throw streamError;
@@ -725,19 +783,10 @@
     clearVisitorMemory: clearVisitorMemory,
     contrastText: contrastText,
     streamText: streamText,
-    LiveAPI: LiveAPI
+    LiveAPI: LiveAPI,
+    boot: boot,
+    GarudaWidget: GarudaWidget
   };
-
-  if (
-    typeof module === 'object' &&
-    module &&
-    module.exports &&
-    typeof global.document === 'undefined'
-  ) {
-    module.exports = TEST_EXPORTS;
-    return;
-  }
-  if (!global.document || !global.fetch) return;
 
   function readRuntimeConfig(script) {
     var agentKey = asText(script.getAttribute('data-agent-key'), '', 180);
@@ -780,13 +829,41 @@
     return null;
   }
 
+  // Which agents are already on the page has to be recorded on the page itself
+  // rather than in this closure. A single page application re-runs the embed
+  // snippet on every navigation, and each run loads a fresh copy of this runtime
+  // whose closure starts out empty, so widgets used to stack: several launchers,
+  // several sessions, and one visitor counted as several conversations.
+  function mountedWidgets() {
+    var registry = global.garudaWidgetMounts;
+    if (!isRecord(registry)) {
+      registry = Object.create(null);
+      global.garudaWidgetMounts = registry;
+    }
+    return registry;
+  }
+
+  function alreadyMounted(registry, agentKey) {
+    var widget = registry[agentKey];
+    if (!widget) return false;
+    var host = widget.nodes ? widget.nodes.host : null;
+    // A host page that replaced its document body took the widget away with it,
+    // so that agent is free to mount again. A widget still waiting for the body
+    // has no host yet and counts as mounted.
+    if (host && host.isConnected === false) return false;
+    return true;
+  }
+
   function boot() {
     var script = findLoaderScript();
     if (!script || script.hasAttribute('data-garuda-loaded')) return;
     script.setAttribute('data-garuda-loaded', VERSION);
     try {
       var config = readRuntimeConfig(script);
+      var registry = mountedWidgets();
+      if (alreadyMounted(registry, config.agentKey)) return;
       var widget = new GarudaWidget(config);
+      registry[config.agentKey] = widget;
       widget.mount();
     } catch (_error) {
       // Invalid embed configuration fails closed without exposing identifiers.
@@ -1126,27 +1203,17 @@
     }
   };
 
+  // The panel stays non-modal and therefore does not trap Tab. It is a launcher
+  // anchored bubble sitting on somebody else's page: the page behind it keeps
+  // working, and a widget cannot honestly make a customer's document inert from
+  // inside its own shadow root, so aria-modal="false" is the truthful value.
+  // Cycling Tab inside a dialog that reports itself as non-modal stranded
+  // keyboard and screen reader users, who had been told they could leave it.
+  // Escape still closes the panel and setOpen returns focus to the launcher.
   GarudaWidget.prototype.handlePanelKeys = function handlePanelKeys(event) {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      this.setOpen(false);
-      return;
-    }
-    if (event.key !== 'Tab') return;
-    var focusable = Array.prototype.slice.call(
-      this.nodes.panel.querySelectorAll('button:not([disabled]), textarea:not([disabled]), input:not([disabled]), a[href]')
-    ).filter(function (node) { return !node.hidden && node.offsetParent !== null; });
-    if (!focusable.length) return;
-    var first = focusable[0];
-    var last = focusable[focusable.length - 1];
-    var activeElement = this.nodes.panel.getRootNode().activeElement;
-    if (event.shiftKey && activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    this.setOpen(false);
   };
 
   GarudaWidget.prototype.renderConsentPrompt = function renderConsentPrompt() {
@@ -1750,6 +1817,20 @@
       '@media(prefers-contrast:more){.gw-panel,.gw-bubble,.gw-input,.gw-field input,.gw-suggestion{border-color:#64748B}.gw-status,.gw-footer{color:#475569}}'
     ].join('');
   }
+
+  // Tests load this file in Node, where there is no document to mount into. The
+  // check sits at the very end so that every prototype method above is defined
+  // before the module is handed over, including the ones a test drives directly.
+  if (
+    typeof module === 'object' &&
+    module &&
+    module.exports &&
+    typeof global.document === 'undefined'
+  ) {
+    module.exports = TEST_EXPORTS;
+    return;
+  }
+  if (!global.document || !global.fetch) return;
 
   boot();
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -265,8 +265,20 @@ func acceptsGzip(header string) bool {
 	return false
 }
 
+// middleware wraps the router. Order matters in two directions: an outer layer
+// sees panics raised by every layer below it, and a layer that sets response
+// headers before delegating hands those headers to everything below it.
+//
+// recoverPanic stays outermost so a panic anywhere -- including inside requestID,
+// securityHeaders or cors -- becomes an error envelope instead of a dropped
+// connection. requestID comes next so every layer below it, and every log line,
+// has an id to quote. securityHeaders moved ABOVE cors: it sets its headers and
+// then delegates, so putting it higher means a cors preflight rejection, and a
+// response written while unwinding a panic out of cors, both carry them. Because
+// recoverPanic is above securityHeaders it cannot rely on that alone, so it sets
+// the same headers itself before writing.
 func (s *Server) middleware(next http.Handler) http.Handler {
-	return s.recoverPanic(s.requestID(s.cors(s.securityHeaders(s.accessLog(next)))))
+	return s.recoverPanic(s.requestID(s.securityHeaders(s.cors(s.accessLog(next)))))
 }
 
 func (s *Server) requestID(next http.Handler) http.Handler {
@@ -329,12 +341,19 @@ func (s *Server) originAllowed(origin string) bool {
 
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
-		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		applySecurityHeaders(w.Header())
 		next.ServeHTTP(w, r)
 	})
+}
+
+// applySecurityHeaders holds the set every response must carry. It is shared with
+// recoverPanic, which runs above the securityHeaders middleware and therefore
+// cannot assume that middleware was reached before the panic.
+func applySecurityHeaders(header http.Header) {
+	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("X-Frame-Options", "DENY")
+	header.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+	header.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 }
 
 type responseRecorder struct {
@@ -366,12 +385,39 @@ func (s *Server) recoverPanic(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				s.logger.Error("panic recovered", "error", recovered, "request_id", requestID(r.Context()))
+				// This handler holds the request as it was BEFORE the requestID
+				// middleware derived a new one carrying the id, so r.Context() has no id
+				// to give. Take it from the response header instead, which is the value
+				// the caller sees and quotes back to support, and mint one if the panic
+				// happened before requestID ran at all. A 500 without an id is the one
+				// response nobody can correlate with a log line.
+				identifier := ensureRequestIDHeader(w)
+				// securityHeaders sits below this handler, so it may never have run.
+				applySecurityHeaders(w.Header())
+				// The access log lives below here too, and the panic unwound past it, so
+				// this line is the only record of the request that failed.
+				s.logger.Error("panic recovered", "error", recovered, "method", r.Method, "path", r.URL.Path, "request_id", identifier)
 				s.writeError(w, r, http.StatusInternalServerError, "internal_error", "An unexpected error occurred", nil)
 			}
 		}()
 		next.ServeHTTP(w, r)
 	})
+}
+
+// ensureRequestIDHeader returns the id already promised to the caller on the
+// response, minting and setting one when the request failed before the requestID
+// middleware could.
+func ensureRequestIDHeader(w http.ResponseWriter) string {
+	identifier := w.Header().Get("X-Request-ID")
+	if identifier != "" {
+		return identifier
+	}
+	identifier, err := security.RandomToken(12)
+	if err != nil || identifier == "" {
+		return ""
+	}
+	w.Header().Set("X-Request-ID", identifier)
+	return identifier
 }
 
 func (s *Server) requireAuth(next http.Handler) http.Handler {
@@ -456,11 +502,18 @@ func (s *Server) writeDataMeta(w http.ResponseWriter, status int, data, meta any
 }
 
 func (s *Server) writeError(w http.ResponseWriter, r *http.Request, status int, code, message string, details any) {
-	id := ""
+	identifier := ""
 	if r != nil {
-		id = requestID(r.Context())
+		identifier = requestID(r.Context())
 	}
-	s.writeJSON(w, status, errorEnvelope{Error: APIError{Code: code, Message: message, RequestID: id, Details: details}})
+	// Callers that hold no request, and callers whose request predates the requestID
+	// middleware -- recoverPanic is one -- have no id in the context. The id still
+	// reached the response header, and every error envelope has to carry it: it is
+	// the only handle support has for matching a customer report to a log line.
+	if identifier == "" {
+		identifier = w.Header().Get("X-Request-ID")
+	}
+	s.writeJSON(w, status, errorEnvelope{Error: APIError{Code: code, Message: message, RequestID: identifier, Details: details}})
 }
 
 func (s *Server) writeJSON(w http.ResponseWriter, status int, payload any) {

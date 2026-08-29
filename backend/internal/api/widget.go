@@ -327,9 +327,23 @@ func (s *Server) writeWidgetMessageResult(w http.ResponseWriter, r *http.Request
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.WriteHeader(http.StatusOK)
-		writeSSE(w, "meta", map[string]any{"session_id": session.ID, "message_id": assistantMessage.ID})
-		writeSSE(w, "delta", map[string]string{"content": assistantMessage.Content})
-		writeSSE(w, "done", result)
+		// The integration contract names these events message.start, message.delta
+		// and message.done and carries the text of a delta under "text". The shipped
+		// widget accepts the contract name and the older short name for each event,
+		// and reads "text" before it reads "content", so the events can be renamed in
+		// place without stranding a browser that still holds the old bundle. Emitting
+		// both names for the same event would be worse than renaming: that widget
+		// would append every delta twice. Payload keys are safe to duplicate because
+		// only the first one it finds is used, so the delta keeps "content" alongside
+		// the contract's "text", and the start event keeps the session id it used to
+		// carry next to the conversation id the contract asks for.
+		writeSSE(w, "message.start", map[string]any{"message_id": assistantMessage.ID, "conversation_id": session.ID, "session_id": session.ID})
+		writeSSE(w, "message.delta", map[string]string{"text": assistantMessage.Content, "content": assistantMessage.Content})
+		completion := map[string]any{"message_id": assistantMessage.ID, "conversation_id": session.ID}
+		for key, value := range result {
+			completion[key] = value
+		}
+		writeSSE(w, "message.done", completion)
 		if flusher, ok := w.(http.Flusher); ok {
 			flusher.Flush()
 		}
@@ -359,18 +373,53 @@ func publicWidgetHistory(messages []model.Message, limit int) []publicWidgetMess
 	return result
 }
 
+// widgetLeadCustomFieldLimit and the sizes beside it bound a payload a visitor
+// controls and this service then stores, in the same spirit as the cap on
+// client_message_id: the state file is rewritten in full on every write.
+const (
+	widgetLeadCustomFieldLimit      = 20
+	widgetLeadCustomFieldKeyLimit   = 64
+	widgetLeadCustomFieldValueLimit = 500
+)
+
+// The widget deployed today posts contact details inside a "fields" object and
+// expresses consent as "granted". The integration contract documents the same
+// values at the top level, with "custom_fields" beside them and consent given as
+// "contact", "privacy_policy" and "captured_at". decodeJSON refuses unknown
+// fields, so a client written against the contract was answered with 400 for
+// every capture. Both spellings are accepted here; where a caller sends both,
+// the nested object wins because that is what the shipped widget sends.
 type widgetLeadRequest struct {
 	ClientCaptureID string `json:"client_capture_id,omitempty"`
+	Name            string `json:"name,omitempty"`
+	Email           string `json:"email,omitempty"`
+	Phone           string `json:"phone,omitempty"`
+	Company         string `json:"company,omitempty"`
 	Fields          struct {
 		Name    string `json:"name,omitempty"`
 		Email   string `json:"email,omitempty"`
 		Phone   string `json:"phone,omitempty"`
 		Company string `json:"company,omitempty"`
-	} `json:"fields"`
-	Consent struct {
+	} `json:"fields,omitempty"`
+	CustomFields map[string]string `json:"custom_fields,omitempty"`
+	Consent      struct {
 		Granted       bool   `json:"granted"`
+		Contact       bool   `json:"contact"`
+		PrivacyPolicy bool   `json:"privacy_policy"`
+		CapturedAt    string `json:"captured_at,omitempty"`
 		NoticeVersion string `json:"notice_version,omitempty"`
 	} `json:"consent"`
+}
+
+// firstProvidedValue returns the first value that still holds something once the
+// surrounding whitespace is gone.
+func firstProvidedValue(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func (s *Server) widgetLead(w http.ResponseWriter, r *http.Request) {
@@ -378,7 +427,10 @@ func (s *Server) widgetLead(w http.ResponseWriter, r *http.Request) {
 	if !s.decodeJSON(w, r, &input) {
 		return
 	}
-	if !input.Consent.Granted {
+	// "granted" is what the widget sends, "contact" is what the contract calls the
+	// same affirmative permission to get in touch. Either one, on its own, is the
+	// consent this endpoint requires.
+	if !input.Consent.Granted && !input.Consent.Contact {
 		s.writeError(w, r, http.StatusUnprocessableEntity, "consent_required", "Consent is required before contact details can be saved", nil)
 		return
 	}
@@ -387,8 +439,18 @@ func (s *Server) widgetLead(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusUnauthorized, "invalid_session", "The widget session is invalid or expired", nil)
 		return
 	}
-	email := normalizeEmail(input.Fields.Email)
-	phone := normalizePhone(input.Fields.Phone)
+	// Every other widget surface refuses to serve an account without a live
+	// subscription. Lead capture is the one the account is actually paid for, so
+	// leaving it open let a lapsed workspace keep collecting contact details for
+	// as long as an already issued session token stayed valid.
+	if !s.hasEntitlement(session.AccountID) {
+		s.writeError(w, r, http.StatusPaymentRequired, "subscription_required", "This assistant is temporarily unavailable", nil)
+		return
+	}
+	name := firstProvidedValue(input.Fields.Name, input.Name)
+	company := firstProvidedValue(input.Fields.Company, input.Company)
+	email := normalizeEmail(firstProvidedValue(input.Fields.Email, input.Email))
+	phone := normalizePhone(firstProvidedValue(input.Fields.Phone, input.Phone))
 	if email == "" && phone == "" {
 		s.writeError(w, r, http.StatusUnprocessableEntity, "validation_failed", "An email address or phone number is required", nil)
 		return
@@ -403,17 +465,42 @@ func (s *Server) widgetLead(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusUnprocessableEntity, "validation_failed", "Phone number is invalid", map[string]string{"phone": "invalid"})
 		return
 	}
-	if len(input.Fields.Name) > 160 || len(input.Fields.Company) > 160 {
+	if len(name) > 160 || len(company) > 160 {
 		s.writeError(w, r, http.StatusUnprocessableEntity, "validation_failed", "Lead fields are too long", nil)
 		return
 	}
+	if len(input.CustomFields) > widgetLeadCustomFieldLimit {
+		s.writeError(w, r, http.StatusUnprocessableEntity, "validation_failed", "Too many custom lead fields were submitted", map[string]int{"limit": widgetLeadCustomFieldLimit})
+		return
+	}
+	for key, value := range input.CustomFields {
+		if len(key) > widgetLeadCustomFieldKeyLimit || len(value) > widgetLeadCustomFieldValueLimit {
+			s.writeError(w, r, http.StatusUnprocessableEntity, "validation_failed", "Custom lead fields are too long", nil)
+			return
+		}
+	}
 	now := time.Now().UTC()
-	lead := model.Lead{ID: newID("lead_"), AccountID: session.AccountID, AgentID: session.AgentID, SessionID: session.ID, VisitorID: session.VisitorID, Name: strings.TrimSpace(input.Fields.Name), Email: email, Phone: phone, Company: strings.TrimSpace(input.Fields.Company), Status: "new", Source: "widget", Metadata: map[string]string{"consent": "granted", "notice_version": input.Consent.NoticeVersion, "capture_id": input.ClientCaptureID}, CreatedAt: now, UpdatedAt: now}
+	metadata := map[string]string{"consent": "granted", "notice_version": input.Consent.NoticeVersion, "capture_id": input.ClientCaptureID}
+	if input.Consent.PrivacyPolicy {
+		metadata["privacy_policy_accepted"] = "true"
+	}
+	// The moment of consent is evidence worth keeping, but it arrives from the
+	// browser, so it is stored only when it really is a timestamp and only in the
+	// shape this service writes elsewhere.
+	if capturedAt, err := time.Parse(time.RFC3339, strings.TrimSpace(input.Consent.CapturedAt)); err == nil {
+		metadata["consent_captured_at"] = capturedAt.UTC().Format(time.RFC3339)
+	}
+	// Custom answers are namespaced so a visitor cannot overwrite the consent
+	// evidence stored beside them.
+	for key, value := range input.CustomFields {
+		metadata["custom."+key] = value
+	}
+	lead := model.Lead{ID: newID("lead_"), AccountID: session.AccountID, AgentID: session.AgentID, SessionID: session.ID, VisitorID: session.VisitorID, Name: name, Email: email, Phone: phone, Company: company, Status: "new", Source: "widget", Metadata: metadata, CreatedAt: now, UpdatedAt: now}
 	err := s.store.Update(func(state *model.State) error {
 		for index := range state.Leads {
 			existing := &state.Leads[index]
 			if input.ClientCaptureID != "" && existing.AccountID == session.AccountID && existing.AgentID == session.AgentID && existing.SessionID == session.ID && existing.Metadata["capture_id"] == input.ClientCaptureID {
-				lead = *existing
+				lead = existing.Clone()
 				return nil
 			}
 			if existing.AccountID == session.AccountID && existing.AgentID == session.AgentID && existing.SessionID == session.ID && ((email != "" && existing.Email == email) || (phone != "" && existing.Phone == phone)) {
@@ -430,7 +517,7 @@ func (s *Server) widgetLead(w http.ResponseWriter, r *http.Request) {
 					existing.Company = lead.Company
 				}
 				existing.UpdatedAt = now
-				lead = *existing
+				lead = existing.Clone()
 				return nil
 			}
 		}

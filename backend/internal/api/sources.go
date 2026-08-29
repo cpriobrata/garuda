@@ -14,11 +14,13 @@ import (
 
 func (s *Server) listKnowledgeSources(w http.ResponseWriter, r *http.Request) {
 	identity := identityFrom(r.Context())
-	var sources []model.KnowledgeItem
+	// An agent with no sources must still answer with an empty JSON array. A nil
+	// slice encodes as null, and clients that call .map() on the result throw.
+	sources := make([]model.KnowledgeItem, 0)
 	found := false
 	_ = s.store.View(func(state *model.State) error {
 		if agent, ok := findAgent(state, identity.AccountID, r.PathValue("agentID")); ok && agent.Status != "archived" {
-			sources, found = append([]model.KnowledgeItem(nil), agent.Knowledge...), true
+			sources, found = append(sources, agent.Knowledge...), true
 		}
 		return nil
 	})

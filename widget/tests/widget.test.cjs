@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const { resolve } = require('node:path');
+const { pathToFileURL } = require('node:url');
 const test = require('node:test');
 const widget = require('../src/v1.js');
 
@@ -211,4 +212,196 @@ test('source does not use HTML injection sinks or dynamic code execution', () =>
   const source = readFileSync(resolve(__dirname, '..', 'src', 'v1.js'), 'utf8');
   assert.doesNotMatch(source, /\.innerHTML\b|\.outerHTML\b|insertAdjacentHTML\b|document\.write\b/);
   assert.doesNotMatch(source, /\beval\s*\(|\bnew\s+Function\s*\(/);
+});
+
+test('the build writes every copy of the widget that customers are served', async () => {
+  const build = await import(pathToFileURL(resolve(__dirname, '..', 'scripts', 'build.mjs')).href);
+  const source = readFileSync(build.sourcePath, 'utf8');
+  const packageJSON = JSON.parse(readFileSync(build.packagePath, 'utf8'));
+  const expected = build.renderWidget(source, packageJSON.version);
+  const asPosix = (value) => value.replaceAll('\\', '/');
+
+  const servedByTheAPI = build.outputPaths.filter(
+    (outputPath) => asPosix(outputPath).endsWith('/backend/internal/api/assets/widget.js')
+  );
+  assert.equal(
+    servedByTheAPI.length,
+    1,
+    'the Go binary embeds assets/widget.js and serves it at /widget.js, so the build has to write it'
+  );
+  const packaged = build.outputPaths.filter(
+    (outputPath) => asPosix(outputPath).endsWith('/widget/dist/v1.js')
+  );
+  assert.equal(packaged.length, 1, 'the demo page and the npm package still read dist/v1.js');
+
+  for (const outputPath of build.outputPaths) {
+    assert.equal(
+      readFileSync(outputPath, 'utf8'),
+      expected,
+      asPosix(outputPath) + ' has drifted from src/v1.js. Run npm run build.'
+    );
+  }
+});
+
+test('re-running the embed snippet does not mount a second widget', () => {
+  const loaderScript = (agentKey) => {
+    const attributes = { 'data-agent-key': agentKey, 'data-mode': 'demo' };
+    const owns = (name) => Object.prototype.hasOwnProperty.call(attributes, name);
+    return {
+      getAttribute(name) { return owns(name) ? attributes[name] : null; },
+      hasAttribute(name) { return owns(name); },
+      setAttribute(name, value) { attributes[name] = String(value); }
+    };
+  };
+
+  const hadDocument = 'document' in global;
+  const originalDocument = global.document;
+  const originalMounts = global.garudaWidgetMounts;
+  const originalMount = widget.GarudaWidget.prototype.mount;
+  const mounted = [];
+  widget.GarudaWidget.prototype.mount = function stubbedMount() { mounted.push(this); };
+  const documentStub = {
+    currentScript: loaderScript('pub_live_bootAgent'),
+    querySelectorAll() { return []; }
+  };
+  global.document = documentStub;
+  delete global.garudaWidgetMounts;
+
+  try {
+    widget.boot();
+    widget.boot();
+    assert.equal(mounted.length, 1, 'the same script tag must only boot once');
+
+    documentStub.currentScript = loaderScript('pub_live_bootAgent');
+    widget.boot();
+    assert.equal(
+      mounted.length,
+      1,
+      'a single page application that re-injects the snippet must not stack a second widget'
+    );
+
+    documentStub.currentScript = loaderScript('pub_live_secondAgent');
+    widget.boot();
+    assert.equal(mounted.length, 2, 'a different agent on the same page still gets its own widget');
+
+    mounted[0].nodes = { host: { isConnected: false } };
+    documentStub.currentScript = loaderScript('pub_live_bootAgent');
+    widget.boot();
+    assert.equal(mounted.length, 3, 'a widget removed with the page can mount again');
+  } finally {
+    widget.GarudaWidget.prototype.mount = originalMount;
+    if (originalMounts === undefined) delete global.garudaWidgetMounts;
+    else global.garudaWidgetMounts = originalMounts;
+    if (hadDocument) global.document = originalDocument;
+    else delete global.document;
+  }
+});
+
+test('a stream that stalls after the headers times out instead of wedging the widget', async () => {
+  const realSetTimeout = global.setTimeout;
+  const originalClearTimeout = global.clearTimeout;
+  const originalFetch = global.fetch;
+  const timers = new Map();
+  const delays = [];
+  let nextTimerID = 1;
+  global.setTimeout = (callback, delay) => {
+    const timerID = nextTimerID;
+    nextTimerID += 1;
+    timers.set(timerID, callback);
+    delays.push(delay);
+    return timerID;
+  };
+  global.clearTimeout = (timerID) => { timers.delete(timerID); };
+
+  const encoder = new TextEncoder();
+  global.fetch = async (_url, options) => {
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode('event: message.start\ndata: {"message_id":"m1"}\n\n'));
+        controller.enqueue(encoder.encode('event: delta\ndata: {"text":"Half a sen"}\n\n'));
+        // The stream then goes quiet forever, the way a dropped upstream does.
+        options.signal.addEventListener('abort', () => {
+          controller.error(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+        });
+      }
+    });
+    return new Response(body, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' }
+    });
+  };
+
+  try {
+    const api = new widget.LiveAPI({
+      apiOrigin: 'https://api.garuda.example',
+      agentKey: 'pub_live_testAgent'
+    });
+    let received = '';
+    const pending = api.sendMessage(
+      { sessionID: 'session-1', sessionToken: 'short-lived-token' },
+      { clientMessageID: 'client-1', content: 'Hello' },
+      { onStart() {}, onDelta(piece) { received += piece; }, onLead() {}, onDone() {} }
+    );
+    await new Promise((done) => realSetTimeout(done, 20));
+
+    assert.equal(received, 'Half a sen', 'the deltas that did arrive are still delivered');
+    assert.equal(timers.size, 1, 'the stalled stream has to stay under an inactivity timer');
+    assert.equal(delays[delays.length - 1], 30000, 'each chunk restarts the inactivity timer');
+
+    for (const fire of Array.from(timers.values())) fire();
+
+    const bounded = Promise.race([
+      pending,
+      new Promise((_done, fail) => {
+        realSetTimeout(() => fail(new Error('the widget never gave up on the stalled stream')), 2000);
+      })
+    ]);
+    await assert.rejects(bounded, (error) => {
+      assert.equal(error.code, 'stream_timeout');
+      assert.equal(error.message, 'The assistant stopped responding. Please try again.');
+      return true;
+    });
+  } finally {
+    global.setTimeout = realSetTimeout;
+    global.clearTimeout = originalClearTimeout;
+    global.fetch = originalFetch;
+  }
+});
+
+test('the non-modal panel lets Tab leave and still closes on Escape', () => {
+  const focused = [];
+  const focusable = [
+    { hidden: false, offsetParent: {}, focus() { focused.push('first'); } },
+    { hidden: false, offsetParent: {}, focus() { focused.push('last'); } }
+  ];
+  const panel = {
+    querySelectorAll() { return focusable; },
+    getRootNode() { return { activeElement: focusable[focusable.length - 1] }; }
+  };
+  const openStates = [];
+  const instance = Object.create(widget.GarudaWidget.prototype);
+  instance.nodes = { panel };
+  instance.setOpen = function setOpen(next) { openStates.push(next); };
+
+  let tabPrevented = false;
+  instance.handlePanelKeys({ key: 'Tab', shiftKey: false, preventDefault() { tabPrevented = true; } });
+  assert.equal(tabPrevented, false, 'a dialog that reports aria-modal="false" must let Tab out');
+  assert.deepEqual(focused, [], 'focus is not pulled back to the top of the panel');
+
+  let shiftTabPrevented = false;
+  instance.handlePanelKeys({ key: 'Tab', shiftKey: true, preventDefault() { shiftTabPrevented = true; } });
+  assert.equal(shiftTabPrevented, false);
+  assert.deepEqual(focused, []);
+
+  let escapePrevented = false;
+  instance.handlePanelKeys({ key: 'Escape', preventDefault() { escapePrevented = true; } });
+  assert.equal(escapePrevented, true);
+  assert.deepEqual(openStates, [false], 'Escape still closes the panel');
+
+  const source = readFileSync(resolve(__dirname, '..', 'src', 'v1.js'), 'utf8');
+  assert.match(
+    source,
+    /setAttribute\('aria-modal', 'false'\)/,
+    'the panel claims to be non-modal; making it modal means revisiting focus handling'
+  );
 });

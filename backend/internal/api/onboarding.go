@@ -67,33 +67,98 @@ func (s *Server) saveOnboarding(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusUnprocessableEntity, "validation_failed", "One or more onboarding answers are too long", nil)
 		return
 	}
+	submitted, overlongField := submittedOnboardingAnswers(input.Answers)
+	if overlongField != "" {
+		s.writeError(w, r, http.StatusUnprocessableEntity, "validation_failed", "One or more onboarding answers are too long", map[string]string{"field": overlongField})
+		return
+	}
 	now := time.Now().UTC()
 	value := model.Onboarding{
 		AccountID: identity.AccountID, BusinessName: strings.TrimSpace(input.BusinessName), Industry: strings.TrimSpace(input.Industry),
 		Website: strings.TrimSpace(input.Website), Audience: strings.TrimSpace(input.Audience), Goals: cleanStrings(input.Goals, 8, 200),
 		Tone: strings.TrimSpace(input.Tone), BotType: strings.TrimSpace(input.BotType), KeyOffers: cleanStrings(input.KeyOffers, 20, 300), FAQs: input.FAQs,
-		Answers: input.Answers, UpdatedAt: now,
+		UpdatedAt: now,
 	}
-	if value.Answers == nil {
-		value.Answers = legacyOnboardingAnswers(value)
-	}
+	var result model.Onboarding
 	if err := s.store.Update(func(state *model.State) error {
+		var existing *model.Onboarding
 		for index := range state.Onboarding {
 			if state.Onboarding[index].AccountID == identity.AccountID {
-				value.Messages = state.Onboarding[index].Messages
-				value.CompletedAt = state.Onboarding[index].CompletedAt
-				value.GeneratedAgentID = state.Onboarding[index].GeneratedAgentID
-				state.Onboarding[index] = value
-				return nil
+				existing = &state.Onboarding[index]
+				break
 			}
 		}
-		state.Onboarding = append(state.Onboarding, value)
+		answers := map[string]string{}
+		if existing != nil {
+			value.Messages = existing.Messages
+			value.CompletedAt = existing.CompletedAt
+			value.GeneratedAgentID = existing.GeneratedAgentID
+			previous := existing.Answers
+			if previous == nil {
+				previous = legacyOnboardingAnswers(*existing)
+			}
+			for field, answer := range previous {
+				answers[field] = answer
+			}
+		}
+		for field, answer := range legacyOnboardingAnswers(value) {
+			answers[field] = answer
+		}
+		// The portal only ever sends the typed answers, so they have to survive this
+		// write and become the business context the agent generator reads. Replacing
+		// the record wholesale left every generated agent generic.
+		for field, answer := range submitted {
+			answers[field] = answer
+		}
+		value.Answers = answers
+		fillOnboardingContextFromAnswers(&value)
+		if existing != nil {
+			*existing = value
+		} else {
+			state.Onboarding = append(state.Onboarding, value)
+		}
+		result = value.Clone()
 		return nil
 	}); err != nil {
 		s.storageFailure(w, r, err)
 		return
 	}
-	s.writeData(w, http.StatusOK, onboardingView(value))
+	s.writeData(w, http.StatusOK, onboardingView(result))
+}
+
+// submittedOnboardingAnswers keeps the answers that belong to a known question and
+// reports the first field whose answer exceeds the same limit the chat path applies.
+func submittedOnboardingAnswers(supplied map[string]string) (map[string]string, string) {
+	answers := map[string]string{}
+	for _, question := range onboardingQuestionsList {
+		answer := strings.TrimSpace(supplied[question.ID])
+		if answer == "" {
+			continue
+		}
+		if len(answer) > 4_000 {
+			return nil, question.ID
+		}
+		answers[question.ID] = answer
+	}
+	return answers, ""
+}
+
+// fillOnboardingContextFromAnswers derives the business context fields that agent
+// generation reads from the typed answers, without overwriting anything the caller
+// stated directly. applyCanonicalAnswers does the same for the chat path.
+func fillOnboardingContextFromAnswers(onboarding *model.Onboarding) {
+	if onboarding.BusinessName == "" {
+		onboarding.BusinessName = onboarding.Answers["business_profile"]
+	}
+	if len(onboarding.Goals) == 0 && onboarding.Answers["primary_outcome"] != "" {
+		onboarding.Goals = []string{onboarding.Answers["primary_outcome"]}
+	}
+	if onboarding.Audience == "" {
+		onboarding.Audience = onboarding.Answers["audience_and_offer"]
+	}
+	if onboarding.Tone == "" {
+		onboarding.Tone = onboarding.Answers["voice_and_capture"]
+	}
 }
 
 type onboardingMessageRequest struct {
@@ -135,11 +200,20 @@ func (s *Server) onboardingMessage(w http.ResponseWriter, r *http.Request) {
 		if onboarding.Answers == nil {
 			onboarding.Answers = legacyOnboardingAnswers(*onboarding)
 		}
-		for _, existing := range onboarding.Messages {
-			if input.ClientMessageID != "" && existing.ID == input.ClientMessageID {
-				result = *onboarding
-				return errors.New("duplicate")
+		for index, existing := range onboarding.Messages {
+			if input.ClientMessageID == "" || existing.ID != input.ClientMessageID {
+				continue
 			}
+			// A retry has to be answerable with the body the first call returned, so
+			// rebuild that answer from the stored conversation instead of switching
+			// to the onboarding record shape the caller cannot parse.
+			userMessage = existing
+			if index+1 < len(onboarding.Messages) && onboarding.Messages[index+1].Role == "assistant" {
+				assistantMessage = onboarding.Messages[index+1]
+			}
+			acceptedField = onboardingFieldAnsweredBy(*onboarding, existing.Content)
+			result = onboarding.Clone()
+			return errors.New("duplicate")
 		}
 		for _, question := range onboardingQuestionsList {
 			if strings.TrimSpace(onboarding.Answers[question.ID]) == "" {
@@ -161,13 +235,13 @@ func (s *Server) onboardingMessage(w http.ResponseWriter, r *http.Request) {
 		onboarding.Messages = append(onboarding.Messages, assistantMessage)
 		onboarding.UpdatedAt = now
 		applyCanonicalAnswers(onboarding)
-		result = *onboarding
+		result = onboarding.Clone()
 		return nil
 	})
 	if err != nil {
 		switch err.Error() {
 		case "duplicate":
-			s.writeData(w, http.StatusOK, onboardingView(result))
+			s.writeData(w, http.StatusOK, onboardingMessageView(userMessage, assistantMessage, acceptedField, result, true))
 		case "complete":
 			s.writeError(w, r, http.StatusConflict, "onboarding_already_answered", "All required onboarding questions are already answered", nil)
 		default:
@@ -175,11 +249,33 @@ func (s *Server) onboardingMessage(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	s.writeData(w, http.StatusCreated, map[string]any{
+	s.writeData(w, http.StatusCreated, onboardingMessageView(userMessage, assistantMessage, acceptedField, result, false))
+}
+
+// onboardingMessageView builds the one body shape POST /v1/onboarding/messages
+// answers with, so an idempotent retry returns what the first call returned.
+func onboardingMessageView(userMessage, assistantMessage model.OnboardingMessage, acceptedField string, onboarding model.Onboarding, replayed bool) map[string]any {
+	return map[string]any{
 		"user_message": userMessage, "assistant_message": assistantMessage,
-		"accepted_answer":  map[string]string{"field": acceptedField, "value": input.Content},
-		"current_question": currentOnboardingQuestion(result), "progress": onboardingProgress(result), "ready_to_complete": onboardingAnswered(result) == 4,
-	})
+		"accepted_answer":  map[string]string{"field": acceptedField, "value": userMessage.Content},
+		"current_question": currentOnboardingQuestion(onboarding), "progress": onboardingProgress(onboarding),
+		"ready_to_complete": onboardingAnswered(onboarding) == 4, "replayed": replayed,
+	}
+}
+
+// onboardingFieldAnsweredBy reports which question a stored answer belongs to, so a
+// replayed message can name the field the original call reported accepting.
+func onboardingFieldAnsweredBy(onboarding model.Onboarding, content string) string {
+	answers := onboarding.Answers
+	if answers == nil {
+		answers = legacyOnboardingAnswers(onboarding)
+	}
+	for _, question := range onboardingQuestionsList {
+		if answers[question.ID] == content {
+			return question.ID
+		}
+	}
+	return ""
 }
 
 func (s *Server) completeOnboarding(w http.ResponseWriter, r *http.Request) {
@@ -193,7 +289,10 @@ func (s *Server) completeOnboarding(w http.ResponseWriter, r *http.Request) {
 	_ = s.store.View(func(state *model.State) error {
 		for _, candidate := range state.Onboarding {
 			if candidate.AccountID == identity.AccountID {
-				onboarding, found = candidate, true
+				// Clone: the answers are counted and handed to agent generation long
+				// after this read lock is released, and a message arriving meanwhile
+				// writes that same map. A concurrent map read is fatal, not a panic.
+				onboarding, found = candidate.Clone(), true
 				break
 			}
 		}

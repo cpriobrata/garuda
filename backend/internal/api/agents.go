@@ -24,15 +24,51 @@ type agentInput struct {
 	Branding         *model.BrandingConfig    `json:"branding,omitempty"`
 }
 
+// knowledgeSummary describes a knowledge source without its body. Source text
+// runs to a hundred thousand characters each, so the list endpoint names every
+// source instead of shipping it.
+type knowledgeSummary struct {
+	ID        string    `json:"id"`
+	Type      string    `json:"type,omitempty"`
+	Status    string    `json:"status,omitempty"`
+	Title     string    `json:"title"`
+	SourceURL string    `json:"source_url,omitempty"`
+	Failure   string    `json:"failure,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// agentSummary is the list representation of an agent. Knowledge is the only
+// field that differs from the full record: the shallower field here shadows the
+// embedded one when the summary is encoded, so the response carries source
+// identities and a count instead of every source body. Full text stays on
+// GET /v1/agents/{agentID} and GET /v1/agents/{agentID}/sources.
+type agentSummary struct {
+	model.Agent
+	Knowledge      []knowledgeSummary `json:"knowledge"`
+	KnowledgeCount int                `json:"knowledge_count"`
+}
+
+func summarizeAgent(agent model.Agent) agentSummary {
+	summary := agentSummary{Agent: agent, Knowledge: make([]knowledgeSummary, 0, len(agent.Knowledge)), KnowledgeCount: len(agent.Knowledge)}
+	summary.Agent.Knowledge = nil
+	for _, source := range agent.Knowledge {
+		summary.Knowledge = append(summary.Knowledge, knowledgeSummary{
+			ID: source.ID, Type: source.Type, Status: source.Status, Title: source.Title,
+			SourceURL: source.SourceURL, Failure: source.Failure, CreatedAt: source.CreatedAt,
+		})
+	}
+	return summary
+}
+
 func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	identity := identityFrom(r.Context())
 	page, pageSize := parsePage(r)
-	items := make([]model.Agent, 0)
+	items := make([]agentSummary, 0)
 	_ = s.store.View(func(state *model.State) error {
 		for index := len(state.Agents) - 1; index >= 0; index-- {
 			agent := state.Agents[index]
 			if agent.AccountID == identity.AccountID && agent.Status != "archived" {
-				items = append(items, agent.Clone())
+				items = append(items, summarizeAgent(agent.Clone()))
 			}
 		}
 		return nil
@@ -154,8 +190,13 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	wantedRevision := 0
-	if header := strings.Trim(strings.TrimSpace(r.Header.Get("If-Match")), `"`); header != "" {
-		wantedRevision, _ = strconv.Atoi(header)
+	if header := strings.TrimSpace(r.Header.Get("If-Match")); header != "" {
+		parsed, valid := parseIfMatchRevision(header)
+		if !valid {
+			s.writeError(w, r, http.StatusBadRequest, "invalid_if_match", "If-Match must be the quoted agent revision, for example \"3\"", nil)
+			return
+		}
+		wantedRevision = parsed
 	}
 	var result model.Agent
 	err := s.store.Update(func(state *model.State) error {
@@ -164,7 +205,7 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
 			return errors.New("not found")
 		}
 		if wantedRevision > 0 && wantedRevision != agent.Revision {
-			return errors.New("stale revision")
+			return staleRevisionError{currentRevision: agent.Revision}
 		}
 		if input.Name != nil {
 			agent.Name = strings.TrimSpace(*input.Name)
@@ -217,11 +258,12 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		var validation validationError
+		var stale staleRevisionError
 		switch {
 		case err.Error() == "not found":
 			s.writeError(w, r, http.StatusNotFound, "agent_not_found", "Agent not found", nil)
-		case err.Error() == "stale revision":
-			s.writeError(w, r, http.StatusPreconditionFailed, "stale_revision", "The agent has changed; reload before saving", nil)
+		case errors.As(err, &stale):
+			s.writeError(w, r, http.StatusPreconditionFailed, "stale_revision", "The agent has changed; reload before saving", map[string]int{"current_revision": stale.currentRevision})
 		case errors.As(err, &validation):
 			s.writeError(w, r, http.StatusUnprocessableEntity, "validation_failed", "One or more agent fields are invalid", validation.details)
 		default:
@@ -237,7 +279,10 @@ func (s *Server) archiveAgent(w http.ResponseWriter, r *http.Request) {
 	identity := identityFrom(r.Context())
 	found := false
 	err := s.store.Update(func(state *model.State) error {
-		if agent, ok := findAgent(state, identity.AccountID, r.PathValue("agentID")); ok {
+		// An agent that is already archived is gone as far as this API is
+		// concerned: every other agent route hides it. Archiving it a second
+		// time must not report success, and must not bump the revision.
+		if agent, ok := findAgent(state, identity.AccountID, r.PathValue("agentID")); ok && agent.Status != "archived" {
 			agent.Status = "archived"
 			agent.Revision++
 			agent.UpdatedAt = time.Now().UTC()
@@ -524,6 +569,35 @@ func (s *Server) embedCode(agent model.Agent) string {
 type validationError struct{ details map[string]string }
 
 func (e validationError) Error() string { return "validation failed" }
+
+// staleRevisionError carries the revision the store actually holds. A bare 412
+// left the editor wedged forever: the client was told its revision was wrong
+// but never told which revision to send instead.
+type staleRevisionError struct{ currentRevision int }
+
+func (e staleRevisionError) Error() string { return "stale revision" }
+
+// parseIfMatchRevision reads the agent revision out of an If-Match header. Only
+// the entity tags this API issues are accepted: a quoted revision, optionally
+// marked weak, or the wildcard that asks merely that the agent still exist.
+// Anything else fails the request. Ignoring a header the server cannot parse
+// turned a conditional write into an unconditional one, so a client sending a
+// corrupt If-Match silently overwrote a concurrent edit.
+func parseIfMatchRevision(header string) (revision int, valid bool) {
+	value := strings.TrimSpace(header)
+	if value == "*" {
+		return 0, true
+	}
+	value = strings.TrimSpace(strings.TrimPrefix(value, "W/"))
+	if len(value) < 3 || value[0] != '"' || value[len(value)-1] != '"' {
+		return 0, false
+	}
+	parsed, err := strconv.Atoi(value[1 : len(value)-1])
+	if err != nil || parsed < 1 {
+		return 0, false
+	}
+	return parsed, true
+}
 
 func valueOr(value, fallback string) string {
 	if strings.TrimSpace(value) != "" {

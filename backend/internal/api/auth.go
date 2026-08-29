@@ -187,13 +187,22 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, http.StatusUnauthorized, "invalid_credentials", "Email or password is incorrect", nil)
 			return
 		}
+		// A blank subject must never match. Users created through local auth carry an
+		// empty ExternalAuthID, so a provider response without an id would otherwise
+		// sign the caller in as the first such account, wrong password and all.
+		externalSubject := strings.TrimSpace(response.User.ID)
+		if externalSubject == "" {
+			s.logger.Error("authentication provider returned a sign in without a subject", "request_id", requestID(r.Context()))
+			s.writeError(w, r, http.StatusUnauthorized, "invalid_credentials", "Email or password is incorrect", nil)
+			return
+		}
 		var user model.User
 		found := false
 		now := time.Now().UTC()
 		if err := s.store.Update(func(state *model.State) error {
 			for index := range state.Users {
 				candidate := &state.Users[index]
-				if candidate.ExternalAuthID == response.User.ID {
+				if candidate.ExternalAuthID == externalSubject {
 					if candidate.EmailVerifiedAt == nil {
 						candidate.EmailVerifiedAt = &now
 						candidate.UpdatedAt = now
