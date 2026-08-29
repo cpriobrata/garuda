@@ -1,295 +1,184 @@
 # AI.md — Garuda project knowledge base
 
-Working notes for an AI assistant picking up this project. Read this first; it should
-save you a full re-exploration.
+Working notes for an AI assistant picking up this project. Read this first.
 
-**Snapshot taken:** 2026-08-29, ~02:25 IST.
-**Important caveat:** this snapshot was taken while another developer was actively
-editing nearly every file in the repo. Treat specific line numbers and "current state"
-claims as *approximate*. Architecture and conventions are stable; in-progress details
-may not be.
+**Updated:** 2026-08-30. Three build workflows were running when this was written, so
+files under `frontend/`, `backend/internal/api/` and `widget/` may be mid-change.
+Architecture and deployment facts below are stable.
 
-**No secrets in this file.** Credential *values* live in `backend/.env` and
-`frontend/.env.local` (both gitignored). Only variable names and non-sensitive,
-browser-visible identifiers appear here.
+**No secrets here.** Values live in `backend/.env` and `frontend/.env.local`, both
+gitignored. Only variable names and public identifiers appear below.
 
 ---
 
 ## 1. What Garuda is
 
-A multi-tenant SaaS for creating an AI sales/support chatbot and embedding it on a
-customer's website. The intended journey:
+Multi-tenant SaaS that creates a knowledge-grounded AI chat agent for a company's
+website. Sign up, pay $17/mo, answer a conversational onboarding, the model drafts an
+agent, the owner edits and publishes it, then one embed snippet goes on their site.
+The widget answers from approved knowledge and captures leads after explicit consent.
 
-1. Sign up (email/password or Google) → 2. Pay $17/mo via Stripe → 3. Answer a
-4-question conversational onboarding → 4. Garuda drafts an agent → 5. User edits and
-explicitly publishes → 6. User copies one `<script>` snippet onto their site →
-7. Widget answers from the agent's knowledge, captures leads after consent →
-8. Owner sees conversations and leads in the portal.
-
-Pricing is **USD 17/month recurring**. The amount shown in the UI must come from the
-server's configured Stripe Price, never from the client.
-
-`docs/integration-contract.md` (686 lines) is the **source of truth** when the UI and
-API disagree. Read it before making contract-level decisions.
+`docs/integration-contract.md` is the source of truth when UI and API disagree.
 
 ---
 
-## 2. Repo map
+## 2. It is LIVE
 
-| Path | What it is |
+| | |
 |---|---|
-| `backend/` | Go 1.22+ REST API, no web framework — stdlib `net/http` + `ServeMux` |
-| `backend/cmd/api/` | Entrypoint |
-| `backend/internal/api/` | HTTP handlers, middleware, routing |
-| `backend/internal/model/` | All persisted types, single `State` struct |
-| `backend/internal/store/` | Atomic JSON file persistence |
-| `backend/internal/security/` | JWT (HS256), PBKDF2 passwords, HMAC token hashing |
-| `backend/internal/googleauth/` | Google ID-token verifier (JWKS, RS256) |
-| `backend/internal/{llm,rag,billing,supabase}/` | External provider adapters |
-| `backend/migrations/` | Postgres/pgvector schema (not yet the runtime store) |
-| `backend/supabase/functions/` | Deno Edge Functions for RAG ingest/search |
-| `frontend/` | Next.js App Router, TypeScript, Tailwind, shadcn/ui-style Radix |
-| `frontend/lib/api.ts` | The entire API client + demo-mode fallbacks |
-| `widget/` | Dependency-free embeddable widget (Shadow DOM), own tests |
-| `docs/integration-contract.md` | Canonical API/security/production contract |
+| API | `https://api.garuda.ravan.ai` on VPS `2.29.22.88`, Caddy TLS, systemd |
+| Frontend | `https://garuda-olive.vercel.app` (Vercel project `garuda`, account `cpriobrata-6081`) |
+| Custom domain | `garuda.ravan.ai` — DNS points at Vercel but is NOT attached to the project |
+| Repo | `github.com/cpriobrata/garuda`, frontend auto-deploys on push to `main` |
+
+SSH with the key at `C:/Users/cprio/.ssh/prio-server.pem`, publickey only.
+Backend deploys by cross-compiling and replacing the binary — see `deploy/README.md`:
+
+    GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o garuda-api ./cmd/api
+
+Server layout: binary and `.env` in `/opt/garuda`, data at
+`/opt/garuda/data/garuda.json`, backups every 6h into `/opt/garuda/backups`
+(JSON-validated before keeping, 14-day retention).
 
 ---
 
 ## 3. Architecture essentials
 
-- **Zero-dependency Go backend.** `go.mod` has no third-party deps. JWT, PBKDF2,
-  rate limiting, and the Stripe/Google/Supabase clients are all hand-rolled. Don't
-  reach for a library without a good reason — it breaks the project's stated posture.
-- **Persistence is a single JSON file** (`backend/data/garuda.json`), guarded by a
-  `sync.RWMutex`, written atomically via temp-file + rename, with in-memory rollback
-  on write failure. `store.Store` is an interface — the Postgres repository is the
-  planned successor, and `backend/migrations/` already has the schema.
-- **Everything degrades gracefully.** Every provider adapter has `Enabled()` and a
-  local fallback. The whole app runs with **zero credentials** in demo mode.
-- **`GARUDA_DEMO_MODE` is the master switch.** When true: entitlement checks always
-  pass, `localhost` origins are allowed, reset tokens are exposed in API responses,
-  and `AUTH_RESET_URL` may be plain HTTP. Setting it `false` forces HTTPS on
-  `AUTH_RESET_URL`, which localhost cannot satisfy — so **demo mode must stay `true`
-  for local development.**
+- **Zero third-party Go dependencies.** `go.mod` has no requires. JWT, PBKDF2, rate
+  limiting and the Stripe / Google / Supabase / SendGrid / Composio clients are all
+  hand-rolled. Do not add a dependency.
+- **Persistence is ONE JSON file** behind `store.Store`, guarded by an RWMutex,
+  written atomically. Postgres is designed but NOT built; nothing imports
+  `database/sql` or `pgx`.
+- **Everything degrades.** Every adapter has `Enabled()` and a local fallback, so the
+  product runs with zero credentials.
+- **`GARUDA_DEMO_MODE` defaults to true**, and in demo mode `hasEntitlement` returns
+  true for everyone. Startup now REFUSES demo mode alongside any production signal
+  (environment other than development, an https public URL, an https allowed origin).
+  That guard is what keeps billing switched on in production.
 
 ---
 
-## 4. Authentication — three coexisting paths
+## 4. The rules that bite
 
-This is the most confusing area. There are three ways a user can authenticate, and
-which one runs depends on config.
-
-### a) Local (default, demo)
-Password hashed with PBKDF2-SHA256, 160k iterations. Access token is a self-signed
-HS256 JWT (`GARUDA_JWT_SECRET`). Refresh tokens are opaque, prefixed `grt1_`, stored
-as SHA-256 hashes.
-
-**Refresh rotation is family-based:** reusing an already-used refresh token revokes
-the *entire family*. This is deliberate replay defense — don't "simplify" it away.
-
-### b) Supabase Auth
-Active when `SUPABASE_URL` + `SUPABASE_ANON_KEY` are both set (they're validated as a
-pair — one without the other is a startup error). The Go API *proxies* Supabase; the
-browser never talks to Supabase directly and has no `@supabase/supabase-js` dependency.
-Local users are matched by `User.ExternalAuthID`.
-
-### c) Google Sign-In — **ID token, not the redirect flow**
-
-This is the single most misunderstood part. Get it right:
-
-- Frontend uses **Google Identity Services** (`accounts.google.com/gsi/client`) with
-  `ux_mode: "popup"` and `renderButton`. See `frontend/components/auth/google-auth-button.tsx`.
-- It obtains an **ID token (JWT)** and POSTs it to `/v1/auth/google`.
-- `internal/googleauth/verifier.go` verifies it against Google's JWKS: RS256 only,
-  `iss` must be Google, `aud` must **exactly** equal the client ID, `email_verified`
-  must be true, plus strict timestamp bounds and RSA key sanity checks.
-- The backend then issues **its own local JWT** — Google is not used for sessions.
-
-Consequences that trip people up:
-
-- **There is no redirect URI.** Do not register the Supabase
-  `/auth/v1/callback` URL and do not chase `redirect_uri_mismatch`. What matters is
-  **Authorized JavaScript origins** (`http://localhost:3000` for local dev).
-- **The Google client secret is never used.** `config.go` reads only
-  `GOOGLE_OAUTH_CLIENT_ID`. No `GOOGLE_OAUTH_CLIENT_SECRET` is consumed anywhere.
-- Google sign-in does **not** go through Supabase at all.
-- The OAuth consent screen is in **Testing** mode, so only listed test users can sign
-  in regardless of everything else.
-
-**Account-linking safety rule** (`googleauth.AuthoritativeEmail`): a Google identity
-may silently link to an existing account by email *only* if the claim carries a hosted
-domain (`hd`) or is `@gmail.com`. Otherwise the user must prove ownership with their
-existing password first. This blocks account takeover via a self-controlled mail
-domain. Preserve this.
+1. **`store.View` hands out LIVE state.** Copying a struct copies only map and slice
+   headers. Anything outliving the callback must be deep-copied with the `model`
+   Clone helpers. Reading a Go map while another goroutine writes it is a FATAL
+   error — unrecoverable, kills the process, `recoverPanic` cannot catch it. This was
+   a real production crash path through `getOnboarding`.
+2. **`store.Update` rolls back on callback error too.** It did not, so a request
+   rejected with 422 still applied every other field, and the next successful write
+   persisted it.
+3. Cross-tenant access returns **404, never 403**.
+4. Envelopes: `data`/`meta` on success, `error` with `code`, `message`, `request_id`
+   and `details` on failure. Always use `writeData` / `writeError`.
+5. `decodeJSON` uses `DisallowUnknownFields` and a 1MB cap, so a new request field
+   must exist on both sides or it is a 400.
+6. **Do not bump `model.SchemaVersion`.** `OpenFile` refuses to boot when the file's
+   version exceeds the binary's, which makes rollback an incident.
+7. Never log or URL-encode prompts, chat bodies, tokens, emails or phone numbers.
+8. `.env` values containing spaces must be quoted, or sourcing the file executes the
+   second word.
+9. `StartLimitIntervalSec` and `StartLimitBurst` belong in systemd's `[Unit]`, not
+   `[Service]`. Both are 0 so restarts are unlimited — verified by killing the
+   process eight times in a row.
 
 ---
 
-## 5. Billing
+## 5. Auth — three coexisting paths
 
-- Stripe Checkout and billing-portal sessions are created **server-side**. The API
-  ignores any client-supplied amount, currency, price, or success URL.
-- Webhook signature verification is hand-written standard Stripe v1 HMAC with a
-  ±5 minute timestamp tolerance (`internal/billing/stripe.go`).
-- Replay protection: handled event IDs are recorded in `State.WebhookEvents`.
-- Handled events: `checkout.session.completed`, `customer.subscription.*`,
-  `invoice.paid`, `invoice.payment_failed`.
-- Config validation: outside demo mode, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`,
-  and `STRIPE_PRICE_ID` must be set **together or not at all**.
-- A Stripe success URL is *not* proof of payment. `/checkout/success` polls `/v1/me`
-  and waits for webhook-derived entitlement.
+- **Local:** PBKDF2 at 160k iterations, HS256 access tokens, opaque `grt1_` refresh
+  tokens with whole-family revocation on reuse. Email verification enforced outside
+  demo mode.
+- **Supabase:** active when `SUPABASE_URL` and `SUPABASE_ANON_KEY` are both set. The
+  Go API proxies it; the browser never talks to Supabase directly.
+- **Google:** Google Identity Services **ID tokens**, verified against Google's JWKS.
+  **No redirect URI is used** — only Authorized JavaScript origins matter, and the
+  client secret is never read. The consent screen is still in Testing mode.
 
 ---
 
-## 6. AI and RAG
+## 6. Integrations via Composio — built 2026-08-30
 
-- **LLM:** Gemini via its **OpenAI-compatible** endpoint
-  (`https://generativelanguage.googleapis.com/v1beta/openai`). `LLM_API_KEY` falls
-  back to `GEMINI_API_KEY`.
-- When the key is missing, `llm.Chat` returns `localReply()` and `GenerateAgent`
-  returns `localDraft()` — **deterministic canned text, silently**. Responses carry
-  `provider_mode: "local_demo"` vs `"configured"`. If the chatbot feels dumb, check
-  this before debugging prompts.
-- **RAG (as designed):** Supabase Postgres + pgvector, with two Deno Edge Functions
-  (`garuda-rag-ingest`, `garuda-rag-search`) that embed using Supabase's built-in
-  `gte-small` model → **384 dimensions**, no separate embedding provider.
-- Edge functions authenticate with a shared bearer secret compared in constant time;
-  `RAG_EDGE_URL` and `RAG_EDGE_BEARER_TOKEN` are validated as a pair, token ≥32 chars.
-- The functions support two ID modes: `relationalMode` (UUIDs, the Postgres future)
-  and `runtimeMode` (opaque keys, what the JSON store actually uses today).
-- **Enabling RAG before deploying the functions is worse than leaving it off** — every
-  ingested knowledge source gets marked `status: "failed"`.
+Each customer connects **their own** third-party accounts. Garuda writes no
+per-provider integration code.
 
----
-
-## 7. Widget
-
-- Dependency-free, Shadow DOM isolated, served from `GET /widget.js` (embedded in the
-  Go binary via `go:embed`).
-- Returning visitors are recognized by an **opaque, agent-scoped** token:
-  `visitorID = "vst_" + HMAC(GARUDA_VISITOR_HMAC_KEY, agentID, visitorToken)`.
-  Scoping by agent means the same browser cannot be correlated across tenants.
-- `GARUDA_VISITOR_HMAC_KEY` must differ from `GARUDA_JWT_SECRET` outside demo mode —
-  enforced at startup.
-- Widget writes use `X-Garuda-Session-Token`, a much narrower credential than a portal
-  token. Sessions also pin `Origin` and re-check it on later requests.
-- Per-agent `Branding.AllowedDomains` gates which sites may embed. Empty list is
-  permitted **only** in demo mode.
+- `backend/internal/composio` — hand-rolled HTTPS client using the `x-api-key` header.
+- Endpoints: `GET /v1/integrations/catalog`, `/categories`, `/connections`;
+  `POST /v1/integrations/connections`; `DELETE /v1/integrations/connections/{id}`.
+- **1,431 toolkits** verified live. Managed auth (needing no OAuth app of your own)
+  confirmed for Google Calendar, Slack, HubSpot and Salesforce. **Highlevel and
+  Pipedrive have NO managed auth**, so those two need Garuda's own OAuth app and the
+  provider review that comes with it.
+- Uses **Connect Link**, not `initiate()` — Composio retired that path for managed
+  OAuth during 2026 (8 May for new orgs, 3 July for the rest).
+- Tenant boundary: the Composio `user_id` IS the Garuda account id. Listing
+  connections without one is refused; disconnect re-verifies ownership first.
+- Two key types exist and are easy to confuse. Platform keys (`ak_`) use `x-api-key`
+  and are the ones this code needs. Connect/MCP keys (`ck_`) use `x-consumer-api-key`
+  and will not work here.
+- **Known risk:** Composio disclosed a breach on 2026-05-21, roughly 5,241 API keys
+  and 5,001 GitHub OAuth tokens exfiltrated. The key in use has no IP restriction; an
+  allowlist scoped to 2.29.22.88 would cut the blast radius.
 
 ---
 
-## 8. Conventions and gotchas
+## 7. Providers
 
-- **Response envelope:** success `{"data": ..., "meta": ...}`, error
-  `{"error": {code, message, request_id, details}}`. Always use `writeData` /
-  `writeError`.
-- **Cross-tenant resources return `404`, never `403`.**
-- `decodeJSON` sets `DisallowUnknownFields` and caps bodies at 1 MB — adding a field
-  to a frontend request without adding it to the Go struct is a `400`.
-- ID prefixes: `org_`, `usr_`, `agt_`, `cvs_`, `msg_`, `rst_`, `rfs_`, `src_`, `sub_`,
-  `vst_`.
-- Rate limiting is in-memory fixed-window, keyed by client IP + bucket, with bounded
-  eviction (4096 entries). It does not survive restart and is not shared across
-  instances — production needs real shared storage.
-- **Never log or URL-encode** prompts, chat bodies, tokens, emails, or phone numbers.
-- Windows/PowerShell is the documented dev environment.
-- `.env` values containing spaces **must be quoted** — `set -a && . ./.env` will try to
-  execute the second word otherwise.
-
----
-
-## 9. Environment variables
-
-Authoritative list = whatever `config.Load()` in `backend/internal/config/config.go`
-actually reads. Verify against it; the file changes.
-
-**Read by the backend:** `GARUDA_ADDRESS`, `GARUDA_PUBLIC_URL`, `GARUDA_DATA_FILE`,
-`GARUDA_ALLOWED_ORIGINS`, `GARUDA_LOG_LEVEL`, `GARUDA_DEMO_MODE`,
-`GARUDA_EXPOSE_RESET_TOKEN`, `GARUDA_JWT_SECRET`, `GARUDA_VISITOR_HMAC_KEY`,
-`GARUDA_ACCESS_TOKEN_TTL`, `GARUDA_REFRESH_TOKEN_TTL`, `GARUDA_PASSWORD_RESET_TTL`,
-`AUTH_RESET_URL`, `GARUDA_PLAN_AMOUNT_CENTS`, `GARUDA_PLAN_CURRENCY`, `SUPABASE_URL`,
-`SUPABASE_ANON_KEY`, `STRIPE_*`, `LLM_BASE_URL`, `LLM_MODEL`/`LLM_CHAT_MODEL`,
-`LLM_API_KEY`/`GEMINI_API_KEY`, `RAG_EDGE_URL`, `RAG_EDGE_BEARER_TOKEN`,
-`GOOGLE_OAUTH_CLIENT_ID`.
-
-**Frontend:** `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_GOOGLE_CLIENT_ID`. That is the
-complete list — never expose any other secret as `NEXT_PUBLIC_*`.
-
-**Staged in `backend/.env` but NOT read by any code** (credentials parked so they
-aren't lost; each has a comment block saying so):
-`PINECONE_*`, `SENDGRID_*`, `GOOGLE_OAUTH_CLIENT_SECRET`.
-
-Paired variables — set both or neither, enforced at startup:
-`SUPABASE_URL`+`SUPABASE_ANON_KEY`; `RAG_EDGE_URL`+`RAG_EDGE_BEARER_TOKEN`;
-and the three `STRIPE_*` values outside demo mode.
-
----
-
-## 10. External accounts provisioned
-
-| Service | State |
+| | State |
 |---|---|
-| **Stripe** (test mode) | Product + $17/mo recurring price created and wired. Webhook secret set; signature verification confirmed working against a live signed request. |
-| **Supabase** | Project exists; URL + publishable key set. Edge functions **not deployed**. Migrations **not applied**. |
-| **Gemini** | Key is valid and the configured model is real, but the **free tier quota is exhausted** (limit 20 req). Until billing is enabled, the bot silently serves canned fallback text. |
-| **Pinecone** | Index `garuda-knowledge` created — serverless aws/us-east-1, cosine, **1024-dim**, integrated `llama-text-embed-v2` embedding. Verified with a live upsert + semantic search round-trip. **Not wired to any code.** |
-| **SendGrid** | Key valid. `info@ravan.ai` verified both as a single sender and under the fully DKIM-authenticated `ravan.ai` domain — use it as the from-address. **Not wired to any code.** |
-| **Google OAuth** | Client ID/secret pair verified valid. Consent screen in Testing mode. |
-
-Note the **dimension mismatch**: the built-in RAG path is 384-dim (`gte-small`), the
-Pinecone index is 1024-dim. They are alternative backends, not interchangeable stores.
+| **Gemini** | Working. `gemini-3.7-flash` is a REASONING model, so a small `max_tokens` gets consumed by thinking before any answer |
+| **Stripe** | TEST keys. Webhook signature verified against production. Account is sandbox with payouts paused |
+| **SendGrid** | Working. Sends from `info@ravan.ai`, a verified sender on a DKIM-authenticated domain |
+| **Supabase** | Both migrations APPLIED. Nothing reads them — there is no Postgres client in the Go code |
+| **Pinecone** | Index `garuda-knowledge` exists, 1024-dim, integrated embedding. NOT wired to any code |
 
 ---
 
-## 11. Known gaps / open items
+## 8. Environment
 
-Ordered roughly by impact:
+The authoritative list is whatever `config.Load()` actually reads. The frontend uses
+exactly two variables — `NEXT_PUBLIC_API_URL` and `NEXT_PUBLIC_GOOGLE_CLIENT_ID` —
+and nothing else may be exposed as `NEXT_PUBLIC_*`.
 
-1. **Gemini quota exhausted** — the only thing blocking genuinely working AI replies.
-   Everything else about the LLM path is correct.
-2. **`POST /v1/auth/google/link` is called by the frontend but has no backend route.**
-   `frontend/lib/api.ts` defines `linkGoogle()`; `server.go` registers only
-   `POST /v1/auth/google`.
-3. **The `account_link_required` flow appears unreachable.** The backend returns that
-   error with `details: nil`, but the frontend only shows the link form when
-   `details.email` is present. Verify against current code before acting — this area
-   was being edited.
-4. **Pinecone, SendGrid, and Google-secret env values are staged but unused.** Wiring
-   any of them requires code, not configuration.
-5. **RAG edge functions not deployed; migrations not applied.** RAG is intentionally
-   left disabled in `.env` until they are.
-6. **`docker-compose.yml` cannot run real integrations** — it hardcodes demo secrets
-   and passes no Stripe/Gemini/Supabase/RAG variables. It needs an
-   `env_file: ./backend/.env` (or explicit passthrough) first.
-7. Not yet built, per the README's own production boundary: Postgres repository and
-   worker, file/URL ingestion, email delivery, quotas, backups, monitoring, shared
-   rate-limit storage, privacy retention/deletion.
+Paired and enforced at startup: `SUPABASE_URL` with `SUPABASE_ANON_KEY`,
+`RAG_EDGE_URL` with `RAG_EDGE_BEARER_TOKEN`, and the three `STRIPE_*` values outside
+demo mode.
+
+`GARUDA_TRUSTED_PROXIES=127.0.0.1/32` is REQUIRED in production, or Caddy collapses
+every visitor on earth into a single rate-limit bucket.
 
 ---
 
-## 12. Verification commands
+## 9. Verification
 
-```powershell
-cd backend;  go build ./... ; go vet ./... ; go test ./...
-cd frontend; pnpm lint ; pnpm typecheck ; pnpm build
-cd widget;   pnpm test ; pnpm build
-```
+    cd backend  && go build ./... && go vet ./... && go test ./...
+    cd frontend && npx tsc --noEmit --incremental false && npx eslint . && npx next build
+    cd widget   && npm test
 
-Run the API with the real env (bash):
-
-```bash
-cd backend && set -a && . ./.env && set +a && go run ./cmd/api
-```
-
-Health endpoints are `GET /healthz` and `GET /readyz` (**not** `/v1/health`).
+Health endpoints are `GET /healthz` and `GET /readyz` — **not** `/v1/health`.
+The race detector needs cgo and there is no gcc on this machine, so run `-race` in CI
+on Linux instead.
 
 ---
 
-## 13. Working agreements
+## 10. Open items
 
-- The project owner works alongside another developer in this repo. **Check before
-  editing shared files**, and never kill processes by name pattern — port 8080 may be
-  someone else's running server.
-- When a credential is provided but nothing reads it yet, stage it in `.env` with a
-  comment block stating plainly that it is unused, rather than implying it is live.
-- Prefer verifying a credential with a real API call over assuming it works. Every
-  external claim in section 10 was confirmed against the live service.
+- `garuda.ravan.ai` is not attached to the Vercel project; the domain lives in a
+  different Vercel account than the one holding the project
+- Stripe is sandbox with payouts paused, so no real money can move
+- The database is still a single JSON file
+- The Composio API key has no IP restriction
+- Designed but unbuilt: Postgres repository, jobs worker, file upload with vision,
+  visitor memory, admin panel, widget design system
+
+---
+
+## 11. Working agreements
+
+- Verify claims against the running system rather than asserting them. Several
+  confident statements here turned out to be wrong — a broken test of my own reported
+  the Supabase migrations as unapplied when they were fine.
+- Prove every regression test by reverting the fix and watching it fail.
+- Never `pkill -f` a pattern that also matches the shell running it.
+- Scan for secrets before every push. A QA agent once left a test JWT in the tree.
