@@ -1,0 +1,6 @@
+[Unit]
+Description=Back up the Garuda data file
+
+[Service]
+Type=oneshot
+ExecStart=/opt/garuda/garuda-backup.sh

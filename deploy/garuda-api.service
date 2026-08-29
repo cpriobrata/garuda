@@ -1,5 +1,11 @@
 [Unit]
 Description=Garuda API
+# Never stop trying to restart. systemd defaults to giving up after 5 failures in
+# a 10s window, leaving the service down until someone logs in -- for a service
+# whose whole job is to be reachable, that default is the likeliest cause of an
+# outage. These two keys belong in [Unit], not [Service].
+StartLimitIntervalSec=0
+StartLimitBurst=0
 Documentation=https://github.com/cpriobrata/garuda
 After=network-online.target
 Wants=network-online.target
@@ -11,6 +17,10 @@ Group=garuda
 WorkingDirectory=/opt/garuda
 ExecStart=/opt/garuda/garuda-api
 EnvironmentFile=/opt/garuda/.env
+# Never stop trying. systemd defaults to StartLimitBurst=5 in a 10s window, after
+# which it gives up permanently and the service stays down until someone logs in.
+# For a service whose whole job is to be reachable, that default is the single
+# most likely cause of an outage.
 Restart=always
 RestartSec=2
 
