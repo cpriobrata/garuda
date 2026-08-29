@@ -54,8 +54,10 @@ export default function UseCasesHubPage() {
         <div className="mt-10">
           <NotBuiltYet title="What neither of them does">
             <p>
-              An agent answers, and captures a lead with the visitor’s explicit consent. It does not book appointments,
-              write to a CRM, or send you a notification when a lead arrives — new leads are found in your workspace.
+              An agent answers, and captures a lead with the visitor’s explicit consent. It does not book the
+              appointment itself — the agent cannot yet take actions inside a connected tool. A captured lead can be
+              sent to your own systems over a signed webhook, so it reaches Zapier, Make, or your CRM without anyone
+              opening the workspace.
             </p>
             <p>
               You can connect your own third-party accounts through Composio, which covers Google Calendar, Slack, HubSpot,

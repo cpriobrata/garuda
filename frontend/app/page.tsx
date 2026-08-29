@@ -318,7 +318,7 @@ export default function LandingPage() {
               </div>
               <p className="mt-4 text-sm leading-6 text-slate-400">
                 One tag, loaded asynchronously so it never blocks your page from rendering. Measured live on 29 August 2026, the
-                script is roughly 20 KB gzipped and cached for five minutes.
+                script is about 27 KB gzipped and cached for five minutes.
               </p>
             </div>
           </div>

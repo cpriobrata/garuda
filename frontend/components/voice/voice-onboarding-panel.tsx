@@ -26,7 +26,9 @@ export type VoicePanelProps = {
   // Null while the browser has not been inspected yet, which is every server
   // render and the first client frame.
   support: RecordingSupport | null;
-  voiceAvailable: boolean;
+  // Null while the server has not yet said whether transcription is
+  // configured for this workspace.
+  voiceAvailable: boolean | null;
   requestingMicrophone: boolean;
   microphoneFailure: MicrophoneFailure | null;
   elapsedSeconds: number;
@@ -103,7 +105,9 @@ export function VoiceOnboardingPanel(props: VoicePanelProps) {
   const agentNameId = `${idPrefix}-agent-name`;
   const agentNameHelpId = `${idPrefix}-agent-name-help`;
   const limit = recordingLimit(props.elapsedSeconds, props.maximumSeconds, props.warnWithinSeconds);
-  const unusable = props.support !== null && !props.support.supported;
+  // Only worth telling someone their browser cannot record once we know the
+  // workspace would have accepted a recording at all.
+  const unusable = props.voiceAvailable === true && props.support !== null && !props.support.supported;
   const announcement = recordingAnnouncement({
     phase: props.phase,
     elapsedSeconds: props.elapsedSeconds,
@@ -134,25 +138,25 @@ export function VoiceOnboardingPanel(props: VoicePanelProps) {
       <div className="space-y-5 px-5 py-6 sm:px-6">
         {props.microphoneFailure && <FailureNotice title={props.microphoneFailure.title} message={props.microphoneFailure.message} />}
 
-        {props.support === null && (
-          <div className="grid place-items-center gap-3 py-6 text-center">
-            <Button type="button" size="lg" variant="dark" disabled className="h-20 w-20 rounded-full p-0">
-              <Mic className="h-7 w-7" aria-hidden="true" />
-            </Button>
-            <p className="text-xs text-slate-500">Checking your microphone…</p>
-          </div>
-        )}
-
-        {unusable && props.support && <FailureNotice title={props.support.title} message={props.support.message} />}
-
-        {props.support !== null && props.support.supported && !props.voiceAvailable && (
+        {props.voiceAvailable === false && (
           <FailureNotice
             title="Voice setup is not available on this workspace"
             message="Transcription is not configured here, so the questions are the way in for now. Nothing is lost — the typed answers build exactly the same agent."
           />
         )}
 
-        {props.support !== null && props.support.supported && props.voiceAvailable && (
+        {props.voiceAvailable !== false && (props.support === null || props.voiceAvailable === null) && (
+          <div className="grid place-items-center gap-3 py-6 text-center">
+            <Button type="button" size="lg" variant="dark" disabled className="h-20 w-20 rounded-full p-0">
+              <Mic className="h-7 w-7" aria-hidden="true" />
+            </Button>
+            <p className="text-xs text-slate-500">Getting the recorder ready…</p>
+          </div>
+        )}
+
+        {unusable && props.support && <FailureNotice title={props.support.title} message={props.support.message} />}
+
+        {props.voiceAvailable === true && props.support !== null && props.support.supported && (
           <>
             {props.phase === "idle" && (
               <div className="grid place-items-center gap-4 py-4 text-center">

@@ -33,7 +33,7 @@ export const FAQ_ITEMS: FaqItem[] = [
   {
     question: "Will it slow my website down?",
     answer:
-      "The snippet is a single async script tag, so it never blocks your page from parsing or rendering. Measured against api.garuda.ravan.ai on 29 August 2026, the widget is about 20 KB gzipped (81 KB uncompressed) and is served with a five-minute public cache header. It renders inside a Shadow DOM whose host style starts at all:initial, so your CSS and its CSS cannot collide in either direction.",
+      "The snippet is a single async script tag, so it never blocks your page from parsing or rendering. Measured against api.garuda.ravan.ai on 29 August 2026, the widget is about 27 KB gzipped (106 KB uncompressed) and is served with a five-minute public cache header. It renders inside a Shadow DOM whose host style starts at all:initial, so your CSS and its CSS cannot collide in either direction.",
   },
   {
     question: "How long does setup actually take?",

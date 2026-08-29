@@ -16,7 +16,7 @@ import { breadcrumbJsonLd, jsonLdScriptProps, type JsonLd } from "@/lib/seo";
  */
 
 const navLinks = [
-  { label: "Product", href: "/#product" },
+  { label: "How it works", href: "/#how-it-works" },
   { label: "Pricing", href: "/#pricing" },
   { label: "FAQ", href: "/faq" },
   { label: "Integrations", href: "/integrations" },

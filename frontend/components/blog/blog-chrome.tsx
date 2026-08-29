@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
 // anchors that only exist on the landing page; these are absolute so they work
 // from an article URL.
 const links = [
-  { label: "Product", href: "/#product" },
+  { label: "How it works", href: "/#how-it-works" },
   { label: "How it works", href: "/#how-it-works" },
   { label: "Pricing", href: "/#pricing" },
   { label: "Blog", href: "/blog" },

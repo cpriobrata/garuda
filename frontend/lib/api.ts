@@ -14,7 +14,7 @@ type ApiErrorShape = {
   details?: unknown;
 };
 
-type ApiEnvelope<T> = { data?: T; error?: ApiErrorShape };
+type ApiEnvelope<T> = { data?: T; error?: ApiErrorShape; meta?: unknown };
 
 export class ApiError extends Error {
   code: string;
@@ -165,9 +165,9 @@ async function refreshAccessToken(): Promise<string | null> {
 
 export async function apiRequest<T>(
   path: string,
-  options: RequestInit & { token?: string; mock?: () => T | Promise<T>; timeoutMs?: number; auth?: boolean } = {},
+  options: RequestInit & { token?: string; mock?: () => T | Promise<T>; timeoutMs?: number; auth?: boolean; onMeta?: (meta: unknown) => void } = {},
 ): Promise<T> {
-  const { token, mock, timeoutMs = 8000, auth = true, ...requestOptions } = options;
+  const { token, mock, timeoutMs = 8000, auth = true, onMeta, ...requestOptions } = options;
   if (!process.env.NEXT_PUBLIC_API_URL && mock) return await mock();
 
   async function perform(accessToken?: string) {
@@ -214,6 +214,9 @@ export async function apiRequest<T>(
     throw new ApiError(result.envelope.error || { code: "HTTP_ERROR", message: `Request failed (${result.response.status})` });
   }
   if (typeof result.envelope.data === "undefined") throw new ApiError({ code: "INVALID_RESPONSE", message: "The server returned an invalid response." });
+  // Paginated endpoints carry their cursor in meta; hand it back when asked so
+  // callers do not have to re-implement auth refresh just to read one field.
+  if (onMeta) onMeta(result.envelope.meta);
   return result.envelope.data;
 }
 

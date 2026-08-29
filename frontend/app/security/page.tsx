@@ -19,7 +19,7 @@ const answers = [
     id: "who-can-see-my-data",
     question: "Who can see the conversations and leads my agent collects?",
     answer:
-      "Your workspace, and nobody else's. Every portal request resolves an account from the caller's signed token and filters every record on it; every widget request resolves the account from the published agent's key. There is no endpoint that returns records across workspaces.",
+      "Your workspace, and nobody else's. Every portal request resolves an account from the caller's signed token and filters every record on it; every widget request resolves the account from the published agent's key. Every endpoint that returns records filters them by that account first.",
     body: (
       <p>
         A workspace is created with your account. Agents, knowledge sources, conversations, messages and leads all carry that
@@ -78,8 +78,8 @@ const answers = [
           ]}
         />
         <p>
-          The visitor-facing consent choice is remembered per agent in the browser, so declining on one site does not have to be
-          repeated on another, and no default assumes agreement.
+          The visitor&rsquo;s memory choice is remembered per agent in the browser, so a decision made on one site never carries
+          across to another, and the widget&rsquo;s default is to ask rather than to assume agreement.
         </p>
       </>
     ),
@@ -166,7 +166,7 @@ const answers = [
     id: "third-parties",
     question: "Which third parties see my data?",
     answer:
-      "Five, and each one only sees what its job requires: Google for model responses and optional Google sign-in, Stripe for subscriptions and payment, SendGrid for transactional email, Composio for integrations you choose to connect, and Vercel for serving this website.",
+      "Six services from five companies, and each only sees what its job requires: Google twice, once for model responses and once for optional Google sign-in, Stripe for subscriptions and payment, SendGrid for transactional email, Composio for integrations you choose to connect, and Vercel for serving this website.",
     body: (
       <>
         <FactTable

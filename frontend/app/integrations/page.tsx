@@ -86,7 +86,7 @@ const answers = [
         <ol className="list-decimal space-y-2 pl-5">
           <li>Search or browse the catalogue, which is paged rather than loaded whole — it is far too large for one screen.</li>
           <li>Select Connect on the product you want. Garuda requests an authorisation link scoped to your account id.</li>
-          <li>Authorise with the provider itself. Most products in the catalogue use OAuth, so you never hand Garuda a password.</li>
+          <li>Authorise with the provider itself. Where a product supports OAuth you sign in on its own site, so you never hand Garuda a password.</li>
           <li>The connection appears in your workspace, and only in your workspace.</li>
         </ol>
         <p>

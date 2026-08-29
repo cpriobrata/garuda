@@ -13,6 +13,7 @@ export type VoiceCapability = {
   maximumSeconds: number;
   warnWithinSeconds: number;
   maximumBytes: number;
+  minimumBytes: number;
 };
 
 // Used until the server says otherwise, and used as the floor if the server
@@ -22,13 +23,15 @@ export const voiceRecordingDefaults: VoiceCapability = {
   enabled: false,
   maximumSeconds: 120,
   warnWithinSeconds: 20,
-  maximumBytes: 8 * 1024 * 1024,
+  maximumBytes: 4 * 1024 * 1024,
+  minimumBytes: 2 * 1024,
 };
 
 type VoiceCapabilityPayload = {
   enabled?: boolean;
   max_duration_seconds?: number;
   max_bytes?: number;
+  min_bytes?: number;
 };
 
 function positiveNumber(value: unknown, fallback: number): number {
@@ -44,6 +47,7 @@ export function readVoiceCapability(payload: VoiceCapabilityPayload | null | und
     // warning is on screen for most of the recording.
     warnWithinSeconds: Math.max(5, Math.min(voiceRecordingDefaults.warnWithinSeconds, Math.floor(maximumSeconds / 6))),
     maximumBytes: positiveNumber(payload?.max_bytes, voiceRecordingDefaults.maximumBytes),
+    minimumBytes: positiveNumber(payload?.min_bytes, voiceRecordingDefaults.minimumBytes),
   };
 }
 
@@ -109,22 +113,58 @@ export async function transcribeRecording(recording: Blob, durationSeconds: numb
 // spoken for two minutes needs to be told that before anything else.
 export const recordingKeptSentence = "Your recording is still here, so you can try again.";
 
+// The codes the transcription endpoint answers with. Kept as one list so the
+// mapping below is obviously exhaustive against the server rather than a pile
+// of string comparisons nobody can check.
+export const transcriptionFailureCodes = {
+  tooLarge: "audio_too_large",
+  tooShort: "audio_too_short",
+  noSpeech: "no_speech_detected",
+  unsupportedType: "unsupported_media_type",
+  unavailable: "voice_unavailable",
+  providerFailed: "transcription_unavailable",
+  quotaExceeded: "voice_quota_exceeded",
+  subscriptionRequired: "subscription_required",
+} as const;
+
 export function transcriptionFailureMessage(reason: unknown): string {
   const code = reason instanceof ApiError ? reason.code : "";
-  if (code === "PAYLOAD_TOO_LARGE" || code === "AUDIO_TOO_LARGE" || code === "RECORDING_TOO_LONG") {
+  if (code === transcriptionFailureCodes.tooLarge) {
     return `That recording is longer than we can send. Record a shorter note — a minute is usually plenty. ${recordingKeptSentence}`;
   }
-  if (code === "UNSUPPORTED_MEDIA_TYPE") {
+  if (code === transcriptionFailureCodes.tooShort) {
+    return `That recording is too short to make out. Hold record and speak for a few seconds. ${recordingKeptSentence}`;
+  }
+  if (code === transcriptionFailureCodes.noSpeech) {
+    return `Nothing could be heard in that recording. Try somewhere quieter, or closer to the microphone. ${recordingKeptSentence}`;
+  }
+  if (code === transcriptionFailureCodes.unsupportedType) {
     return `This browser recorded in a format we cannot transcribe. Try another browser, or type your answers instead. ${recordingKeptSentence}`;
   }
-  if (code === "TRANSCRIPTION_UNAVAILABLE" || code === "VOICE_DISABLED" || code === "NOT_FOUND") {
+  if (code === transcriptionFailureCodes.unavailable || code === transcriptionFailureCodes.providerFailed || code === "not_found") {
     return `Voice transcription is unavailable right now. You can type your answers instead. ${recordingKeptSentence}`;
   }
-  if (code === "RATE_LIMITED" || code === "TOO_MANY_REQUESTS") {
-    return `That is a lot of attempts in a short time. Wait a moment before retrying. ${recordingKeptSentence}`;
+  if (code === transcriptionFailureCodes.quotaExceeded) {
+    return `This account has transcribed as much audio as an hour allows. Wait a little, or type your answers instead. ${recordingKeptSentence}`;
+  }
+  if (code === transcriptionFailureCodes.subscriptionRequired) {
+    return `An active subscription is needed to transcribe a recording. You can type your answers instead. ${recordingKeptSentence}`;
   }
   if (reason instanceof Error && reason.name === "AbortError") {
     return `The upload timed out. ${recordingKeptSentence}`;
   }
   return `We could not transcribe that recording. ${recordingKeptSentence}`;
+}
+
+// Checked against the take before a byte leaves the device. A phone uploading
+// three minutes of audio only to be told it was one minute too long has spent
+// the owner's data and their patience for nothing.
+export function preUploadRejection(sizeBytes: number, capability: VoiceCapability): string {
+  if (sizeBytes >= capability.maximumBytes) {
+    return `That recording is larger than we can send. Record a shorter note — a minute is usually plenty. ${recordingKeptSentence}`;
+  }
+  if (sizeBytes < capability.minimumBytes) {
+    return `That recording is too short to make out. Hold record and speak for a few seconds. ${recordingKeptSentence}`;
+  }
+  return "";
 }

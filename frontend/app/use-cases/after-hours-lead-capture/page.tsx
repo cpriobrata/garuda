@@ -179,9 +179,10 @@ export default function AfterHoursPage() {
         <NotBuiltYet title="What Garuda does not do while you sleep">
           <p>
             <strong className="font-semibold text-slate-900">It does not email or text you when a lead arrives.</strong>{" "}
-            Garuda sends account email — verification, password resets, the welcome message — and nothing else today. New
-            leads are found by opening the Leads page in your workspace, so make that part of the morning routine rather
-            than waiting for an alert that is not coming.
+            Garuda sends account email — verification, password resets, the welcome message — and does not email you when
+            a lead arrives. What it can do is send that lead to a signed webhook the moment it is captured, so Zapier,
+            Make, or your CRM can raise the alert instead. Without a webhook configured, new leads are found by opening
+            the Leads page in your workspace.
           </p>
           <p>
             <strong className="font-semibold text-slate-900">It does not book anything.</strong> The agent has no view of

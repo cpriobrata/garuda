@@ -53,6 +53,7 @@ export type VoiceFlowAction =
   | { type: "back_to_transcript" }
   | { type: "agent_name_edited"; agentName: string }
   | { type: "booking_chosen"; booksAppointments: boolean }
+  | { type: "submission_failed"; message: string }
   | { type: "reset" };
 
 export function voiceFlowReducer(state: VoiceFlowState, action: VoiceFlowAction): VoiceFlowState {
@@ -96,6 +97,10 @@ export function voiceFlowReducer(state: VoiceFlowState, action: VoiceFlowAction)
       return { ...state, agentName: action.agentName, failure: "" };
     case "booking_chosen":
       return { ...state, booksAppointments: action.booksAppointments, failure: "" };
+    case "submission_failed":
+      // The owner stays on the details step with their answers intact; the
+      // only thing that changed is that the build did not happen.
+      return { ...state, failure: action.message };
     case "reset":
       return initialVoiceFlowState;
     default:

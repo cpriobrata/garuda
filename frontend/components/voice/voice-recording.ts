@@ -47,20 +47,20 @@ export function detectRecordingSupport(environment: RecordingEnvironment): Recor
   // navigator.mediaDevices altogether, so checking for the API first would
   // tell someone on http that their browser cannot record — untrue, and
   // nothing they can act on.
-  if (!secure) {
-    return {
-      supported: false,
-      code: "insecure_context",
-      title: "This page is not on a secure connection",
-      message: "Browsers only allow microphone access over https, or on localhost. Open this page over https to record your answers, or type them instead.",
-    };
-  }
   if (!environment.hasMediaRecorder) {
     return {
       supported: false,
       code: "no_media_recorder",
       title: "This browser cannot record audio",
       message: "Recording needs a newer browser — current Chrome, Edge, Firefox and Safari all work. You can type your answers instead.",
+    };
+  }
+  if (!secure) {
+    return {
+      supported: false,
+      code: "insecure_context",
+      title: "This page is not on a secure connection",
+      message: "Browsers only allow microphone access over https, or on localhost. Open this page over https to record your answers, or type them instead.",
     };
   }
   if (!environment.hasGetUserMedia) {
