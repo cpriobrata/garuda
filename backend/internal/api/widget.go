@@ -199,6 +199,15 @@ func (s *Server) widgetMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusPaymentRequired, "subscription_required", "This assistant is temporarily unavailable", nil)
 		return
 	}
+	input.ClientMessageID = strings.TrimSpace(input.ClientMessageID)
+	// The visitor controls this value and it is persisted twice per request: once
+	// as the message ID and once inside the reply's metadata. Unbounded, it lets
+	// anyone inflate the state file -- which is rewritten in full on every write --
+	// at roughly twice the rate they can send bytes.
+	if len(input.ClientMessageID) > 128 || !safeClientMessageID(input.ClientMessageID) {
+		s.writeError(w, r, http.StatusUnprocessableEntity, "validation_failed", "client_message_id must be at most 128 characters of letters, digits, dot, dash, underscore, or colon", nil)
+		return
+	}
 	if input.ClientMessageID == "" {
 		input.ClientMessageID = newID("msg_")
 	}
@@ -493,7 +502,7 @@ func (s *Server) findPublishedAgent(publicKey string) (model.Agent, bool) {
 	_ = s.store.View(func(state *model.State) error {
 		for _, agent := range state.Agents {
 			if agent.PublicKey == publicKey && agent.Status == "published" {
-				result, found = agent, true
+				result, found = agent.Clone(), true
 				break
 			}
 		}
@@ -553,4 +562,21 @@ func normalizePhone(value string) string {
 		return ""
 	}
 	return value
+}
+
+// safeClientMessageID accepts the shapes a client library would plausibly emit
+// -- a UUID, a nanoid, or this service's own msg_ prefix -- and nothing else, so
+// the value can be stored and logged without escaping concerns.
+func safeClientMessageID(value string) bool {
+	for _, character := range value {
+		switch {
+		case character >= 'a' && character <= 'z',
+			character >= 'A' && character <= 'Z',
+			character >= '0' && character <= '9',
+			character == '-', character == '_', character == '.', character == ':':
+		default:
+			return false
+		}
+	}
+	return true
 }

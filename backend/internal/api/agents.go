@@ -47,7 +47,7 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request) {
 	found := false
 	_ = s.store.View(func(state *model.State) error {
 		if agent, ok := findAgent(state, identity.AccountID, r.PathValue("agentID")); ok && agent.Status != "archived" {
-			result, found = *agent, true
+			result, found = agent.Clone(), true
 		}
 		return nil
 	})
@@ -212,7 +212,7 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
 		}
 		agent.Revision++
 		agent.UpdatedAt = time.Now().UTC()
-		result = *agent
+		result = agent.Clone()
 		return nil
 	})
 	if err != nil {
@@ -290,7 +290,7 @@ func (s *Server) publishAgent(w http.ResponseWriter, r *http.Request) {
 		agent.PublishedAt = &now
 		agent.Revision++
 		agent.UpdatedAt = now
-		result = *agent
+		result = agent.Clone()
 		return nil
 	})
 	if err != nil {
@@ -320,7 +320,7 @@ func (s *Server) unpublishAgent(w http.ResponseWriter, r *http.Request) {
 			agent.Status = "draft"
 			agent.Revision++
 			agent.UpdatedAt = time.Now().UTC()
-			result, found = *agent, true
+			result, found = agent.Clone(), true
 		}
 		return nil
 	})

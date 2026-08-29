@@ -22,3 +22,8 @@ Thumbs.db
 # Stray Go build artifacts
 backend/*.exe
 backend/*.test
+
+# QA agent scratch artifacts
+backend/.qa_*
+backend/internal/api/qa_*_test.go
+backend/internal/api/zz_*_test.go

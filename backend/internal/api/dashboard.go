@@ -34,7 +34,7 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	_ = s.store.View(func(state *model.State) error {
 		for _, agent := range state.Agents {
 			if agent.AccountID == identity.AccountID && agent.Status != "archived" {
-				agents = append(agents, agent)
+				agents = append(agents, agent.Clone())
 			}
 		}
 		for _, session := range state.Sessions {
@@ -123,7 +123,7 @@ func (s *Server) getLead(w http.ResponseWriter, r *http.Request) {
 	_ = s.store.View(func(state *model.State) error {
 		for _, lead := range state.Leads {
 			if lead.ID == r.PathValue("leadID") && lead.AccountID == identity.AccountID {
-				result, found = lead, true
+				result, found = lead.Clone(), true
 				break
 			}
 		}

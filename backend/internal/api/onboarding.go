@@ -207,7 +207,7 @@ func (s *Server) completeOnboarding(w http.ResponseWriter, r *http.Request) {
 		var existing model.Agent
 		_ = s.store.View(func(state *model.State) error {
 			if agent, ok := findAgent(state, identity.AccountID, onboarding.GeneratedAgentID); ok {
-				existing = *agent
+				existing = agent.Clone()
 			}
 			return nil
 		})
@@ -252,7 +252,7 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 	_ = s.store.View(func(state *model.State) error {
 		for _, job := range state.Jobs {
 			if job.ID == jobID && job.AccountID == identity.AccountID {
-				result, found = job, true
+				result, found = job.Clone(), true
 				break
 			}
 		}

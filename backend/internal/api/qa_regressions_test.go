@@ -92,3 +92,19 @@ func TestStoreUpdateRollsBackWhenTheCallbackFails(t *testing.T) {
 		return nil
 	})
 }
+
+// client_message_id is visitor-controlled and is persisted twice per request --
+// as the message ID and inside the reply metadata -- so an unbounded value let
+// anyone inflate the state file at twice the rate they could send bytes.
+func TestSafeClientMessageIDRejectsHostileValues(t *testing.T) {
+	for _, value := range []string{"msg_abc123", "3f2504e0-4f89-11d3-9a0c-0305e82c3301", "a.b:c-d_e", ""} {
+		if !safeClientMessageID(value) {
+			t.Errorf("expected %q to be accepted", value)
+		}
+	}
+	for _, value := range []string{"has space", "quote\"", "new\nline", "<script>", "semi;colon", "sla/sh"} {
+		if safeClientMessageID(value) {
+			t.Errorf("expected %q to be rejected", value)
+		}
+	}
+}
