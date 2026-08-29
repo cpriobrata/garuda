@@ -14,8 +14,9 @@ api.garuda.ravan.ai {
 		flush_interval -1
 	}
 
+	# Log to the journal (journalctl -u caddy). A file target would need a
+	# ReadWritePaths exception in caddy.service, which is not worth the hole.
 	log {
-		output file /var/log/caddy/garuda-api.log
 		format json
 	}
 }
