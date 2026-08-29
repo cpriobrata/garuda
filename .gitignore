@@ -27,3 +27,6 @@ backend/*.test
 backend/.qa_*
 backend/internal/api/qa_*_test.go
 backend/internal/api/zz_*_test.go
+
+# Vercel CLI link metadata
+frontend/.vercel/
