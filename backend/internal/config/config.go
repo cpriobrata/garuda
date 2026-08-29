@@ -24,6 +24,8 @@ type Config struct {
 	AuthVerifyURL         string
 	AllowedOrigins        []string
 	TrustedProxies        []string
+	ComposioAPIKey        string
+	ComposioBaseURL       string
 	Environment           string
 	DemoMode              bool
 	ExposeResetToken      bool
@@ -83,6 +85,8 @@ func Load() (Config, error) {
 		AuthVerifyURL:         env("AUTH_VERIFY_URL", "http://localhost:3000/auth/verify-email"),
 		AllowedOrigins:        csv(env("GARUDA_ALLOWED_ORIGINS", "http://localhost:3000")),
 		TrustedProxies:        csv(os.Getenv("GARUDA_TRUSTED_PROXIES")),
+		ComposioAPIKey:        strings.TrimSpace(os.Getenv("COMPOSIO_API_KEY")),
+		ComposioBaseURL:       strings.TrimRight(env("COMPOSIO_BASE_URL", "https://backend.composio.dev/api/v3"), "/"),
 		Environment:           strings.ToLower(env("GARUDA_ENVIRONMENT", "development")),
 		DemoMode:              boolean("GARUDA_DEMO_MODE", true),
 		ExposeResetToken:      boolean("GARUDA_EXPOSE_RESET_TOKEN", true),
