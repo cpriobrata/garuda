@@ -211,6 +211,12 @@ func (s *Server) deleteKnowledgeSource(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) filterReadyRAGChunks(accountID, agentID string, chunks []rag.Chunk) []rag.Chunk {
+	// RAG disabled returns no chunks, and this is called on every widget message.
+	// Without this the common path takes a read lock, scans the agents and
+	// allocates a map, all to filter an empty slice.
+	if len(chunks) == 0 {
+		return nil
+	}
 	ready := make(map[string]struct{})
 	_ = s.store.View(func(state *model.State) error {
 		if agent, ok := findAgent(state, accountID, agentID); ok && agent.Status != "archived" {

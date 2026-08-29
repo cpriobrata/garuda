@@ -40,6 +40,24 @@ type Config struct {
 	AlertWhatsAppLanguage string
 	AlertWebhookURL       string
 	AlertWebhookAuth      string
+
+	// Meta conversions: the pixel the ad account optimises against, and the
+	// system-user token that lets this API report a captured lead back to it.
+	// Every field is optional -- absent credentials mean no conversions are
+	// reported, never a startup failure, in the same spirit as every other
+	// adapter here. There is deliberately no paired-and-enforced check: a pixel
+	// id on its own is switched off by meta.Client.Enabled rather than refused
+	// at boot, because a half-filled .env must never be able to stop the API.
+	//
+	// META_TEST_EVENT_CODE routes every event to the Test Events tab in Events
+	// Manager instead of counting it, which is how the wiring is proved before
+	// any money is spent. It has to be unset again afterwards or real
+	// conversions stop being attributed.
+	MetaPixelID          string
+	MetaConversionsToken string
+	MetaTestEventCode    string
+	MetaAPIURL           string
+
 	Environment           string
 	DemoMode              bool
 	ExposeResetToken      bool
@@ -111,6 +129,10 @@ func Load() (Config, error) {
 		AlertWhatsAppLanguage: env("ALERT_WHATSAPP_TEMPLATE_LANGUAGE", "en"),
 		AlertWebhookURL:       strings.TrimSpace(os.Getenv("ALERT_WEBHOOK_URL")),
 		AlertWebhookAuth:      strings.TrimSpace(os.Getenv("ALERT_WEBHOOK_AUTH")),
+		MetaPixelID:           strings.TrimSpace(os.Getenv("META_PIXEL_ID")),
+		MetaConversionsToken:  strings.TrimSpace(os.Getenv("META_CONVERSIONS_TOKEN")),
+		MetaTestEventCode:     strings.TrimSpace(os.Getenv("META_TEST_EVENT_CODE")),
+		MetaAPIURL:            strings.TrimRight(env("META_API_URL", "https://graph.facebook.com/v21.0"), "/"),
 		Environment:           strings.ToLower(env("GARUDA_ENVIRONMENT", "development")),
 		DemoMode:              boolean("GARUDA_DEMO_MODE", true),
 		ExposeResetToken:      boolean("GARUDA_EXPOSE_RESET_TOKEN", true),

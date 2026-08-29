@@ -131,6 +131,7 @@ func (s *Server) Handler() http.Handler {
 	// Outbound webhook delivery runs off the request path, so a customer endpoint
 	// that is slow or down never degrades the product.
 	s.StartOutboundWebhooks()
+	s.StartRetention()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /readyz", s.ready)
@@ -159,6 +160,10 @@ func (s *Server) Handler() http.Handler {
 	// the visitor. Cheap and bounded: it returns only what comes after the id the
 	// widget already holds.
 	mux.Handle("GET /widget/v1/sessions/{sessionID}/messages", s.rateLimit("widget.poll", 240, time.Minute, http.HandlerFunc(s.pollWidgetMessages)))
+	// Journey batches. Higher limit than the other widget routes because the
+	// widget reports every fifteen seconds while a page is open, and lower cost
+	// per call than any of them: the handler does one bounded merge.
+	mux.Handle("POST /widget/v1/sessions/{sessionID}/activity", s.rateLimit("widget.activity", 240, time.Minute, http.HandlerFunc(s.recordVisitorJourney)))
 
 	protected := func(pattern string, handler http.HandlerFunc) {
 		mux.Handle(pattern, s.requireAuth(handler))
@@ -632,10 +637,16 @@ func (s *Server) hasEntitlement(accountID string) bool {
 	}
 	allowed := false
 	_ = s.store.View(func(state *model.State) error {
-		for _, account := range state.Accounts {
-			if account.ID == accountID && (account.BillingStatus == "active" || account.BillingStatus == "trialing") {
-				allowed = true
+		for index := range state.Accounts {
+			account := &state.Accounts[index]
+			if account.ID != accountID {
+				continue
 			}
+			allowed = account.BillingStatus == "active" || account.BillingStatus == "trialing"
+			// Account ids are unique, so there is nothing after the match worth
+			// looking at. This runs on every widget session, message, lead and
+			// reset, holding the read lock the whole way to the end of the slice.
+			break
 		}
 		return nil
 	})

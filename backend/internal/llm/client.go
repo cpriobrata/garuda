@@ -47,6 +47,13 @@ func New(baseURL, apiKey, modelName string) *Client {
 
 func (c *Client) Enabled() bool { return c.apiKey != "" && c.baseURL != "" && c.model != "" }
 
+const (
+	// chatMaxTokens has to clear the model's thinking budget before any answer
+	// appears, which is why it is not smaller.
+	chatMaxTokens  = 2_000
+	draftMaxTokens = 8_000
+)
+
 func (c *Client) Chat(ctx context.Context, systemPrompt string, history []ChatMessage) (string, error) {
 	if !c.Enabled() {
 		return localReply(history), nil
@@ -54,7 +61,9 @@ func (c *Client) Chat(ctx context.Context, systemPrompt string, history []ChatMe
 	messages := make([]ChatMessage, 0, len(history)+1)
 	messages = append(messages, ChatMessage{Role: "system", Content: systemPrompt})
 	messages = append(messages, history...)
-	return c.complete(ctx, messages, 0.45)
+	// A visitor reply that runs past this is not a better answer, it is a wall of
+	// text in a chat bubble. The budget clears the thinking the model does first.
+	return c.complete(ctx, messages, 0.45, chatMaxTokens, "low")
 }
 
 func (c *Client) GenerateAgent(ctx context.Context, onboarding model.Onboarding, brief string) (AgentDraft, error) {
@@ -68,7 +77,9 @@ Return only valid JSON with string fields name, description, system_prompt, welc
 The system prompt must be truthful, conversion-oriented, concise, protect visitor privacy, never invent business facts, and ask permission before collecting contact details.
 
 Business context: ` + string(contextJSON) + "\nAdditional request: " + brief
-	result, err := c.complete(ctx, []ChatMessage{{Role: "user", Content: prompt}}, 0.25)
+	// Drafting an agent happens once per account and is where reasoning actually
+	// pays, so it keeps the higher effort and a larger budget.
+	result, err := c.complete(ctx, []ChatMessage{{Role: "user", Content: prompt}}, 0.25, draftMaxTokens, "")
 	if err != nil {
 		return AgentDraft{}, err
 	}
@@ -86,12 +97,25 @@ Business context: ` + string(contextJSON) + "\nAdditional request: " + brief
 	return draft, nil
 }
 
-func (c *Client) complete(ctx context.Context, messages []ChatMessage, temperature float64) (string, error) {
+func (c *Client) complete(ctx context.Context, messages []ChatMessage, temperature float64, maxTokens int, reasoningEffort string) (string, error) {
+	// max_tokens and reasoning_effort were both absent, which is not the same as
+	// being conservative: with no bound at all, output length and thinking budget
+	// were entirely at the provider's discretion on every call, and the
+	// per-conversation cost had no ceiling anyone here controlled.
+	//
+	// The default model is a REASONING model, so a small max_tokens is the opposite
+	// trap -- the budget gets eaten by thinking before any answer appears. Both
+	// values were verified against the live endpoint rather than assumed: on one
+	// short exchange, reasoning_effort "medium" cost 236 total tokens against 185
+	// at "low", for the same answer. A website concierge answering from supplied
+	// passages does not need extended reasoning.
 	payload := struct {
-		Model       string        `json:"model"`
-		Messages    []ChatMessage `json:"messages"`
-		Temperature float64       `json:"temperature"`
-	}{Model: c.model, Messages: messages, Temperature: temperature}
+		Model           string        `json:"model"`
+		Messages        []ChatMessage `json:"messages"`
+		Temperature     float64       `json:"temperature"`
+		MaxTokens       int           `json:"max_tokens,omitempty"`
+		ReasoningEffort string        `json:"reasoning_effort,omitempty"`
+	}{Model: c.model, Messages: messages, Temperature: temperature, MaxTokens: maxTokens, ReasoningEffort: reasoningEffort}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return "", err

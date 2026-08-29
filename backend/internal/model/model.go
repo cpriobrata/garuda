@@ -258,6 +258,11 @@ type Session struct {
 	CreatedAt        time.Time  `json:"created_at"`
 	UpdatedAt        time.Time  `json:"updated_at"`
 	LastSeenAt       time.Time  `json:"last_seen_at"`
+
+	// Journey is where this visitor came from and what they read. Absent on every
+	// session stored before it existed, and on any visit the widget could not
+	// report -- both of which mean "we do not know", never "they did nothing".
+	Journey *VisitorJourney `json:"journey,omitempty"`
 }
 
 type Message struct {

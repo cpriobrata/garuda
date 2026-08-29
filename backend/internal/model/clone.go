@@ -115,6 +115,17 @@ func (a Agent) Clone() Agent {
 	return cloned
 }
 
+// Clone returns a copy of the session that shares no mutable state with the
+// store. The journey holds a slice a live widget is still appending to.
+func (s Session) Clone() Session {
+	cloned := s
+	if s.Journey != nil {
+		journey := s.Journey.Clone()
+		cloned.Journey = &journey
+	}
+	return cloned
+}
+
 // Clone returns a copy of the message that shares no mutable state with the store.
 func (m Message) Clone() Message {
 	cloned := m

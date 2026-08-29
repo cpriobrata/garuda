@@ -17,6 +17,7 @@ import (
 	"garuda/backend/internal/config"
 	"garuda/backend/internal/llm"
 	"garuda/backend/internal/model"
+	"garuda/backend/internal/rag"
 	"garuda/backend/internal/security"
 )
 
@@ -124,6 +125,8 @@ func (s *Server) createWidgetSession(w http.ResponseWriter, r *http.Request) {
 				MemoryConsent: input.Consent.Memory, ExpiresAt: expiresAt, CreatedAt: now, UpdatedAt: now, LastSeenAt: now,
 			}
 			state.Sessions = append(state.Sessions, session)
+			// Inside the same write, so the budget can never be exceeded even briefly.
+			enforceVisitorSessionBudget(state, agent.ID, visitorID)
 			welcome := strings.TrimSpace(agent.WelcomeMessage)
 			if welcome != "" {
 				state.Messages = append(state.Messages, model.Message{ID: newID("msg_"), AccountID: agent.AccountID, AgentID: agent.ID, SessionID: session.ID, VisitorID: visitorID, Role: "assistant", Content: welcome, CreatedAt: now})
@@ -189,7 +192,12 @@ func (s *Server) widgetMessage(w http.ResponseWriter, r *http.Request) {
 		if authorized {
 			for _, candidate := range state.Agents {
 				if candidate.ID == session.AgentID && candidate.AccountID == session.AccountID && candidate.Status == "published" {
-					agent = candidate
+					// Clone: Knowledge and LeadCapture.Fields are slices, and a struct
+					// copy shares their headers with live state. Both are read after
+					// this callback returns -- promptForAgent walks Knowledge, and the
+					// lead payload encodes Fields -- while another request may be
+					// appending a knowledge source to the same agent.
+					agent = candidate.Clone()
 					break
 				}
 			}
@@ -286,15 +294,32 @@ func (s *Server) widgetMessage(w http.ResponseWriter, r *http.Request) {
 
 	providerContext, cancelProviders := context.WithTimeout(r.Context(), widgetProviderTTL)
 	defer cancelProviders()
-	history := s.chatHistory(session, 30)
-	prompt := promptForAgent(agent)
+	// Twelve turns, not thirty. Thirty was measured at ~2,250 tokens of history
+	// resent on every message, and with memory consent the filter is by VISITOR
+	// rather than by session -- so it could reach back across every conversation
+	// that person ever had with this agent. Twelve is ample for a website
+	// concierge and bounds a cost that otherwise grows with a customer's history.
+	history := s.chatHistory(session, 12)
+
+	// Retrieval REPLACES the knowledge dump; it does not sit on top of it. Sending
+	// both meant paying for the whole corpus and then again for the slice of it
+	// that retrieval had just selected -- which is the exact cost retrieval exists
+	// to avoid. When retrieval returns nothing, or is not configured at all, the
+	// full block is still the right answer and is still sent.
 	ragContext, cancelRAG := context.WithTimeout(providerContext, widgetRAGTTL)
 	chunks, ragErr := s.rag.Search(ragContext, session.AccountID, agent.ID, input.Content, 4)
 	cancelRAG()
+	var retrieved []rag.Chunk
 	if ragErr == nil {
-		prompt = promptWithRetrieved(prompt, s.filterReadyRAGChunks(session.AccountID, agent.ID, chunks))
+		retrieved = s.filterReadyRAGChunks(session.AccountID, agent.ID, chunks)
 	} else {
 		s.logger.Warn("RAG search unavailable", "agent_id", agent.ID, "error", ragErr, "request_id", requestID(r.Context()))
+	}
+	var prompt string
+	if len(retrieved) > 0 {
+		prompt = promptWithRetrieved(promptWithoutKnowledge(agent), retrieved)
+	} else {
+		prompt = promptForAgent(agent)
 	}
 	reply, err := s.llm.Chat(providerContext, prompt, history)
 	if err != nil {
