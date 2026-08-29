@@ -667,3 +667,93 @@ func safeClientMessageID(value string) bool {
 	}
 	return true
 }
+
+// resetWidgetSession ends the caller's conversation and hands back a fresh one.
+//
+// A visitor who wants to start over should not have to clear site data. Expiring
+// the old session is what makes it non-resumable: createWidgetSession only revives
+// a session that is still live, so an expired row is left alone and the transcript
+// stays intact for the customer's inbox rather than being deleted.
+//
+// The visitor identity is deliberately preserved. Reset means "new conversation",
+// not "forget me" -- erasure is a separate concern with its own consent semantics.
+func (s *Server) resetWidgetSession(w http.ResponseWriter, r *http.Request) {
+	session, authorized := s.authorizeWidgetSession(r)
+	if !authorized {
+		s.writeError(w, r, http.StatusUnauthorized, "invalid_session", "The widget session is invalid or expired", nil)
+		return
+	}
+	agent, found := s.findPublishedAgentByID(session.AccountID, session.AgentID)
+	if !found {
+		s.writeError(w, r, http.StatusNotFound, "agent_not_found", "Published agent not found", nil)
+		return
+	}
+	if !s.hasEntitlement(agent.AccountID) {
+		s.writeError(w, r, http.StatusPaymentRequired, "subscription_required", "This assistant is temporarily unavailable", nil)
+		return
+	}
+	sessionToken, err := security.RandomToken(32)
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "token_error", "A widget session could not be created", nil)
+		return
+	}
+	now := time.Now().UTC()
+	expiresAt := now.Add(widgetSessionTTL)
+	fresh := model.Session{
+		ID: newID("cvs_"), AccountID: agent.AccountID, AgentID: agent.ID, VisitorID: session.VisitorID,
+		SessionTokenHash: security.HashOpaqueToken(sessionToken), Origin: r.Header.Get("Origin"), Locale: session.Locale,
+		PageURL: session.PageURL, PageTitle: session.PageTitle, Referrer: session.Referrer,
+		MemoryConsent: session.MemoryConsent, ExpiresAt: expiresAt, CreatedAt: now, UpdatedAt: now, LastSeenAt: now,
+	}
+	var history []model.Message
+	err = s.store.Update(func(state *model.State) error {
+		for index := range state.Sessions {
+			if state.Sessions[index].ID == session.ID {
+				// Expire the old session TOKEN so the caller cannot keep using it after
+				// being handed a new one. The row itself stays: the customer keeps the
+				// transcript, and the resume path walks newest-first, so the fresh
+				// session below is what a returning visitor gets.
+				state.Sessions[index].ExpiresAt = now
+				state.Sessions[index].UpdatedAt = now
+				break
+			}
+		}
+		state.Sessions = append(state.Sessions, fresh)
+		if welcome := strings.TrimSpace(agent.WelcomeMessage); welcome != "" {
+			state.Messages = append(state.Messages, model.Message{
+				ID: newID("msg_"), AccountID: agent.AccountID, AgentID: agent.ID, SessionID: fresh.ID,
+				VisitorID: fresh.VisitorID, Role: "assistant", Content: welcome, CreatedAt: now,
+			})
+		}
+		for _, message := range state.Messages {
+			if message.SessionID == fresh.ID {
+				history = append(history, message.Clone())
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		s.storageFailure(w, r, err)
+		return
+	}
+	// Same shape as createWidgetSession so the widget can reuse one code path.
+	s.writeData(w, http.StatusCreated, map[string]any{
+		"session_id": fresh.ID, "session_token": sessionToken, "expires_at": expiresAt,
+		"conversation": map[string]any{"id": fresh.ID, "resumed": false, "messages": publicWidgetHistory(history, widgetHistoryLimit)},
+		"agent":        publicAgent(agent),
+	})
+}
+
+// findPublishedAgentByID resolves a published agent within one account, which is
+// what a session already proves the caller may reach.
+func (s *Server) findPublishedAgentByID(accountID, agentID string) (model.Agent, bool) {
+	var result model.Agent
+	found := false
+	_ = s.store.View(func(state *model.State) error {
+		if agent, ok := findAgent(state, accountID, agentID); ok && agent.Status == "published" {
+			result, found = agent.Clone(), true
+		}
+		return nil
+	})
+	return result, found
+}

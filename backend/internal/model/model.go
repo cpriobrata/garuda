@@ -135,14 +135,40 @@ type Agent struct {
 	UpdatedAt        time.Time         `json:"updated_at"`
 }
 
+// LeadCaptureConfig keeps its original five fields exactly as they were. The
+// three added for the form builder are optional: an agent stored before they
+// existed decodes with FormFields empty, and the api package then rebuilds
+// today's name, email and phone form out of the legacy Fields list, so an absent
+// form behaves exactly as it did before the builder shipped.
 type LeadCaptureConfig struct {
 	Enabled     bool     `json:"enabled"`
 	Prompt      string   `json:"prompt"`
 	AfterTurns  int      `json:"after_turns"`
 	Fields      []string `json:"fields"`
 	PrivacyText string   `json:"privacy_text,omitempty"`
+
+	FormHeading string          `json:"form_heading,omitempty"`
+	SubmitLabel string          `json:"submit_label,omitempty"`
+	FormFields  []LeadFormField `json:"form_fields,omitempty"`
 }
 
+// LeadFormField is one row of the customer-authored lead form, in the order the
+// customer arranged it. ID is the stable key the widget posts the answer under,
+// so renaming a Label never orphans the answers already captured against it.
+type LeadFormField struct {
+	ID          string   `json:"id"`
+	Label       string   `json:"label"`
+	Type        string   `json:"type"`
+	Required    bool     `json:"required,omitempty"`
+	Options     []string `json:"options,omitempty"`
+	Placeholder string   `json:"placeholder,omitempty"`
+}
+
+// BrandingConfig carries everything the widget paints with. Every field below
+// the original seven is additive and optional: absent means today's behaviour
+// rather than a zero value, because the api package resolves the whole
+// configuration into concrete values before the widget or the settings screen
+// sees any of it.
 type BrandingConfig struct {
 	PrimaryColor   string   `json:"primary_color"`
 	AccentColor    string   `json:"accent_color"`
@@ -151,6 +177,56 @@ type BrandingConfig struct {
 	LauncherText   string   `json:"launcher_text,omitempty"`
 	PrivacyURL     string   `json:"privacy_url,omitempty"`
 	AllowedDomains []string `json:"allowed_domains,omitempty"`
+
+	DisplayName  string         `json:"display_name,omitempty"`
+	Tagline      string         `json:"tagline,omitempty"`
+	LogoURL      string         `json:"logo_url,omitempty"`
+	Theme        string         `json:"theme,omitempty"`
+	CustomColors *CustomColors  `json:"custom_colors,omitempty"`
+	Toggles      *WidgetToggles `json:"toggles,omitempty"`
+}
+
+// CustomColors holds the colours a customer edits by hand under the "custom"
+// theme. Primary and accent are deliberately absent here: they already live on
+// BrandingConfig, and giving one colour two homes is how the two drift apart.
+// Any field left empty falls back to the documented default.
+type CustomColors struct {
+	Background string `json:"background,omitempty"`
+	Surface    string `json:"surface,omitempty"`
+	Text       string `json:"text,omitempty"`
+	OnPrimary  string `json:"on_primary,omitempty"`
+	OnAccent   string `json:"on_accent,omitempty"`
+}
+
+// ThemeColors is the resolved palette. The server turns a preset name into one
+// of these so the widget never carries the preset table, and so a preset can be
+// retuned without shipping a new widget bundle to every customer website.
+type ThemeColors struct {
+	Primary    string `json:"primary"`
+	Accent     string `json:"accent"`
+	Background string `json:"background"`
+	Surface    string `json:"surface"`
+	Text       string `json:"text"`
+	OnPrimary  string `json:"on_primary"`
+	OnAccent   string `json:"on_accent"`
+}
+
+// WidgetToggles carries the nine independently switchable widget behaviours.
+// Every field is a pointer because an agent saved before these existed has no
+// toggle object at all, and plain booleans would read false for all nine, which
+// would switch chat itself off for every agent already serving traffic. Nil
+// means the customer has not chosen, and the api package resolves that to the
+// documented default. Read the resolved toggles, never these fields directly.
+type WidgetToggles struct {
+	Transcription   *bool `json:"transcription,omitempty"`
+	Chat            *bool `json:"chat,omitempty"`
+	Autostart       *bool `json:"autostart,omitempty"`
+	MuteOnMinimize  *bool `json:"mute_on_minimize,omitempty"`
+	MuteOnTabChange *bool `json:"mute_on_tab_change,omitempty"`
+	ShowLeadForm    *bool `json:"show_lead_form,omitempty"`
+	IsGlowing       *bool `json:"is_glowing,omitempty"`
+	IsTransparent   *bool `json:"is_transparent,omitempty"`
+	AgentMute       *bool `json:"agent_mute,omitempty"`
 }
 
 type KnowledgeItem struct {
