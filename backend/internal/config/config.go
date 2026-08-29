@@ -11,23 +11,35 @@ import (
 )
 
 type Config struct {
-	Address               string
-	PublicURL             string
-	DataFile              string
-	JWTSecret             string
-	VisitorHMACKey        string
-	AccessTokenTTL        time.Duration
-	RefreshTokenTTL       time.Duration
-	PasswordResetTTL      time.Duration
-	EmailVerificationTTL  time.Duration
-	AuthResetURL          string
-	AuthVerifyURL         string
-	AllowedOrigins        []string
-	TrustedProxies        []string
-	ComposioAPIKey        string
-	ComposioBaseURL       string
-	DeepgramAPIKey        string
-	DeepgramModel         string
+	Address              string
+	PublicURL            string
+	DataFile             string
+	JWTSecret            string
+	VisitorHMACKey       string
+	AccessTokenTTL       time.Duration
+	RefreshTokenTTL      time.Duration
+	PasswordResetTTL     time.Duration
+	EmailVerificationTTL time.Duration
+	AuthResetURL         string
+	AuthVerifyURL        string
+	AllowedOrigins       []string
+	TrustedProxies       []string
+	ComposioAPIKey       string
+	ComposioBaseURL      string
+	DeepgramAPIKey       string
+	DeepgramModel        string
+
+	// Alerting: how the owner is paged when the service itself fails. Every
+	// field is optional -- an unconfigured channel means no alerts, never a
+	// startup failure, in the same spirit as every other adapter here.
+	AlertWhatsAppToken    string
+	AlertWhatsAppPhoneID  string
+	AlertWhatsAppTo       string
+	AlertWhatsAppBaseURL  string
+	AlertWhatsAppTemplate string
+	AlertWhatsAppLanguage string
+	AlertWebhookURL       string
+	AlertWebhookAuth      string
 	Environment           string
 	DemoMode              bool
 	ExposeResetToken      bool
@@ -91,6 +103,14 @@ func Load() (Config, error) {
 		ComposioBaseURL:       strings.TrimRight(env("COMPOSIO_BASE_URL", "https://backend.composio.dev/api/v3"), "/"),
 		DeepgramAPIKey:        strings.TrimSpace(os.Getenv("DEEPGRAM_API_KEY")),
 		DeepgramModel:         env("DEEPGRAM_MODEL", "nova-3"),
+		AlertWhatsAppToken:    strings.TrimSpace(os.Getenv("ALERT_WHATSAPP_TOKEN")),
+		AlertWhatsAppPhoneID:  strings.TrimSpace(os.Getenv("ALERT_WHATSAPP_PHONE_ID")),
+		AlertWhatsAppTo:       strings.TrimSpace(os.Getenv("ALERT_WHATSAPP_TO")),
+		AlertWhatsAppBaseURL:  strings.TrimRight(env("ALERT_WHATSAPP_API_URL", "https://graph.facebook.com/v21.0"), "/"),
+		AlertWhatsAppTemplate: strings.TrimSpace(os.Getenv("ALERT_WHATSAPP_TEMPLATE")),
+		AlertWhatsAppLanguage: env("ALERT_WHATSAPP_TEMPLATE_LANGUAGE", "en"),
+		AlertWebhookURL:       strings.TrimSpace(os.Getenv("ALERT_WEBHOOK_URL")),
+		AlertWebhookAuth:      strings.TrimSpace(os.Getenv("ALERT_WEBHOOK_AUTH")),
 		Environment:           strings.ToLower(env("GARUDA_ENVIRONMENT", "development")),
 		DemoMode:              boolean("GARUDA_DEMO_MODE", true),
 		ExposeResetToken:      boolean("GARUDA_EXPOSE_RESET_TOKEN", true),

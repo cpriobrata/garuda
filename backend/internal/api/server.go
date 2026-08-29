@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"garuda/backend/internal/alerts"
 	"garuda/backend/internal/billing"
 	"garuda/backend/internal/composio"
 	"garuda/backend/internal/config"
@@ -44,6 +45,7 @@ type Server struct {
 	supabase       *supabase.Client
 	google         googleIdentityVerifier
 	mailer         *mailer.Client
+	alerts         *alerts.Notifier
 	logger         *slog.Logger
 	limiter        *fixedWindowLimiter
 	composio       *composio.Client
@@ -93,14 +95,31 @@ func New(cfg config.Config, dataStore store.Store, logger *slog.Logger) *Server 
 		supabaseAnonKey = cfg.SupabaseAnonKey
 	}
 	return &Server{
-		cfg:            cfg,
-		store:          dataStore,
-		llm:            llm.New(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel),
-		stripe:         billing.NewStripe(cfg.StripeSecretKey, cfg.StripeWebhookSecret, cfg.StripePriceID, cfg.StripeAPIURL, cfg.StripeSuccessURL, cfg.StripeCancelURL),
-		rag:            rag.New(cfg.RAGEdgeURL, cfg.RAGBearerToken),
-		supabase:       supabase.New(supabaseURL, supabaseAnonKey),
-		google:         googleauth.New(cfg.GoogleOAuthClientID),
-		mailer:         mailer.New(cfg.SendGridAPIKey, cfg.SendGridAPIURL, cfg.SendGridFromEmail, cfg.SendGridFromName, cfg.SendGridReplyTo),
+		cfg:      cfg,
+		store:    dataStore,
+		llm:      llm.New(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel),
+		stripe:   billing.NewStripe(cfg.StripeSecretKey, cfg.StripeWebhookSecret, cfg.StripePriceID, cfg.StripeAPIURL, cfg.StripeSuccessURL, cfg.StripeCancelURL),
+		rag:      rag.New(cfg.RAGEdgeURL, cfg.RAGBearerToken),
+		supabase: supabase.New(supabaseURL, supabaseAnonKey),
+		google:   googleauth.New(cfg.GoogleOAuthClientID),
+		mailer:   mailer.New(cfg.SendGridAPIKey, cfg.SendGridAPIURL, cfg.SendGridFromEmail, cfg.SendGridFromName, cfg.SendGridReplyTo),
+		// WhatsApp is the owner's stated channel; the generic webhook keeps
+		// alerting working on a deployment whose WhatsApp credentials have not
+		// arrived yet. Neither configured means no alerts and no startup failure.
+		alerts: alerts.New(alerts.Options{
+			Service: "garuda-api (" + cfg.Environment + ")",
+			Transport: alerts.First(
+				alerts.NewWhatsApp(alerts.WhatsAppConfig{
+					AccessToken:      cfg.AlertWhatsAppToken,
+					PhoneNumberID:    cfg.AlertWhatsAppPhoneID,
+					Recipient:        cfg.AlertWhatsAppTo,
+					BaseURL:          cfg.AlertWhatsAppBaseURL,
+					Template:         cfg.AlertWhatsAppTemplate,
+					TemplateLanguage: cfg.AlertWhatsAppLanguage,
+				}),
+				alerts.NewWebhook(alerts.WebhookConfig{URL: cfg.AlertWebhookURL, AuthHeader: cfg.AlertWebhookAuth}),
+			),
+		}),
 		logger:         logger,
 		limiter:        newFixedWindowLimiter(),
 		composio:       composio.New(cfg.ComposioBaseURL, cfg.ComposioAPIKey),
@@ -136,6 +155,10 @@ func (s *Server) Handler() http.Handler {
 	// carries the owner's personal number; the public bootstrap only says a
 	// handoff exists.
 	mux.Handle("POST /widget/v1/sessions/{sessionID}/handoff", s.rateLimit("widget.handoff", 20, time.Minute, http.HandlerFunc(s.startWidgetHandoff)))
+	// Polled by an open widget panel so a reply typed in the owner's inbox reaches
+	// the visitor. Cheap and bounded: it returns only what comes after the id the
+	// widget already holds.
+	mux.Handle("GET /widget/v1/sessions/{sessionID}/messages", s.rateLimit("widget.poll", 240, time.Minute, http.HandlerFunc(s.pollWidgetMessages)))
 
 	protected := func(pattern string, handler http.HandlerFunc) {
 		mux.Handle(pattern, s.requireAuth(handler))
@@ -217,6 +240,7 @@ func (s *Server) Handler() http.Handler {
 	protected("PATCH /v1/leads/{leadID}", s.updateLead)
 	protected("GET /v1/conversations", s.listConversations)
 	protected("GET /v1/conversations/{sessionID}", s.getConversation)
+	protectedLimited("POST /v1/conversations/{sessionID}/messages", "conversations.reply", 120, time.Minute, s.postTeamReply)
 	protected("GET /v1/billing/subscription", s.getSubscription)
 	protected("POST /v1/billing/checkout", s.createCheckout)
 	protected("POST /v1/billing/checkout-sessions", s.createCheckout)
@@ -428,6 +452,14 @@ func (s *Server) accessLog(next http.Handler) http.Handler {
 		recorder := &responseRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(recorder, r)
 		s.logger.Info("request", "method", r.Method, "path", r.URL.Path, "status", recorder.status, "duration_ms", time.Since(started).Milliseconds(), "request_id", requestID(r.Context()))
+		// Only server faults page a human. A 404, a 401 or a 422 is the service
+		// working correctly and telling somebody so.
+		if recorder.status >= 500 {
+			s.alerts.Notify(alerts.Alert{
+				Kind: "http_5xx", Where: safeRoute(r), Status: recorder.status,
+				RequestID: requestID(r.Context()),
+			})
+		}
 	})
 }
 
@@ -447,6 +479,12 @@ func (s *Server) recoverPanic(next http.Handler) http.Handler {
 				// The access log lives below here too, and the panic unwound past it, so
 				// this line is the only record of the request that failed.
 				s.logger.Error("panic recovered", "error", recovered, "method", r.Method, "path", r.URL.Path, "request_id", identifier)
+				// The route PATTERN, not r.URL.Path: a path carries ids, and an id in
+				// an alert is personal data sitting in somebody's phone.
+				s.alerts.Notify(alerts.Alert{
+					Kind: "panic", Where: safeRoute(r), Status: http.StatusInternalServerError,
+					Detail: fmt.Sprint(recovered), RequestID: identifier,
+				})
 				s.writeError(w, r, http.StatusInternalServerError, "internal_error", "An unexpected error occurred", nil)
 			}
 		}()
@@ -913,4 +951,47 @@ func parseCIDRs(values []string) []*net.IPNet {
 		}
 	}
 	return networks
+}
+
+// safeRoute names where a request went without naming what it was about.
+//
+// r.URL.Path carries ids: a session id, an agent id, a lead id. Those belong in
+// the log, which is access-controlled, and not in an alert, which lands on a
+// phone and stays there. r.Pattern would be the ideal answer, but the alerting
+// middleware sits ABOVE the mux and therefore sees the request before any
+// pattern was matched, so the path is rewritten here instead: every segment
+// that looks like an identifier becomes a placeholder, which leaves the shape
+// of the route and none of its subjects.
+func safeRoute(r *http.Request) string {
+	segments := strings.Split(r.URL.Path, "/")
+	for index, segment := range segments {
+		if looksLikeIdentifier(segment) {
+			segments[index] = "{id}"
+		}
+	}
+	route := strings.Join(segments, "/")
+	if len(route) > 120 {
+		route = route[:120]
+	}
+	return r.Method + " " + route
+}
+
+// looksLikeIdentifier is deliberately eager. Turning a legitimate path segment
+// into {id} costs a little precision in an alert; leaving a real identifier in
+// costs a disclosure, so every ambiguous case resolves towards redaction.
+func looksLikeIdentifier(segment string) bool {
+	if len(segment) > 24 {
+		return true
+	}
+	if index := strings.Index(segment, "_"); index > 0 && index < len(segment)-1 {
+		// Every id this service mints is prefix_random: agt_, cvs_, msg_, lead_.
+		return true
+	}
+	digits := 0
+	for _, character := range segment {
+		if character >= '0' && character <= '9' {
+			digits++
+		}
+	}
+	return digits > 0 && digits == len(segment)
 }

@@ -11,6 +11,7 @@
   var REQUEST_TIMEOUT_MS = 20000;
   var MESSAGE_REQUEST_TIMEOUT_MS = 60000;
   var STREAM_IDLE_TIMEOUT_MS = 30000;
+  var TEAM_REPLY_POLL_MS = 12000;
   var DEFAULT_ACCENT = '#4F46E5';
   // The palette the widget painted with before themes existed. It is the only
   // colour table in this file: every other colour arrives already resolved from
@@ -754,6 +755,22 @@
     return normalizeSessionPayload(await response.json());
   };
 
+  // Anything the visitor's transcript does not already hold. The cursor is a
+  // message id, not a timestamp, so two messages written in the same
+  // millisecond can neither repeat nor go missing.
+  LiveAPI.prototype.pollMessages = async function pollMessages(session, afterID) {
+    var query = afterID ? '?after=' + encodeURIComponent(afterID) : '';
+    var response = await this.request(
+      '/widget/v1/sessions/' + encodeURIComponent(session.sessionID) + '/messages' + query,
+      { headers: { 'X-Garuda-Session-Token': session.sessionToken } }
+    );
+    if (!response.ok) throw await safeErrorFromResponse(response);
+    var json = await response.json();
+    var data = isRecord(json) && isRecord(json.data) ? json.data : json;
+    var messages = isRecord(data) && Array.isArray(data.messages) ? data.messages : [];
+    return messages.map(normalizeMessage).filter(Boolean);
+  };
+
   LiveAPI.prototype.captureLead = async function captureLead(session, request) {
     var response = await this.request(
       '/widget/v1/sessions/' + encodeURIComponent(session.sessionID) + '/leads',
@@ -1006,6 +1023,10 @@
 
   // The demo has no owner and therefore no number to hand out. Saying so is
   // better than opening WhatsApp on a number somebody made up.
+  DemoAPI.prototype.pollMessages = async function pollMessages() {
+    return [];
+  };
+
   DemoAPI.prototype.startHandoff = async function startHandoff() {
     throw new WidgetError('handoff_unavailable', 'Human handoff is not available in the demo.', 404);
   };
@@ -1183,6 +1204,8 @@
     this.lastRetry = null;
     this.nodes = {};
     this.handoffOffered = false;
+    this.pollTimer = null;
+    this.polling = false;
     this.memoryConsent = this.resolveInitialConsent();
     this.requiresConsent = this.memoryConsent === null;
   }
@@ -1467,6 +1490,15 @@
     handoffButton.addEventListener('click', function () { self.requestHandoff(); });
     panel.addEventListener('keydown', function (event) { self.handlePanelKeys(event); });
     global.addEventListener('online', function () { self.updateConnectionState(); });
+    // A hidden tab must not poll. Browsers throttle background timers rather
+    // than stopping them, so without this a visitor with twenty tabs open keeps
+    // twenty conversations alive against the API for no benefit to anyone.
+    if (global.document.addEventListener) {
+      global.document.addEventListener('visibilitychange', function () {
+        if (global.document.hidden) self.stopPolling();
+        else if (self.open) self.startPolling();
+      });
+    }
     global.addEventListener('offline', function () { self.updateConnectionState(); });
     this.applyAgent(this.agent);
     if (this.requiresConsent) this.renderConsentPrompt();
@@ -1639,6 +1671,7 @@
       }
       if (this.agent.toggles.showLeadForm) this.showLeadForm(null);
       this.scrollToBottom(false);
+      this.startPolling();
       var focusTarget = this.requiresConsent
         ? this.nodes.consentRegion.querySelector('button')
         : this.nodes.textarea;
@@ -1646,6 +1679,7 @@
         if (focusTarget) focusTarget.focus({ preventScroll: true });
       }, 80);
     } else {
+      this.stopPolling();
       this.nodes.launcher.focus({ preventScroll: true });
     }
   };
@@ -1657,6 +1691,52 @@
   // Cycling Tab inside a dialog that reports itself as non-modal stranded
   // keyboard and screen reader users, who had been told they could leave it.
   // Escape still closes the panel and setOpen returns focus to the launcher.
+  // ---- replies typed by a person in the owner's inbox ----
+  //
+  // Polling runs only while the panel is open. A widget sitting closed on a page
+  // nobody is looking at must cost nothing, and a reply that lands while the
+  // panel is shut is picked up the moment the visitor opens it again.
+
+  GarudaWidget.prototype.startPolling = function startPolling() {
+    var self = this;
+    if (this.pollTimer || !global.setInterval) return;
+    this.pollTimer = global.setInterval(function () {
+      self.pollForTeamReplies();
+    }, TEAM_REPLY_POLL_MS);
+  };
+
+  GarudaWidget.prototype.stopPolling = function stopPolling() {
+    if (!this.pollTimer) return;
+    global.clearInterval(this.pollTimer);
+    this.pollTimer = null;
+  };
+
+  GarudaWidget.prototype.pollForTeamReplies = async function pollForTeamReplies() {
+    // A slow response must not stack a second request on top of the first, and
+    // a reply arriving mid-generation must not interleave with the stream the
+    // model is still writing.
+    if (this.polling || this.sending || !this.session) return;
+    this.polling = true;
+    try {
+      var last = this.messages[this.messages.length - 1];
+      var fresh = await this.api.pollMessages(this.session, last ? last.id : '');
+      var known = {};
+      this.messages.forEach(function (message) { known[message.id] = true; });
+      for (var index = 0; index < fresh.length; index += 1) {
+        // Dedupe by id rather than trusting the cursor alone: a widget that
+        // restarted, or one whose last message the server never stored, would
+        // otherwise show the visitor their own conversation twice.
+        if (known[fresh[index].id]) continue;
+        this.appendMessage(fresh[index]);
+      }
+    } catch (_error) {
+      // A failed poll is not worth telling the visitor about. The next one is
+      // twelve seconds away, and the composer still works either way.
+    } finally {
+      this.polling = false;
+    }
+  };
+
   GarudaWidget.prototype.handlePanelKeys = function handlePanelKeys(event) {
     if (event.key !== 'Escape') return;
     event.preventDefault();

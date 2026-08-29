@@ -600,7 +600,11 @@ function renderWidget(payload, options) {
     ? null
     : { sessionID: 'session-1', sessionToken: 'short-lived-token' };
   instance.applyAgent(widget.normalizeAgentPayload(payload));
-  return { instance, nodes: instance.nodes, browser, restore: browser.restore };
+  // An open panel holds a polling interval, and a live interval keeps the test
+  // runner from ever exiting. Teardown stops it whether the test opened the
+  // panel or not.
+  const restore = () => { instance.stopPolling(); browser.restore(); };
+  return { instance, nodes: instance.nodes, browser, restore };
 }
 
 function leadFieldGroups(instance) {
