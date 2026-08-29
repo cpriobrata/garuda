@@ -71,12 +71,12 @@ as $$
     chunk.source_name,
     chunk.content,
     chunk.metadata,
-    (1 - (chunk.embedding <=> query_embedding))::real as similarity
+    (1 - (chunk.embedding OPERATOR(extensions.<=>) query_embedding))::real as similarity
   from app.rag_runtime_chunks as chunk
   where chunk.organization_key = query_organization_key
     and chunk.agent_key = query_agent_key
-    and (1 - (chunk.embedding <=> query_embedding)) >= match_threshold
-  order by chunk.embedding <=> query_embedding
+    and (1 - (chunk.embedding OPERATOR(extensions.<=>) query_embedding)) >= match_threshold
+  order by chunk.embedding OPERATOR(extensions.<=>) query_embedding
   limit least(greatest(match_count, 1), 8)
 $$;
 

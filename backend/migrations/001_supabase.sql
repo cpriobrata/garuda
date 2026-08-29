@@ -206,7 +206,7 @@ as $$
     source.name as source_name,
     chunk.content,
     chunk.metadata,
-    (1 - (chunk.embedding <=> query_embedding))::real as similarity
+    (1 - (chunk.embedding OPERATOR(extensions.<=>) query_embedding))::real as similarity
   from app.knowledge_chunks as chunk
   join app.knowledge_sources as source
     on source.organization_id = chunk.organization_id
@@ -215,8 +215,8 @@ as $$
     and chunk.agent_id = query_agent_id
     and source.status = 'ready'
     and chunk.embedding is not null
-    and (1 - (chunk.embedding <=> query_embedding)) >= match_threshold
-  order by chunk.embedding <=> query_embedding
+    and (1 - (chunk.embedding OPERATOR(extensions.<=>) query_embedding)) >= match_threshold
+  order by chunk.embedding OPERATOR(extensions.<=>) query_embedding
   limit least(greatest(match_count, 1), 8)
 $$;
 
