@@ -24,6 +24,11 @@ const editableFields = ["name", "description", "greeting", "systemPrompt", "prim
 export type AgentFormField = (typeof editableFields)[number];
 export type AgentFormValues = Record<AgentFormField, string>;
 
+// The builder runs one async action at a time and every one of them writes the
+// same record, so they share a single slot: the clicked button shows the
+// spinner and the others hold still until it is finished.
+export type AgentBuilderAction = "" | "save" | "test" | "publish" | "knowledge";
+
 // Server validation keys mapped to the builder section that shows the field, so
 // a rejected save can move the writer to something they can actually correct.
 // Keys the builder has no input for are deliberately absent and are listed in
@@ -125,6 +130,23 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
   const [statusMessage, setStatusMessage] = useState("");
   const [fieldMessages, setFieldMessages] = useState<Record<string, string>>({});
   const [previewReply, setPreviewReply] = useState("");
+  const [pendingAction, setPendingAction] = useState<AgentBuilderAction>("");
+  // A ref as well as the state above. Two clicks can land in the same tick,
+  // before React has re-rendered the button as disabled, and the state read
+  // from the first render's closure would still say the builder is idle.
+  const runningAction = useRef<AgentBuilderAction>("");
+
+  function beginAction(action: AgentBuilderAction) {
+    if (runningAction.current) return false;
+    runningAction.current = action;
+    setPendingAction(action);
+    return true;
+  }
+
+  function finishAction() {
+    runningAction.current = "";
+    setPendingAction("");
+  }
 
   function updateField(field: AgentFormField) {
     return (value: string) => {
@@ -179,6 +201,8 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
     setFieldMessages({});
   }
 
+  // Publishing and testing both save first, so the guard belongs on the
+  // entry points rather than on this shared step.
   async function saveDraft() {
     beginSave();
     try {
@@ -193,6 +217,15 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
     }
   }
 
+  async function saveDraftAction() {
+    if (!beginAction("save")) return;
+    try {
+      await saveDraft();
+    } finally {
+      finishAction();
+    }
+  }
+
   async function publish() {
     if (!form.allowedDomain.trim()) {
       setSection("appearance");
@@ -201,30 +234,37 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
       setStatus("error");
       return;
     }
-    const id = await saveDraft();
-    if (!id) return;
+    if (!beginAction("publish")) return;
     try {
+      const id = await saveDraft();
+      if (!id) return;
       const result = await garudaApi.publishAgent(id);
       setRevision(result.published_version);
       setPublished(true);
       setStatus("saved");
     } catch (error) {
       reportFailure(error);
+    } finally {
+      finishAction();
     }
   }
 
   async function testAgent() {
-    const id = await saveDraft();
-    if (!id) return;
+    if (!beginAction("test")) return;
     try {
+      const id = await saveDraft();
+      if (!id) return;
       const result = await garudaApi.previewAgentMessage(id, "What can you help me with?");
       setPreviewReply(result.message.content);
     } catch (error) {
       reportFailure(error);
+    } finally {
+      finishAction();
     }
   }
 
   async function addKnowledge(title: string, content: string) {
+    if (!beginAction("knowledge")) return;
     const next = [...knowledge, { type: "text", title, content, status: "ready" }];
     if (demoMode) setKnowledge(next);
     beginSave();
@@ -257,12 +297,14 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
         } catch { /* Keep the last confirmed server state. */ }
       }
       reportFailure(error);
+    } finally {
+      finishAction();
     }
   }
 
   return (
     <div className="-m-4 min-h-[calc(100vh-4rem)] bg-white sm:-m-6 lg:-m-8">
-      <div className="flex h-16 items-center border-b px-4 sm:px-6"><Button variant="ghost" size="icon" asChild><Link href="/app/agents"><ArrowLeft className="h-4 w-4" /></Link></Button><div className="ml-2"><div className="flex items-center gap-2"><h1 className="text-sm font-semibold text-slate-900">{existing ? `Edit ${form.name}` : "Create agent"}</h1><Badge variant={published ? "success" : "secondary"}>{published ? "Live" : "Draft"}</Badge></div><p className={cn("text-[10px]", status === "error" ? "text-red-500" : "text-slate-400")}>{status === "saving" ? "Saving draft…" : status === "saved" ? "Draft saved" : status === "error" ? (statusMessage || "Could not save — try again") : "Review and save your draft"}</p></div><div className="ml-auto flex gap-2"><Button variant="outline" size="sm" onClick={saveDraft} className="hidden sm:inline-flex"><Save className="mr-1.5 h-3.5 w-3.5" /> Save</Button><Button variant="outline" size="sm" onClick={testAgent}><Play className="mr-1.5 h-3.5 w-3.5" /> Test</Button><Button size="sm" onClick={publish}><Sparkles className="mr-1.5 h-3.5 w-3.5" /> {published ? "Publish updates" : "Publish agent"}</Button></div></div>
+      <div className="flex h-16 items-center border-b px-4 sm:px-6"><Button variant="ghost" size="icon" asChild><Link href="/app/agents"><ArrowLeft className="h-4 w-4" /></Link></Button><div className="ml-2"><div className="flex items-center gap-2"><h1 className="text-sm font-semibold text-slate-900">{existing ? `Edit ${form.name}` : "Create agent"}</h1><Badge variant={published ? "success" : "secondary"}>{published ? "Live" : "Draft"}</Badge></div><p className={cn("text-[10px]", status === "error" ? "text-red-500" : "text-slate-400")}>{status === "saving" ? "Saving draft…" : status === "saved" ? "Draft saved" : status === "error" ? (statusMessage || "Could not save — try again") : "Review and save your draft"}</p></div><div className="ml-auto flex gap-2"><Button variant="outline" size="sm" onClick={saveDraftAction} loading={pendingAction === "save"} loadingLabel="Saving the draft" disabled={pendingAction !== "" && pendingAction !== "save"} className="hidden sm:inline-flex"><Save className="mr-1.5 h-3.5 w-3.5" /> Save</Button><Button variant="outline" size="sm" onClick={testAgent} loading={pendingAction === "test"} loadingLabel="Saving and testing the agent" disabled={pendingAction !== "" && pendingAction !== "test"}><Play className="mr-1.5 h-3.5 w-3.5" /> Test</Button><Button size="sm" onClick={publish} loading={pendingAction === "publish"} loadingLabel={published ? "Publishing your updates" : "Publishing the agent"} disabled={pendingAction !== "" && pendingAction !== "publish"}><Sparkles className="mr-1.5 h-3.5 w-3.5" /> {published ? "Publish updates" : "Publish agent"}</Button></div></div>
       <div className="grid min-h-[calc(100vh-8rem)] lg:grid-cols-[205px_1fr_390px] xl:grid-cols-[230px_1fr_440px]">
         <aside className="hidden border-r bg-slate-50/60 p-3 lg:block">
           <p className="px-3 py-3 text-[10px] font-bold uppercase tracking-[.16em] text-slate-400">Configure</p>
@@ -276,7 +318,7 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
             <UnlistedMessages messages={fieldMessages} />
             {section === "identity" && <IdentitySection name={form.name} setName={updateField("name")} description={form.description} setDescription={updateField("description")} greeting={form.greeting} setGreeting={updateField("greeting")} messages={fieldMessages} />}
             {section === "goal" && <GoalSection systemPrompt={form.systemPrompt} setSystemPrompt={updateField("systemPrompt")} messages={fieldMessages} />}
-            {section === "knowledge" && <KnowledgeSection knowledge={knowledge} onAdd={addKnowledge} messages={fieldMessages} />}
+            {section === "knowledge" && <KnowledgeSection knowledge={knowledge} onAdd={addKnowledge} messages={fieldMessages} saving={pendingAction === "knowledge"} blocked={pendingAction !== "" && pendingAction !== "knowledge"} />}
             {section === "appearance" && <AppearanceSection primaryColor={form.primaryColor} setPrimaryColor={updateField("primaryColor")} accent={form.accent} setAccent={updateField("accent")} launcherText={form.launcherText} setLauncherText={updateField("launcherText")} widgetPosition={form.widgetPosition} setWidgetPosition={updateField("widgetPosition")} allowedDomain={form.allowedDomain} setAllowedDomain={updateField("allowedDomain")} messages={fieldMessages} />}
             {section === "handoff" && <HandoffSection />}
             <div className="mt-8 flex justify-between border-t pt-5"><Button variant="ghost" size="sm" disabled={section === "identity"} onClick={() => setSection(sections[Math.max(0, sections.findIndex((item) => item.id === section) - 1)].id)}>Previous</Button><Button size="sm" onClick={() => { const index = sections.findIndex((item) => item.id === section); if (index < sections.length - 1) setSection(sections[index + 1].id); }}>Next section <ChevronRight className="ml-1.5 h-3.5 w-3.5" /></Button></div>
@@ -320,10 +362,10 @@ function GoalSection({ systemPrompt, setSystemPrompt, messages }: { systemPrompt
   return <><SectionHeading eyebrow="Goal & behavior" title="Give every conversation a clear purpose." description="These instructions are persisted with the agent and used by the private preview and published widget." /><div className="space-y-5"><div><p className="text-xs font-semibold text-slate-800">Start from a template</p><div className="mt-3 grid gap-2 sm:grid-cols-3">{templates.map((template) => <button key={template.title} type="button" onClick={() => setSystemPrompt(template.prompt)} className="rounded-xl border p-3 text-left text-xs font-semibold text-slate-700 transition hover:border-indigo-300 hover:bg-indigo-50">{template.title}</button>)}</div></div><div className="space-y-2"><Label htmlFor="agent-instructions">Agent instructions</Label><Textarea id="agent-instructions" value={systemPrompt} onChange={(event) => setSystemPrompt(event.target.value)} className="min-h-[180px]" /><FieldMessage message={messages.system_prompt} /><p className="text-[10px] text-slate-400">Keep instructions focused. Knowledge sources provide the factual context.</p></div></div></>;
 }
 
-function KnowledgeSection({ knowledge, onAdd, messages }: { knowledge: AgentRecord["knowledge"]; onAdd: (title: string, content: string) => Promise<void>; messages: Record<string, string> }) {
+function KnowledgeSection({ knowledge, onAdd, messages, saving, blocked }: { knowledge: AgentRecord["knowledge"]; onAdd: (title: string, content: string) => Promise<void>; messages: Record<string, string>; saving: boolean; blocked: boolean }) {
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
-  return <><SectionHeading eyebrow="Knowledge" title="Teach your agent what your team already knows." description="Add approved text Garuda can use when it answers. Each source is stored and processed separately." /><div className="space-y-4">{knowledge.map((source, index) => { const sourceStatus = source.status || "ready"; return <div key={source.id || `${source.title}-${index}`} className="flex items-center gap-3 rounded-xl border p-4"><span className="grid h-10 w-10 place-items-center rounded-xl bg-indigo-50 text-indigo-600"><BrainCircuit className="h-5 w-5" /></span><div className="min-w-0 flex-1"><p className="truncate text-xs font-semibold text-slate-900">{source.title}</p><p className="mt-1 text-[10px] text-slate-400">Text source · {source.content.length} characters</p></div><Badge variant={sourceStatus === "ready" ? "success" : sourceStatus === "failed" ? "warning" : "secondary"} className="capitalize">{sourceStatus}</Badge></div>; })}<div className="rounded-xl border border-dashed p-4"><p className="flex items-center gap-2 text-xs font-semibold text-slate-800"><UploadCloud className="h-4 w-4 text-indigo-600" /> Add a text knowledge source</p><div className="mt-3 space-y-2"><Input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Source title, e.g. Pricing FAQ" /><Textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="Paste accurate product, service, pricing or policy information…" className="min-h-[110px]" /><FieldMessage message={messages.knowledge} /><Button variant="outline" disabled={!title.trim() || !content.trim()} onClick={async () => { await onAdd(title.trim(), content.trim()); setTitle(""); setContent(""); }}>Add and save source</Button></div></div><div className="space-y-2"><Label htmlFor="knowledge-url">Website ingestion</Label><div className="flex gap-2"><Input id="knowledge-url" placeholder="https://docs.yoursite.com" disabled /><Button variant="outline" disabled>Add URL</Button></div><p className="text-[10px] text-slate-400">URL crawling is unavailable until the ingestion worker is configured.</p></div></div></>;
+  return <><SectionHeading eyebrow="Knowledge" title="Teach your agent what your team already knows." description="Add approved text Garuda can use when it answers. Each source is stored and processed separately." /><div className="space-y-4">{knowledge.map((source, index) => { const sourceStatus = source.status || "ready"; return <div key={source.id || `${source.title}-${index}`} className="flex items-center gap-3 rounded-xl border p-4"><span className="grid h-10 w-10 place-items-center rounded-xl bg-indigo-50 text-indigo-600"><BrainCircuit className="h-5 w-5" /></span><div className="min-w-0 flex-1"><p className="truncate text-xs font-semibold text-slate-900">{source.title}</p><p className="mt-1 text-[10px] text-slate-400">Text source · {source.content.length} characters</p></div><Badge variant={sourceStatus === "ready" ? "success" : sourceStatus === "failed" ? "warning" : "secondary"} className="capitalize">{sourceStatus}</Badge></div>; })}<div className="rounded-xl border border-dashed p-4"><p className="flex items-center gap-2 text-xs font-semibold text-slate-800"><UploadCloud className="h-4 w-4 text-indigo-600" /> Add a text knowledge source</p><div className="mt-3 space-y-2"><Input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Source title, e.g. Pricing FAQ" /><Textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="Paste accurate product, service, pricing or policy information…" className="min-h-[110px]" /><FieldMessage message={messages.knowledge} /><Button variant="outline" loading={saving} loadingLabel="Saving the knowledge source" disabled={blocked || !title.trim() || !content.trim()} onClick={async () => { await onAdd(title.trim(), content.trim()); setTitle(""); setContent(""); }}>Add and save source</Button></div></div><div className="space-y-2"><Label htmlFor="knowledge-url">Website ingestion</Label><div className="flex gap-2"><Input id="knowledge-url" placeholder="https://docs.yoursite.com" disabled /><Button variant="outline" disabled>Add URL</Button></div><p className="text-[10px] text-slate-400">URL crawling is unavailable until the ingestion worker is configured.</p></div></div></>;
 }
 
 function AppearanceSection({ primaryColor, setPrimaryColor, accent, setAccent, launcherText, setLauncherText, widgetPosition, setWidgetPosition, allowedDomain, setAllowedDomain, messages }: { primaryColor: string; setPrimaryColor: (value: string) => void; accent: string; setAccent: (value: string) => void; launcherText: string; setLauncherText: (value: string) => void; widgetPosition: string; setWidgetPosition: (value: string) => void; allowedDomain: string; setAllowedDomain: (value: string) => void; messages: Record<string, string> }) {

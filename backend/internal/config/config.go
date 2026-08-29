@@ -26,6 +26,8 @@ type Config struct {
 	TrustedProxies        []string
 	ComposioAPIKey        string
 	ComposioBaseURL       string
+	DeepgramAPIKey        string
+	DeepgramModel         string
 	Environment           string
 	DemoMode              bool
 	ExposeResetToken      bool
@@ -87,6 +89,8 @@ func Load() (Config, error) {
 		TrustedProxies:        csv(os.Getenv("GARUDA_TRUSTED_PROXIES")),
 		ComposioAPIKey:        strings.TrimSpace(os.Getenv("COMPOSIO_API_KEY")),
 		ComposioBaseURL:       strings.TrimRight(env("COMPOSIO_BASE_URL", "https://backend.composio.dev/api/v3"), "/"),
+		DeepgramAPIKey:        strings.TrimSpace(os.Getenv("DEEPGRAM_API_KEY")),
+		DeepgramModel:         env("DEEPGRAM_MODEL", "nova-3"),
 		Environment:           strings.ToLower(env("GARUDA_ENVIRONMENT", "development")),
 		DemoMode:              boolean("GARUDA_DEMO_MODE", true),
 		ExposeResetToken:      boolean("GARUDA_EXPOSE_RESET_TOKEN", true),

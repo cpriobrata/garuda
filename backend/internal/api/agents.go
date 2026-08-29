@@ -44,12 +44,43 @@ type knowledgeSummary struct {
 // GET /v1/agents/{agentID} and GET /v1/agents/{agentID}/sources.
 type agentSummary struct {
 	model.Agent
-	Knowledge      []knowledgeSummary `json:"knowledge"`
-	KnowledgeCount int                `json:"knowledge_count"`
+	Knowledge        []knowledgeSummary `json:"knowledge"`
+	KnowledgeCount   int                `json:"knowledge_count"`
+	ResolvedBranding resolvedBranding   `json:"resolved_branding"`
+}
+
+// agentDetail is the single-agent representation. It embeds the stored agent, so
+// every key a client reads today is present and unchanged, and adds beside it
+// the branding resolved server-side plus the catalogs a settings screen needs to
+// draw its pickers. Shipping the catalogs here rather than from a route of their
+// own keeps the theme names, the placements, the field types and the contrast
+// floors defined in exactly one place: this service.
+type agentDetail struct {
+	model.Agent
+	ResolvedBranding     resolvedBranding   `json:"resolved_branding"`
+	ResolvedLeadForm     resolvedLeadForm   `json:"resolved_lead_form"`
+	ThemePresets         []themePreset      `json:"theme_presets"`
+	Positions            []string           `json:"positions"`
+	LeadFormFieldTypes   []string           `json:"lead_form_field_types"`
+	ReservedLeadFieldIDs []string           `json:"reserved_lead_field_ids"`
+	ContrastMinimums     map[string]float64 `json:"contrast_minimums"`
+}
+
+func detailAgent(agent model.Agent) agentDetail {
+	return agentDetail{
+		Agent:                agent,
+		ResolvedBranding:     resolveBranding(agent),
+		ResolvedLeadForm:     resolveLeadForm(agent),
+		ThemePresets:         themePresets,
+		Positions:            widgetPositions,
+		LeadFormFieldTypes:   leadFormFieldTypes,
+		ReservedLeadFieldIDs: reservedLeadFieldIDs,
+		ContrastMinimums:     map[string]float64{"body_text": contrastMinimumBodyText, "interface": contrastMinimumInterface},
+	}
 }
 
 func summarizeAgent(agent model.Agent) agentSummary {
-	summary := agentSummary{Agent: agent, Knowledge: make([]knowledgeSummary, 0, len(agent.Knowledge)), KnowledgeCount: len(agent.Knowledge)}
+	summary := agentSummary{Agent: agent, Knowledge: make([]knowledgeSummary, 0, len(agent.Knowledge)), KnowledgeCount: len(agent.Knowledge), ResolvedBranding: resolveBranding(agent)}
 	summary.Agent.Knowledge = nil
 	for _, source := range agent.Knowledge {
 		summary.Knowledge = append(summary.Knowledge, knowledgeSummary{
@@ -91,7 +122,7 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusNotFound, "agent_not_found", "Agent not found", nil)
 		return
 	}
-	s.writeData(w, http.StatusOK, result)
+	s.writeData(w, http.StatusOK, detailAgent(result))
 }
 
 func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
@@ -116,7 +147,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		s.storageFailure(w, r, err)
 		return
 	}
-	s.writeData(w, http.StatusCreated, agent)
+	s.writeData(w, http.StatusCreated, detailAgent(agent))
 }
 
 type generateAgentRequest struct {
@@ -160,7 +191,7 @@ func (s *Server) generateAgent(w http.ResponseWriter, r *http.Request) {
 		s.storageFailure(w, r, err)
 		return
 	}
-	s.writeData(w, http.StatusCreated, map[string]any{"agent": agent, "generation_mode": map[bool]string{true: "provider", false: "local_demo"}[s.llm.Enabled()]})
+	s.writeData(w, http.StatusCreated, map[string]any{"agent": detailAgent(agent), "generation_mode": map[bool]string{true: "provider", false: "local_demo"}[s.llm.Enabled()]})
 }
 
 type updateAgentRequest struct {
@@ -173,6 +204,12 @@ type updateAgentRequest struct {
 	Branding         *brandingPatch           `json:"branding,omitempty"`
 }
 
+// brandingPatch is a sparse patch: a key the caller omits is left as it is
+// stored. The two object-valued keys, custom_colors and toggles, replace their
+// stored value whole when they are present, exactly as lead_capture already
+// does. Sending {} for either resets it to the documented defaults; leaving the
+// key out changes nothing. Half-sending an object would let a settings screen
+// that renders nine switches but posts one silently reset the other eight.
 type brandingPatch struct {
 	PrimaryColor   *string   `json:"primary_color,omitempty"`
 	AccentColor    *string   `json:"accent_color,omitempty"`
@@ -181,6 +218,13 @@ type brandingPatch struct {
 	LauncherText   *string   `json:"launcher_text,omitempty"`
 	PrivacyURL     *string   `json:"privacy_url,omitempty"`
 	AllowedDomains *[]string `json:"allowed_domains,omitempty"`
+
+	DisplayName  *string              `json:"display_name,omitempty"`
+	Tagline      *string              `json:"tagline,omitempty"`
+	LogoURL      *string              `json:"logo_url,omitempty"`
+	Theme        *string              `json:"theme,omitempty"`
+	CustomColors *model.CustomColors  `json:"custom_colors,omitempty"`
+	Toggles      *model.WidgetToggles `json:"toggles,omitempty"`
 }
 
 func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
@@ -223,9 +267,29 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
 			agent.SuggestedReplies = cleanStrings(*input.SuggestedReplies, 6, 120)
 		}
 		if input.LeadCapture != nil {
-			agent.LeadCapture = *input.LeadCapture
+			agent.LeadCapture = input.LeadCapture.Clone()
 		}
 		if input.Branding != nil {
+			if input.Branding.DisplayName != nil {
+				agent.Branding.DisplayName = strings.TrimSpace(*input.Branding.DisplayName)
+			}
+			if input.Branding.Tagline != nil {
+				agent.Branding.Tagline = strings.TrimSpace(*input.Branding.Tagline)
+			}
+			if input.Branding.LogoURL != nil {
+				agent.Branding.LogoURL = strings.TrimSpace(*input.Branding.LogoURL)
+			}
+			if input.Branding.Theme != nil {
+				agent.Branding.Theme = strings.ToLower(strings.TrimSpace(*input.Branding.Theme))
+			}
+			if input.Branding.CustomColors != nil {
+				colors := *input.Branding.CustomColors
+				agent.Branding.CustomColors = &colors
+			}
+			if input.Branding.Toggles != nil {
+				toggles := *input.Branding.Toggles
+				agent.Branding.Toggles = &toggles
+			}
 			if input.Branding.PrimaryColor != nil {
 				agent.Branding.PrimaryColor = strings.TrimSpace(*input.Branding.PrimaryColor)
 			}
@@ -248,6 +312,8 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
 				agent.Branding.AllowedDomains = cleanStrings(*input.Branding.AllowedDomains, 20, 253)
 			}
 		}
+		normalizeBranding(&agent.Branding)
+		normalizeLeadCapture(&agent.LeadCapture)
 		if details := validateAgent(*agent); len(details) > 0 {
 			return validationError{details: details}
 		}
@@ -272,7 +338,7 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("ETag", fmt.Sprintf(`"%d"`, result.Revision))
-	s.writeData(w, http.StatusOK, result)
+	s.writeData(w, http.StatusOK, detailAgent(result))
 }
 
 func (s *Server) archiveAgent(w http.ResponseWriter, r *http.Request) {
@@ -377,7 +443,7 @@ func (s *Server) unpublishAgent(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusNotFound, "agent_not_found", "Agent not found", nil)
 		return
 	}
-	s.writeData(w, http.StatusOK, result)
+	s.writeData(w, http.StatusOK, detailAgent(result))
 }
 
 func (s *Server) agentEmbed(w http.ResponseWriter, r *http.Request) {
@@ -463,11 +529,13 @@ func buildAgent(accountID string, input agentInput, now time.Time) (model.Agent,
 		CreatedAt:   now, UpdatedAt: now,
 	}
 	if input.LeadCapture != nil {
-		agent.LeadCapture = *input.LeadCapture
+		agent.LeadCapture = input.LeadCapture.Clone()
 	}
 	if input.Branding != nil {
-		agent.Branding = *input.Branding
+		agent.Branding = input.Branding.Clone()
 	}
+	normalizeBranding(&agent.Branding)
+	normalizeLeadCapture(&agent.LeadCapture)
 	return agent, validateAgent(agent)
 }
 
@@ -491,15 +559,14 @@ func validateAgent(agent model.Agent) map[string]string {
 	if !validHexColor(agent.Branding.AccentColor) || !validHexColor(agent.Branding.PrimaryColor) {
 		details["branding.colors"] = "must use six-digit hex colors"
 	}
-	if agent.Branding.Position != "bottom_right" && agent.Branding.Position != "bottom_left" {
-		details["branding.position"] = "must be bottom_right or bottom_left"
+	if agent.Branding.PrivacyURL != "" && !isAbsoluteHTTPSURL(agent.Branding.PrivacyURL) {
+		details["branding.privacy_url"] = "must be an absolute HTTPS URL"
 	}
-	if agent.Branding.PrivacyURL != "" {
-		parsed, err := url.Parse(agent.Branding.PrivacyURL)
-		if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
-			details["branding.privacy_url"] = "must be an absolute HTTPS URL"
-		}
-	}
+	// The placement, the theme, the nine toggles, the logo and the readability of
+	// the resolved palette all live in branding.go beside the table they check
+	// against, so the enum and the rule enforcing it can never drift apart.
+	validateBranding(agent.Branding, details)
+	validateLeadCapture(agent.LeadCapture, details)
 	if len(agent.Knowledge) > config.StarterKnowledgeSourceLimit {
 		details["knowledge"] = fmt.Sprintf("the starter plan supports up to %d sources", config.StarterKnowledgeSourceLimit)
 	}

@@ -8,7 +8,37 @@
   var MESSAGE_REQUEST_TIMEOUT_MS = 60000;
   var STREAM_IDLE_TIMEOUT_MS = 30000;
   var DEFAULT_ACCENT = '#4F46E5';
-  var ALLOWED_LEAD_FIELDS = ['name', 'email', 'phone', 'company'];
+  // The palette the widget painted with before themes existed. It is the only
+  // colour table in this file: every other colour arrives already resolved from
+  // the server, so a new preset never needs a widget release on somebody else's
+  // website.
+  var DEFAULT_COLORS = {
+    primary: '#111827',
+    accent: DEFAULT_ACCENT,
+    background: '#FFFFFF',
+    surface: '#F3F4F6',
+    text: '#111827',
+    onPrimary: '#FFFFFF',
+    onAccent: '#FFFFFF'
+  };
+  // The lead endpoint stores these four as columns on the lead. Every other
+  // field the customer builds travels in custom_fields and lands as metadata.
+  var RESERVED_LEAD_FIELDS = ['name', 'email', 'phone', 'company'];
+  var WIDGET_POSITIONS = [
+    'bottom_right', 'bottom_left', 'middle_right', 'middle_left', 'top_right', 'top_left'
+  ];
+  var LEAD_FIELD_TYPES = [
+    'text', 'email', 'telephone', 'number', 'textarea', 'select', 'checkbox', 'date'
+  ];
+  var LEAD_INPUT_TYPES = { text: 'text', email: 'email', telephone: 'tel', number: 'number', date: 'date' };
+  var LEAD_AUTOCOMPLETE = { name: 'name', email: 'email', phone: 'tel', company: 'organization' };
+  var LEGACY_LEAD_TYPES = { name: 'text', email: 'email', phone: 'telephone', company: 'text' };
+  var LEGACY_LEAD_LABELS = { name: 'Name', email: 'Email', phone: 'Phone', company: 'Company' };
+  // Both limits mirror what the lead endpoint accepts, so the widget never
+  // builds a submission the server has to refuse.
+  var MAX_LEAD_FORM_FIELDS = 20;
+  var MAX_LEAD_FIELD_OPTIONS = 20;
+  var MAX_LEAD_VALUE_LENGTH = 500;
 
   function isRecord(value) {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -58,7 +88,133 @@
   }
 
   function normalizePosition(value) {
-    return value === 'bottom_left' ? 'bottom_left' : 'bottom_right';
+    return WIDGET_POSITIONS.indexOf(value) === -1 ? 'bottom_right' : value;
+  }
+
+  // A logo is fetched by the visitor's browser on a page the customer does not
+  // always control, so only https is rendered: an http image on an https page is
+  // blocked as mixed content and would show as a broken icon.
+  function safeImageURL(value) {
+    var resolved = safeHttpUrl(value);
+    return resolved.indexOf('https://') === 0 ? resolved : '';
+  }
+
+  function safeSlug(value, maxLength) {
+    if (typeof value !== 'string') return '';
+    var slug = value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '');
+    return slug.slice(0, maxLength || 64);
+  }
+
+  // A toggle the customer never chose arrives absent or null, and only a real
+  // boolean is allowed to override the default. That is what keeps chat switched
+  // on for every agent published before the switches existed.
+  function normalizeToggles(raw) {
+    var payload = isRecord(raw) ? raw : {};
+    function chosen(key, fallback) {
+      return typeof payload[key] === 'boolean' ? payload[key] : fallback;
+    }
+    var toggles = {
+      transcription: chosen('transcription', false),
+      chat: chosen('chat', true),
+      autostart: chosen('autostart', false),
+      muteOnMinimize: chosen('mute_on_minimize', false),
+      muteOnTabChange: chosen('mute_on_tab_change', false),
+      showLeadForm: chosen('show_lead_form', false),
+      isGlowing: chosen('is_glowing', false),
+      isTransparent: chosen('is_transparent', false),
+      agentMute: chosen('agent_mute', false)
+    };
+    // The server refuses to store both and forces autostart off when stored
+    // state somehow holds both. The widget resolves it the same way rather than
+    // opening itself and immediately covering the conversation with a form.
+    if (toggles.autostart && toggles.showLeadForm) toggles.autostart = false;
+    return toggles;
+  }
+
+  // Colours are resolved by the server; the widget only checks that each one is
+  // something it can paint with. A foreground the payload omits is derived from
+  // its own fill, so text stays legible on whatever the fill turned out to be.
+  function normalizeThemeColors(raw, accentFallback, primaryFallback) {
+    var payload = isRecord(raw) ? raw : {};
+    var primary = safeColor(payload.primary, primaryFallback);
+    var accent = safeColor(payload.accent, accentFallback);
+    return {
+      primary: primary,
+      accent: accent,
+      background: safeColor(payload.background, DEFAULT_COLORS.background),
+      surface: safeColor(payload.surface, DEFAULT_COLORS.surface),
+      text: safeColor(payload.text, DEFAULT_COLORS.text),
+      onPrimary: safeColor(payload.on_primary, contrastText(primary)),
+      onAccent: safeColor(payload.on_accent, contrastText(accent))
+    };
+  }
+
+  // The form the widget has always drawn, expressed in the shape the builder
+  // uses. It is what an agent that predates the builder resolves to, and what a
+  // bootstrap that does not carry a form yet falls back to.
+  function legacyLeadFormFields(names) {
+    var fields = [];
+    (Array.isArray(names) ? names : []).forEach(function (name) {
+      var identifier = safeSlug(name, 64);
+      if (!identifier) return;
+      fields.push({
+        id: identifier,
+        label: LEGACY_LEAD_LABELS[identifier] || asText(name, identifier, 80),
+        type: LEGACY_LEAD_TYPES[identifier] || 'text',
+        required: false,
+        options: [],
+        placeholder: ''
+      });
+    });
+    return fields;
+  }
+
+  function normalizeLeadFormField(raw) {
+    if (!isRecord(raw)) return null;
+    var identifier = safeSlug(raw.id, 64);
+    var label = asText(raw.label, '', 80);
+    if (!identifier || !label) return null;
+    var type = asText(raw.type, 'text', 24).toLowerCase();
+    if (LEAD_FIELD_TYPES.indexOf(type) === -1) type = 'text';
+    var options = type === 'select' ? safeTextList(raw.options, MAX_LEAD_FIELD_OPTIONS, 80) : [];
+    // A select with nothing to select is a dead control. Rendering it as a text
+    // box keeps the customer's field, and its answers, rather than dropping it.
+    if (type === 'select' && !options.length) type = 'text';
+    return {
+      id: identifier,
+      label: label,
+      type: type,
+      required: raw.required === true,
+      options: options,
+      placeholder: asText(raw.placeholder, '', 120)
+    };
+  }
+
+  function normalizeLeadForm(raw, legacyFields) {
+    var payload = isRecord(raw) ? raw : {};
+    var fields = [];
+    if (Array.isArray(payload.fields)) {
+      payload.fields.slice(0, MAX_LEAD_FORM_FIELDS).forEach(function (field) {
+        var normalized = normalizeLeadFormField(field);
+        if (normalized) fields.push(normalized);
+      });
+    }
+    var fromServer = fields.length > 0;
+    if (!fromServer) {
+      fields = legacyLeadFormFields(
+        legacyFields && legacyFields.length ? legacyFields : ['name', 'email', 'phone']
+      );
+    }
+    return {
+      // Copy the customer authored is used only when the bootstrap really
+      // carried a form. Until then the widget keeps the wording it ships with.
+      fromServer: fromServer,
+      heading: asText(payload.heading, '', 120),
+      submitLabel: asText(payload.submit_label, '', 40),
+      prompt: asText(payload.prompt, '', 300),
+      privacyText: asText(payload.privacy_text, '', 300),
+      fields: fields
+    };
   }
 
   function validateAgentKey(value) {
@@ -102,8 +258,19 @@
     var lead = isRecord(raw.lead_capture) ? raw.lead_capture : {};
     var rawLeadFields = raw.lead_capture_fields || raw.lead_fields || lead.fields;
     var fields = safeTextList(rawLeadFields, 4, 24).filter(function (field) {
-      return ALLOWED_LEAD_FIELDS.indexOf(field) !== -1;
+      return RESERVED_LEAD_FIELDS.indexOf(field) !== -1;
     });
+    var leadFormPayload = isRecord(raw.lead_form) ? raw.lead_form : null;
+    // accent_color and primary_color are what the bootstrap has always carried.
+    // theme_colors is what it carries once branding is resolved server side, and
+    // it wins where present, so a widget already embedded on a customer site
+    // repaints itself from the theme without being rebuilt.
+    var accentColor = safeColor(raw.accent_color || raw.primary_color, DEFAULT_ACCENT);
+    var colors = normalizeThemeColors(
+      raw.theme_colors,
+      accentColor,
+      safeColor(raw.primary_color, DEFAULT_COLORS.primary)
+    );
     return {
       displayName: asText(raw.display_name || raw.name, 'Garuda Assistant', 80),
       welcomeMessage: asText(
@@ -116,15 +283,20 @@
         4,
         180
       ),
-      accentColor: safeColor(
-        raw.accent_color || raw.primary_color,
-        DEFAULT_ACCENT
-      ),
+      tagline: asText(raw.tagline, '', 140),
+      logoUrl: safeImageURL(raw.logo_url),
+      theme: safeSlug(raw.theme, 40),
+      colors: colors,
+      accentColor: colors.accent,
+      toggles: normalizeToggles(raw.toggles),
+      leadForm: normalizeLeadForm(leadFormPayload, fields),
       position: normalizePosition(raw.position),
       privacyUrl: safeHttpUrl(raw.privacy_url),
       memoryEnabled: raw.memory_enabled !== false,
       leadCaptureEnabled: Boolean(
-        raw.lead_capture_enabled === true || lead.enabled === true
+        raw.lead_capture_enabled === true ||
+        lead.enabled === true ||
+        (leadFormPayload && leadFormPayload.enabled === true)
       ),
       leadFields: fields.length ? fields : ['name', 'email', 'phone'],
       requiredLeadFields: safeTextList(
@@ -132,7 +304,7 @@
         4,
         24
       ).filter(function (field) {
-        return ALLOWED_LEAD_FIELDS.indexOf(field) !== -1;
+        return RESERVED_LEAD_FIELDS.indexOf(field) !== -1;
       }),
       launcherLabel: asText(raw.launcher_label || raw.launcher_text, '', 50)
     };
@@ -141,10 +313,10 @@
   function normalizeLeadSpec(raw, agent) {
     raw = isRecord(raw) ? raw : {};
     var requested = safeTextList(raw.fields, 4, 24).filter(function (field) {
-      return ALLOWED_LEAD_FIELDS.indexOf(field) !== -1;
+      return RESERVED_LEAD_FIELDS.indexOf(field) !== -1;
     });
     var required = safeTextList(raw.required_fields, 4, 24).filter(function (field) {
-      return ALLOWED_LEAD_FIELDS.indexOf(field) !== -1;
+      return RESERVED_LEAD_FIELDS.indexOf(field) !== -1;
     });
     var fields = requested.length ? requested : agent.leadFields;
     if (fields.indexOf('email') === -1 && fields.indexOf('phone') === -1) {
@@ -327,34 +499,64 @@
     return svg;
   }
 
+  // Every control that starts network work owns its own busy state. The owner
+  // reported clicking twice and three times because nothing said the first click
+  // had landed, and a doubled submit is what produced a duplicate write, so a
+  // control in flight refuses further clicks and says that it is working.
+  function setButtonBusy(button, busy, busyLabel, idleLabel) {
+    if (!button) return;
+    button.disabled = Boolean(busy);
+    button.setAttribute('aria-busy', String(Boolean(busy)));
+    button.classList.toggle('gw-busy', Boolean(busy));
+    var label = busy ? busyLabel : idleLabel;
+    if (typeof label === 'string' && label) button.textContent = label;
+  }
+
   function wait(milliseconds) {
     return new Promise(function (resolve) {
       global.setTimeout(resolve, milliseconds);
     });
   }
 
-  function WidgetError(code, message, status) {
+  function WidgetError(code, message, status, details) {
     this.name = 'WidgetError';
     this.code = code || 'request_failed';
     this.message = message || 'Something went wrong.';
     this.status = status || 0;
+    this.details = isRecord(details) ? details : {};
   }
   WidgetError.prototype = Object.create(Error.prototype);
   WidgetError.prototype.constructor = WidgetError;
 
+  // The error envelope's details object names the fields a request failed on.
+  // Only string values are kept, and only for keys that look like field paths,
+  // because these strings are rendered next to the visitor's own inputs.
+  function safeErrorDetails(raw) {
+    if (!isRecord(raw)) return {};
+    var details = {};
+    Object.keys(raw).slice(0, MAX_LEAD_FORM_FIELDS + 4).forEach(function (key) {
+      var name = asText(key, '', 96);
+      var value = asText(raw[key], '', 240);
+      if (name && value && /^[A-Za-z0-9_.-]+$/.test(name)) details[name] = value;
+    });
+    return details;
+  }
+
   async function safeErrorFromResponse(response) {
     var message = 'The assistant could not complete that request.';
     var code = 'request_failed';
+    var details = {};
     try {
       var body = await response.json();
       if (isRecord(body) && isRecord(body.error)) {
         code = asText(body.error.code, code, 80);
         message = asText(body.error.message, message, 240);
+        details = safeErrorDetails(body.error.details);
       }
     } catch (_error) {
       // The public UI deliberately ignores raw server bodies.
     }
-    return new WidgetError(code, message, response.status);
+    return new WidgetError(code, message, response.status, details);
   }
 
   // A deadline owns the abort controller for one request and the single timer
@@ -510,20 +712,31 @@
           'Content-Type': 'application/json',
           'X-Garuda-Session-Token': session.sessionToken
         },
-        body: JSON.stringify({
-          client_capture_id: request.clientCaptureID,
-          fields: request.fields,
-          consent: {
-            granted: true,
-            notice_version: 'garuda-widget-v1'
-          }
-        })
+        body: JSON.stringify(leadRequestBody(request))
       }
     );
     if (!response.ok) throw await safeErrorFromResponse(response);
     var json = await response.json();
     return isRecord(json) && isRecord(json.data) ? json.data : json;
   };
+
+  // Reserved answers travel in the fields object the deployed widget has always
+  // sent; everything the customer added travels in custom_fields, which is where
+  // the endpoint expects a field it does not have a column for.
+  function leadRequestBody(request) {
+    var body = {
+      client_capture_id: request.clientCaptureID,
+      fields: request.fields,
+      consent: {
+        granted: true,
+        notice_version: 'garuda-widget-v1'
+      }
+    };
+    if (isRecord(request.customFields) && Object.keys(request.customFields).length) {
+      body.custom_fields = request.customFields;
+    }
+    return body;
+  }
 
   async function consumeEventStream(response, handlers, deadline) {
     var assembled = '';
@@ -636,22 +849,32 @@
     this.agentKey = config.agentKey;
     this.storage = storage;
     this.historyKey = storageKey('demo-history', config.agentKey);
-    this.agent = {
-      displayName: 'Mira',
-      welcomeMessage: 'Hi — I am Mira. Ask me how Garuda can help turn website conversations into qualified leads.',
-      suggestedPrompts: [
+    this.agent = normalizeAgentPayload({
+      display_name: 'Mira',
+      tagline: 'Garuda product guide',
+      welcome_message: 'Hi — I am Mira. Ask me how Garuda can help turn website conversations into qualified leads.',
+      suggested_prompts: [
         'What can Garuda do?',
         'How much does it cost?',
         'How quickly can I launch?'
       ],
-      accentColor: '#5B5CE2',
+      accent_color: '#5B5CE2',
       position: 'bottom_right',
-      privacyUrl: '',
-      memoryEnabled: true,
-      leadCaptureEnabled: true,
-      leadFields: ['name', 'email', 'phone'],
-      requiredLeadFields: ['email']
-    };
+      memory_enabled: true,
+      lead_capture_enabled: true,
+      lead_capture_fields: ['name', 'email', 'phone'],
+      required_lead_fields: ['email'],
+      lead_form: {
+        enabled: true,
+        heading: 'Tell us where to reach you',
+        submit_label: 'Send it',
+        fields: [
+          { id: 'name', label: 'Full name', type: 'text', placeholder: 'Ada Lovelace' },
+          { id: 'email', label: 'Work email', type: 'email', required: true },
+          { id: 'timeline', label: 'Timeline', type: 'select', options: ['This month', 'This quarter', 'Just looking'] }
+        ]
+      }
+    });
   }
 
   DemoAPI.prototype.getAgent = async function getAgent() {
@@ -769,6 +992,10 @@
 
   var TEST_EXPORTS = {
     validateAgentKey: validateAgentKey,
+    normalizePosition: normalizePosition,
+    normalizeToggles: normalizeToggles,
+    normalizeLeadForm: normalizeLeadForm,
+    safeImageURL: safeImageURL,
     validOpaqueToken: validOpaqueToken,
     safeHttpUrl: safeHttpUrl,
     normalizeAgentPayload: normalizeAgentPayload,
@@ -882,6 +1109,7 @@
     this.sending = false;
     this.unread = 0;
     this.leadVisible = false;
+    this.autoOpened = false;
     this.lastRetry = null;
     this.nodes = {};
     this.memoryConsent = this.resolveInitialConsent();
@@ -936,7 +1164,8 @@
     style.textContent = widgetCSS();
     root.appendChild(style);
 
-    var shell = element('div', 'gw-shell gw-right');
+    var shell = element('div', 'gw-shell');
+    shell.setAttribute('data-position', 'bottom_right');
     var launcher = element('button', 'gw-launcher');
     launcher.type = 'button';
     launcher.setAttribute('aria-haspopup', 'dialog');
@@ -959,25 +1188,41 @@
 
     var header = element('header', 'gw-header');
     var identity = element('div', 'gw-identity');
-    var avatar = element('div', 'gw-avatar', 'G');
+    var avatar = element('div', 'gw-avatar');
     avatar.setAttribute('aria-hidden', 'true');
+    var monogram = element('span', 'gw-monogram', 'G');
+    avatar.appendChild(monogram);
     var identityCopy = element('div', 'gw-identity-copy');
     var title = element('div', 'gw-title', 'Garuda Assistant');
+    var tagline = element('div', 'gw-tagline');
+    tagline.hidden = true;
     var status = element('div', 'gw-status');
     var statusDot = element('span', 'gw-status-dot');
     var statusText = element('span', '', 'Connecting…');
     status.appendChild(statusDot);
     status.appendChild(statusText);
     identityCopy.appendChild(title);
+    identityCopy.appendChild(tagline);
     identityCopy.appendChild(status);
     identity.appendChild(avatar);
     identity.appendChild(identityCopy);
+    // The muted indicator is the part of agent_mute this widget can honestly
+    // show: it has no audio of its own to silence, so it says the assistant will
+    // not speak rather than pretending to mute something.
+    var mutedBadge = element('span', 'gw-muted-badge');
+    mutedBadge.hidden = true;
+    mutedBadge.setAttribute('role', 'img');
+    mutedBadge.setAttribute('aria-label', 'Assistant audio is muted');
+    mutedBadge.appendChild(svgIcon('M11 5 6.5 9H3v6h3.5L11 19V5Zm4 4 5 6m0-6-5 6'));
     var close = element('button', 'gw-icon-button');
     close.type = 'button';
     close.setAttribute('aria-label', 'Minimize chat');
     close.appendChild(svgIcon('M6 9l6 6 6-6'));
+    var headerActions = element('div', 'gw-header-actions');
+    headerActions.appendChild(mutedBadge);
+    headerActions.appendChild(close);
     header.appendChild(identity);
-    header.appendChild(close);
+    header.appendChild(headerActions);
 
     var connectionNotice = element('div', 'gw-notice');
     connectionNotice.hidden = true;
@@ -1071,7 +1316,11 @@
       panel: panel,
       header: header,
       avatar: avatar,
+      monogram: monogram,
+      logo: null,
+      mutedBadge: mutedBadge,
       title: title,
+      tagline: tagline,
       status: status,
       statusText: statusText,
       close: close,
@@ -1106,7 +1355,14 @@
     });
     textarea.addEventListener('input', function () { self.resizeInput(); });
     retryButton.addEventListener('click', function () {
-      if (self.lastRetry) self.lastRetry();
+      var retry = self.lastRetry;
+      if (!retry || retryButton.disabled) return;
+      setButtonBusy(retryButton, true, 'Retrying…');
+      Promise.resolve().then(retry).catch(function () {
+        // The notice itself reports whatever went wrong on this attempt.
+      }).then(function () {
+        setButtonBusy(retryButton, false, '', 'Try again');
+      });
     });
     contactButton.addEventListener('click', function () {
       self.showLeadForm(normalizeLeadSpec({}, self.agent));
@@ -1148,19 +1404,111 @@
   GarudaWidget.prototype.applyAgent = function applyAgent(agent) {
     this.agent = Object.assign({}, this.agent, agent || {});
     if (!this.nodes.host) return;
-    var accent = safeColor(this.agent.accentColor, DEFAULT_ACCENT);
-    this.nodes.host.style.setProperty('--garuda-accent', accent);
-    this.nodes.host.style.setProperty('--garuda-accent-text', contrastText(accent));
-    this.nodes.shell.classList.toggle('gw-left', this.agent.position === 'bottom_left');
-    this.nodes.shell.classList.toggle('gw-right', this.agent.position !== 'bottom_left');
-    this.nodes.title.textContent = this.agent.displayName;
-    this.nodes.avatar.textContent = this.agent.displayName.charAt(0).toUpperCase() || 'G';
-    this.nodes.panel.setAttribute('aria-label', 'Chat with ' + this.agent.displayName);
-    var launcherCopy = this.config.launcherLabel || this.agent.launcherLabel || 'Chat with ' + this.agent.displayName;
-    this.nodes.launcherLabel.textContent = launcherCopy;
-    this.nodes.launcher.setAttribute('aria-label', 'Open chat with ' + this.agent.displayName);
+    this.applyTheme();
+    this.applyIdentity();
+    this.applyToggles();
     this.updateContactVisibility();
     this.renderSuggestions();
+  };
+
+  // Seven colours and one placement, all of them resolved by the server. The
+  // widget deliberately owns no palette table: a theme retuned on the server
+  // reaches every embedded widget on its next bootstrap, with no release.
+  GarudaWidget.prototype.applyTheme = function applyTheme() {
+    var colors = isRecord(this.agent.colors) ? this.agent.colors : DEFAULT_COLORS;
+    var host = this.nodes.host;
+    host.style.setProperty('--garuda-accent', colors.accent);
+    host.style.setProperty('--garuda-accent-text', colors.onAccent);
+    host.style.setProperty('--garuda-primary', colors.primary);
+    host.style.setProperty('--garuda-primary-text', colors.onPrimary);
+    host.style.setProperty('--garuda-background', colors.background);
+    host.style.setProperty('--garuda-surface', colors.surface);
+    host.style.setProperty('--garuda-text', colors.text);
+    // The identifier is published for support and for the host page's own
+    // styling hooks. Nothing in this file reads a colour back out of it.
+    host.setAttribute('data-theme', this.agent.theme || 'custom');
+    this.nodes.shell.setAttribute('data-position', normalizePosition(this.agent.position));
+  };
+
+  GarudaWidget.prototype.applyIdentity = function applyIdentity() {
+    var nodes = this.nodes;
+    var displayName = this.agent.displayName;
+    nodes.title.textContent = displayName;
+    nodes.tagline.textContent = this.agent.tagline;
+    nodes.tagline.hidden = !this.agent.tagline;
+    nodes.monogram.textContent = displayName.charAt(0).toUpperCase() || 'G';
+    this.applyLogo(this.agent.logoUrl);
+    nodes.panel.setAttribute('aria-label', 'Chat with ' + displayName);
+    var launcherCopy = this.config.launcherLabel || this.agent.launcherLabel || 'Chat with ' + displayName;
+    nodes.launcherLabel.textContent = launcherCopy;
+    nodes.launcher.setAttribute('aria-label', 'Open chat with ' + displayName);
+  };
+
+  // The monogram stays visible until a logo has actually decoded, and comes back
+  // if the image never does. A customer whose CDN 404s gets the initial they had
+  // before, not the broken image icon their visitors would otherwise see.
+  GarudaWidget.prototype.applyLogo = function applyLogo(logoUrl) {
+    var nodes = this.nodes;
+    if (nodes.logo) {
+      nodes.logo.remove();
+      nodes.logo = null;
+    }
+    nodes.monogram.hidden = false;
+    if (!logoUrl) return;
+    var image = element('img', 'gw-avatar-image');
+    image.alt = '';
+    image.setAttribute('aria-hidden', 'true');
+    image.setAttribute('decoding', 'async');
+    image.hidden = true;
+    image.addEventListener('load', function () {
+      image.hidden = false;
+      nodes.monogram.hidden = true;
+    });
+    image.addEventListener('error', function () {
+      image.remove();
+      nodes.logo = null;
+      nodes.monogram.hidden = false;
+    });
+    image.src = logoUrl;
+    nodes.avatar.appendChild(image);
+    nodes.logo = image;
+  };
+
+  GarudaWidget.prototype.applyToggles = function applyToggles() {
+    var toggles = this.agent.toggles;
+    var nodes = this.nodes;
+    nodes.shell.classList.toggle('gw-glowing', toggles.isGlowing);
+    nodes.shell.classList.toggle('gw-transparent', toggles.isTransparent);
+    nodes.mutedBadge.hidden = !toggles.agentMute;
+    // This widget is text only. The three switches that describe when audio
+    // should stop are published on the host element for the page and for a
+    // future voice surface to read, rather than being acted out here.
+    nodes.host.setAttribute('data-transcription', String(toggles.transcription));
+    nodes.host.setAttribute('data-agent-mute', String(toggles.agentMute));
+    nodes.host.setAttribute('data-mute-on-minimize', String(toggles.muteOnMinimize));
+    nodes.host.setAttribute('data-mute-on-tab-change', String(toggles.muteOnTabChange));
+    // Chat is the only conversation this widget offers, so a customer who
+    // switches it off wants no bubble on their site at all.
+    var chatDisabled = toggles.chat === false;
+    nodes.host.hidden = chatDisabled;
+    if (chatDisabled) {
+      this.open = false;
+      nodes.panel.hidden = true;
+      nodes.launcher.setAttribute('aria-expanded', 'false');
+      nodes.shell.classList.remove('gw-open');
+      return;
+    }
+    if (toggles.autostart && !this.autoOpened && !this.open) {
+      this.autoOpened = true;
+      this.setOpen(true);
+    }
+  };
+
+  // The lead form is available when lead capture is on, and also when the
+  // customer switched the form on explicitly, because that switch is the whole
+  // point of the setting.
+  GarudaWidget.prototype.leadCaptureAvailable = function leadCaptureAvailable() {
+    return this.agent.leadCaptureEnabled === true || this.agent.toggles.showLeadForm === true;
   };
 
   GarudaWidget.prototype.setStatus = function setStatus(label, state) {
@@ -1186,7 +1534,12 @@
     if (this.open) {
       this.unread = 0;
       this.updateUnread();
-      if (!this.requiresConsent) this.ensureSession();
+      if (!this.requiresConsent) {
+        this.ensureSession().catch(function () {
+          // The notice inside the panel owns recovery for a failed session.
+        });
+      }
+      if (this.agent.toggles.showLeadForm) this.showLeadForm(null);
       this.scrollToBottom(false);
       var focusTarget = this.requiresConsent
         ? this.nodes.consentRegion.querySelector('button')
@@ -1252,6 +1605,7 @@
   };
 
   GarudaWidget.prototype.chooseConsent = function chooseConsent(memory) {
+    if (!this.requiresConsent) return;
     this.memoryConsent = memory;
     this.requiresConsent = false;
     if (this.storage) {
@@ -1405,6 +1759,8 @@
       var button = element('button', 'gw-suggestion', prompt);
       button.type = 'button';
       button.addEventListener('click', function () {
+        if (button.disabled || self.sending) return;
+        setButtonBusy(button, true);
         self.nodes.textarea.value = prompt;
         self.resizeInput();
         self.submitMessage();
@@ -1505,6 +1861,8 @@
     this.sending = active;
     this.nodes.typing.hidden = !active;
     this.nodes.textarea.disabled = active || !this.session;
+    this.nodes.send.setAttribute('aria-busy', String(Boolean(active)));
+    this.nodes.send.classList.toggle('gw-busy', Boolean(active));
     this.nodes.send.disabled = active || !this.session || !this.nodes.textarea.value.trim();
     this.nodes.messages.setAttribute('aria-busy', String(active));
     this.updateContactVisibility();
@@ -1528,7 +1886,7 @@
     });
     var lastMessage = this.messages[this.messages.length - 1];
     this.nodes.contactButton.hidden =
-      !this.agent.leadCaptureEnabled ||
+      !this.leadCaptureAvailable() ||
       !hasUserMessage ||
       !lastMessage ||
       lastMessage.role !== 'assistant' ||
@@ -1536,20 +1894,192 @@
       this.leadVisible;
   };
 
+  // ---- the lead form the customer built ----
+  //
+  // The field list, the heading and the button label all arrive resolved from
+  // the server. An agent whose customer never opened the builder resolves to the
+  // name/email/phone form this widget has always drawn, so nothing about a live
+  // site changes until somebody actually builds a form.
+
+  function createLeadControl(field, controlID, errorID) {
+    var control;
+    if (field.type === 'textarea') {
+      control = element('textarea', 'gw-lead-input');
+      control.rows = 3;
+      control.maxLength = MAX_LEAD_VALUE_LENGTH;
+      if (field.placeholder) control.placeholder = field.placeholder;
+    } else if (field.type === 'select') {
+      control = element('select', 'gw-lead-input');
+      var unchosen = element('option', '', field.placeholder || 'Select an option');
+      unchosen.value = '';
+      control.appendChild(unchosen);
+      field.options.forEach(function (option) {
+        var choice = element('option', '', option);
+        choice.value = option;
+        control.appendChild(choice);
+      });
+    } else if (field.type === 'checkbox') {
+      control = element('input', 'gw-lead-checkbox');
+      control.type = 'checkbox';
+    } else {
+      control = element('input', 'gw-lead-input');
+      control.type = LEAD_INPUT_TYPES[field.type] || 'text';
+      control.maxLength = field.type === 'email' ? 254 : 160;
+      if (field.placeholder) control.placeholder = field.placeholder;
+    }
+    control.id = controlID;
+    control.name = field.id;
+    if (LEAD_AUTOCOMPLETE[field.id]) control.autocomplete = LEAD_AUTOCOMPLETE[field.id];
+    if (field.required) control.required = true;
+    control.setAttribute('aria-describedby', errorID);
+    return control;
+  }
+
+  // Every control gets its own label element and its own error line, wired by
+  // id, so a screen reader announces the customer's wording for the field and
+  // then whatever went wrong with that field rather than one notice for all.
+  function createLeadField(field) {
+    var controlID = 'gw-field-' + field.id + '-' + randomID();
+    var errorID = controlID + '-error';
+    var group = element('div', 'gw-field gw-field-' + field.type);
+    var label = element('label', '', field.label);
+    label.htmlFor = controlID;
+    if (field.required) {
+      var marker = element('span', 'gw-required', ' *');
+      marker.setAttribute('aria-hidden', 'true');
+      label.appendChild(marker);
+    } else {
+      label.appendChild(element('span', '', ' · optional'));
+    }
+    var control = createLeadControl(field, controlID, errorID);
+    var error = element('p', 'gw-field-error');
+    error.id = errorID;
+    error.hidden = true;
+    error.setAttribute('role', 'alert');
+    if (field.type === 'checkbox') {
+      group.appendChild(control);
+      group.appendChild(label);
+    } else {
+      group.appendChild(label);
+      group.appendChild(control);
+    }
+    group.appendChild(error);
+    return { field: field, group: group, control: control, error: error };
+  }
+
+  function leadFieldValue(entry) {
+    if (entry.field.type === 'checkbox') return entry.control.checked ? 'yes' : '';
+    var value = entry.control.value;
+    return typeof value === 'string' ? value.trim() : '';
+  }
+
+  // Client side checks exist so a visitor is told what is wrong without a round
+  // trip. The server still decides: anything it rejects is shown on these same
+  // lines by showLeadFieldErrors.
+  function leadFieldProblem(entry) {
+    var field = entry.field;
+    var value = leadFieldValue(entry);
+    if (!value) {
+      if (!field.required) return '';
+      return field.type === 'checkbox'
+        ? 'Please confirm this to continue.'
+        : 'This field is required.';
+    }
+    if (field.type === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(value)) {
+      return 'Enter an email address like you@example.com.';
+    }
+    if (field.type === 'telephone' && value.replace(/[^0-9]/g, '').length < 7) {
+      return 'Enter a phone number the team can call.';
+    }
+    if (field.type === 'number' && !/^-?\d+(?:\.\d+)?$/.test(value)) {
+      return 'Enter a number.';
+    }
+    if (value.length > MAX_LEAD_VALUE_LENGTH) return 'Please shorten this answer.';
+    return '';
+  }
+
+  function setLeadFieldProblem(entry, message) {
+    entry.error.textContent = message;
+    entry.error.hidden = !message;
+    if (message) entry.control.setAttribute('aria-invalid', 'true');
+    else entry.control.removeAttribute('aria-invalid');
+  }
+
+  // A details value can be a whole sentence or a single word like "invalid".
+  // The single word is read back with the field's own label so the line under
+  // the input is a sentence either way.
+  function leadFieldMessage(label, detail) {
+    var message = asText(detail, '', 240);
+    if (!message) return 'This answer was not accepted.';
+    return message.indexOf(' ') === -1 ? label + ' is ' + message + '.' : message;
+  }
+
+  function showLeadFieldErrors(entries, details) {
+    var matched = false;
+    Object.keys(isRecord(details) ? details : {}).forEach(function (key) {
+      var identifier = key.replace(/^(?:fields|custom|custom_fields|lead_capture)\./, '');
+      entries.forEach(function (entry) {
+        if (entry.field.id !== identifier) return;
+        matched = true;
+        setLeadFieldProblem(entry, leadFieldMessage(entry.field.label, details[key]));
+      });
+    });
+    return matched;
+  }
+
+  // The four reserved identifiers are stored as columns on the lead; every other
+  // field the customer built travels in custom_fields and lands as metadata.
+  function leadSubmission(entries) {
+    var reserved = {};
+    var custom = {};
+    entries.forEach(function (entry) {
+      var value = leadFieldValue(entry);
+      if (!value) return;
+      if (RESERVED_LEAD_FIELDS.indexOf(entry.field.id) !== -1) {
+        reserved[entry.field.id] = value.slice(0, 254);
+        return;
+      }
+      if (Object.keys(custom).length >= MAX_LEAD_FORM_FIELDS) return;
+      custom[entry.field.id] = value.slice(0, MAX_LEAD_VALUE_LENGTH);
+    });
+    return { fields: reserved, customFields: custom };
+  }
+
+  GarudaWidget.prototype.leadFormFields = function leadFormFields(spec) {
+    var builder = this.agent.leadForm;
+    var fields = builder.fromServer ? builder.fields : legacyLeadFormFields(spec.fields);
+    return fields.slice(0, MAX_LEAD_FORM_FIELDS).map(function (field) {
+      return Object.assign({}, field, {
+        required: field.required === true || spec.requiredFields.indexOf(field.id) !== -1
+      });
+    });
+  };
+
   GarudaWidget.prototype.showLeadForm = function showLeadForm(spec) {
     var self = this;
-    if (this.leadVisible || !this.agent.leadCaptureEnabled) return;
+    if (this.leadVisible || !this.leadCaptureAvailable()) return;
     this.leadVisible = true;
     this.updateContactVisibility();
     var normalized = normalizeLeadSpec(spec, this.agent);
+    var builder = this.agent.leadForm;
+    var entries = this.leadFormFields(normalized).map(createLeadField);
+    var headingCopy = builder.fromServer && builder.heading
+      ? builder.heading
+      : 'How can the team reach you?';
+    var submitCopy = builder.fromServer && builder.submitLabel
+      ? builder.submitLabel
+      : 'Send securely';
+    var introCopy = builder.fromServer && builder.prompt ? builder.prompt : normalized.prompt;
+    var privacyCopy = normalized.privacyText || builder.privacyText;
     var card = element('section', 'gw-lead-card');
     card.setAttribute('aria-labelledby', 'gw-lead-title');
     var top = element('div', 'gw-lead-top');
     var headingWrap = element('div');
     var eyebrow = element('span', 'gw-lead-eyebrow', 'Human follow-up');
-    var heading = element('h2', '', 'How can the team reach you?');
+    var heading = element('h2', '', headingCopy);
     heading.id = 'gw-lead-title';
-    var intro = element('p', '', normalized.prompt);
+    var intro = element('p', '', introCopy);
+    intro.hidden = !introCopy;
     headingWrap.appendChild(eyebrow);
     headingWrap.appendChild(heading);
     headingWrap.appendChild(intro);
@@ -1560,46 +2090,26 @@
     top.appendChild(headingWrap);
     top.appendChild(dismiss);
     var form = element('form', 'gw-lead-form');
-    var inputs = {};
-    var fieldMeta = {
-      name: { label: 'Name', type: 'text', autocomplete: 'name', placeholder: 'Your name' },
-      email: { label: 'Email', type: 'email', autocomplete: 'email', placeholder: 'you@example.com' },
-      phone: { label: 'Phone', type: 'tel', autocomplete: 'tel', placeholder: '+91 98765 43210' },
-      company: { label: 'Company', type: 'text', autocomplete: 'organization', placeholder: 'Company name' }
-    };
-    normalized.fields.forEach(function (field) {
-      var meta = fieldMeta[field];
-      if (!meta) return;
-      var id = 'gw-field-' + field + '-' + randomID();
-      var group = element('div', 'gw-field');
-      var label = element('label', '', meta.label);
-      label.htmlFor = id;
-      if (normalized.requiredFields.indexOf(field) === -1) {
-        label.appendChild(element('span', '', ' · optional'));
-      }
-      var input = element('input');
-      input.id = id;
-      input.name = field;
-      input.type = meta.type;
-      input.autocomplete = meta.autocomplete;
-      input.placeholder = meta.placeholder;
-      input.maxLength = field === 'email' ? 254 : 120;
-      input.required = normalized.requiredFields.indexOf(field) !== -1;
-      group.appendChild(label);
-      group.appendChild(input);
-      form.appendChild(group);
-      inputs[field] = input;
-    });
+    // The browser's own validation bubbles cannot be styled inside a shadow root
+    // and leave nothing behind for a screen reader to read a second time, so the
+    // per-field lines below take that job.
+    form.noValidate = true;
+    entries.forEach(function (entry) { form.appendChild(entry.group); });
     var consentLabel = element('label', 'gw-check');
     var checkbox = element('input');
     checkbox.type = 'checkbox';
     checkbox.required = true;
-    var checkCopy = element('span', '', 'I agree to be contacted about my request.');
+    var consentError = element('p', 'gw-field-error gw-consent-error');
+    consentError.id = 'gw-consent-error-' + randomID();
+    consentError.hidden = true;
+    consentError.setAttribute('role', 'alert');
+    checkbox.setAttribute('aria-describedby', consentError.id);
     consentLabel.appendChild(checkbox);
-    consentLabel.appendChild(checkCopy);
+    consentLabel.appendChild(element('span', '', 'I agree to be contacted about my request.'));
     form.appendChild(consentLabel);
-    if (normalized.privacyText) {
-      form.appendChild(element('p', 'gw-lead-privacy-copy', normalized.privacyText));
+    form.appendChild(consentError);
+    if (privacyCopy) {
+      form.appendChild(element('p', 'gw-lead-privacy-copy', privacyCopy));
     }
     if (this.agent.privacyUrl) {
       var privacy = element('a', 'gw-privacy-link', 'View privacy policy');
@@ -1608,7 +2118,7 @@
       privacy.rel = 'noopener noreferrer';
       form.appendChild(privacy);
     }
-    var submit = element('button', 'gw-primary-button gw-lead-submit', 'Send securely');
+    var submit = element('button', 'gw-primary-button gw-lead-submit', submitCopy);
     submit.type = 'submit';
     var formStatus = element('p', 'gw-form-status');
     formStatus.setAttribute('role', 'status');
@@ -1628,21 +2138,34 @@
     });
     form.addEventListener('submit', async function (event) {
       event.preventDefault();
-      if (!form.reportValidity()) return;
-      submit.disabled = true;
-      submit.textContent = 'Sending…';
-      formStatus.textContent = '';
-      var fields = {};
-      Object.keys(inputs).forEach(function (name) {
-        var value = inputs[name].value.trim();
-        if (value) fields[name] = value;
+      // One submission at a time. The button is already disabled while a capture
+      // is in flight; this guards the keyboard path that can fire submit again.
+      if (submit.disabled) return;
+      var firstProblem = null;
+      entries.forEach(function (entry) {
+        var problem = leadFieldProblem(entry);
+        setLeadFieldProblem(entry, problem);
+        if (problem && !firstProblem) firstProblem = entry;
       });
-      var leadRequest = {
-        clientCaptureID: clientCaptureID,
-        fields: fields
-      };
+      var consented = checkbox.checked === true;
+      consentError.textContent = consented ? '' : 'Please confirm you agree to be contacted.';
+      consentError.hidden = consented;
+      if (firstProblem || !consented) {
+        formStatus.textContent = 'Check the highlighted fields and try again.';
+        var focusTarget = firstProblem ? firstProblem.control : checkbox;
+        focusTarget.focus({ preventScroll: true });
+        return;
+      }
+      var submission = leadSubmission(entries);
+      setButtonBusy(submit, true, 'Sending…');
+      formStatus.textContent = '';
       try {
-        await self.captureLeadWithRefresh(leadRequest, false);
+        await self.ensureSession();
+        await self.captureLeadWithRefresh({
+          clientCaptureID: clientCaptureID,
+          fields: submission.fields,
+          customFields: submission.customFields
+        }, false);
         var success = element('div', 'gw-lead-success');
         var successIcon = element('div', 'gw-success-icon');
         successIcon.appendChild(svgIcon('M5 12.5 9.5 17 19 7'));
@@ -1651,11 +2174,13 @@
         success.appendChild(element('p', '', 'Thanks — the team has your details and can follow up.'));
         card.replaceChildren(success);
       } catch (error) {
-        submit.disabled = false;
-        submit.textContent = 'Send securely';
-        formStatus.textContent = error instanceof WidgetError
-          ? error.message
-          : 'Your details could not be sent. Please try again.';
+        setButtonBusy(submit, false, '', submitCopy);
+        var named = error instanceof WidgetError && showLeadFieldErrors(entries, error.details);
+        formStatus.textContent = named
+          ? 'Check the highlighted fields and try again.'
+          : error instanceof WidgetError
+            ? error.message
+            : 'Your details could not be sent. Please try again.';
       }
     });
   };
@@ -1699,13 +2224,19 @@
 
   function widgetCSS() {
     return [
-      ':host{--garuda-accent:#4F46E5;--garuda-accent-text:#fff;--garuda-z-index:2147482000;all:initial;color-scheme:light;font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}',
+      ':host{--garuda-accent:#4F46E5;--garuda-accent-text:#fff;--garuda-primary:#111827;--garuda-primary-text:#fff;--garuda-background:#fff;--garuda-surface:#F3F4F6;--garuda-text:#111827;--garuda-muted:color-mix(in srgb,var(--garuda-text) 62%,transparent);--garuda-line:color-mix(in srgb,var(--garuda-text) 12%,transparent);--garuda-z-index:2147482000;all:initial;color-scheme:light;font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}',
+      // all:initial on the host outranks the browser's own [hidden] rule,
+      // because an author declaration beats a user agent one. Without this the
+      // host element stays visible when chat is switched off.
+      ':host([hidden]){display:none!important;}',
       '*,*::before,*::after{box-sizing:border-box;}',
       'button,input,textarea{font:inherit;}',
       'button{touch-action:manipulation;}',
       '[hidden]{display:none!important;}',
-      '.gw-shell{position:fixed;z-index:var(--garuda-z-index);right:max(20px,env(safe-area-inset-right));bottom:max(20px,env(safe-area-inset-bottom));display:flex;flex-direction:column;align-items:flex-end;gap:14px;color:#172033;line-height:1.45;text-rendering:optimizeLegibility;}',
-      '.gw-shell.gw-left{right:auto;left:max(20px,env(safe-area-inset-left));align-items:flex-start;}',
+      '.gw-shell{position:fixed;z-index:var(--garuda-z-index);right:max(20px,env(safe-area-inset-right));bottom:max(20px,env(safe-area-inset-bottom));display:flex;flex-direction:column;align-items:flex-end;gap:14px;color:var(--garuda-text);line-height:1.45;text-rendering:optimizeLegibility;}',
+      '.gw-shell[data-position$="_left"]{right:auto;left:max(20px,env(safe-area-inset-left));align-items:flex-start;}',
+      '.gw-shell[data-position^="middle_"]{top:50%;bottom:auto;transform:translateY(-50%);}',
+      '.gw-shell[data-position^="top_"]{top:max(20px,env(safe-area-inset-top));bottom:auto;flex-direction:column-reverse;}',
       '.gw-launcher{position:relative;min-width:60px;height:60px;border:0;border-radius:20px;padding:0 7px;background:var(--garuda-accent);color:var(--garuda-accent-text);display:flex;align-items:center;gap:0;box-shadow:0 14px 35px rgba(30,41,59,.22),0 4px 12px rgba(30,41,59,.12);cursor:pointer;transition:transform .2s ease,box-shadow .2s ease,min-width .25s ease;border:1px solid rgba(255,255,255,.18);}',
       '.gw-launcher:hover{transform:translateY(-2px);box-shadow:0 18px 42px rgba(30,41,59,.27),0 5px 14px rgba(30,41,59,.13);}',
       '.gw-launcher:active{transform:translateY(0) scale(.98);}',
@@ -1717,13 +2248,21 @@
       '.gw-open .gw-launcher{min-width:60px;}',
       '.gw-open .gw-launcher-label{max-width:0!important;opacity:0!important;padding:0!important;}',
       '.gw-unread{position:absolute;right:-4px;top:-6px;min-width:22px;height:22px;padding:0 6px;border-radius:999px;display:grid;place-items:center;background:#EF4444;color:#fff;border:3px solid #fff;font-size:10px;font-weight:800;box-shadow:0 4px 10px rgba(239,68,68,.28);}',
-      '.gw-panel{width:min(390px,calc(100vw - 32px));height:min(650px,calc(100dvh - 112px));min-height:440px;border-radius:24px;background:#fff;border:1px solid rgba(148,163,184,.26);box-shadow:0 28px 70px rgba(15,23,42,.2),0 8px 25px rgba(15,23,42,.1);overflow:hidden;display:grid;grid-template-rows:auto auto minmax(0,1fr) auto auto auto auto;transform-origin:bottom right;animation:gw-enter .22s cubic-bezier(.2,.8,.2,1);}',
-      '.gw-left .gw-panel{transform-origin:bottom left;}',
-      '.gw-header{min-height:76px;padding:14px 13px 13px 16px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #EEF1F6;background:linear-gradient(135deg,#fff 0%,color-mix(in srgb,var(--garuda-accent) 6%,white) 100%);}',
+      '.gw-panel{width:min(390px,calc(100vw - 32px));height:min(650px,calc(100dvh - 112px));min-height:440px;border-radius:24px;background:var(--garuda-background);border:1px solid rgba(148,163,184,.26);box-shadow:0 28px 70px rgba(15,23,42,.2),0 8px 25px rgba(15,23,42,.1);overflow:hidden;display:grid;grid-template-rows:auto auto minmax(0,1fr) auto auto auto auto;transform-origin:bottom right;animation:gw-enter .22s cubic-bezier(.2,.8,.2,1);}',
+      '.gw-shell[data-position$="_left"] .gw-panel{transform-origin:bottom left;}',
+      '.gw-shell[data-position^="top_"] .gw-panel{transform-origin:top right;}',
+      '.gw-shell[data-position^="top_"][data-position$="_left"] .gw-panel{transform-origin:top left;}',
+      '.gw-shell[data-position^="middle_"] .gw-panel{height:min(650px,calc(100dvh - 64px));}',
+      '.gw-header{min-height:76px;padding:14px 13px 13px 16px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--garuda-line);background:linear-gradient(135deg,var(--garuda-background) 0%,color-mix(in srgb,var(--garuda-primary) 8%,var(--garuda-background)) 100%);}',
+      '.gw-header-actions{display:flex;align-items:center;gap:2px;flex:none;}',
+      '.gw-muted-badge{width:32px;height:32px;flex:none;border-radius:11px;display:grid;place-items:center;color:var(--garuda-muted);background:color-mix(in srgb,var(--garuda-text) 7%,transparent);}',
+      '.gw-muted-badge svg{width:17px;height:17px;}',
       '.gw-identity{display:flex;align-items:center;gap:11px;min-width:0;}',
-      '.gw-avatar{width:44px;height:44px;border-radius:15px;display:grid;place-items:center;flex:none;background:linear-gradient(145deg,color-mix(in srgb,var(--garuda-accent) 82%,white),var(--garuda-accent));color:var(--garuda-accent-text);font-size:17px;font-weight:800;box-shadow:inset 0 0 0 1px rgba(255,255,255,.22),0 6px 14px color-mix(in srgb,var(--garuda-accent) 22%,transparent);}',
+      '.gw-avatar{position:relative;overflow:hidden;width:44px;height:44px;border-radius:15px;display:grid;place-items:center;flex:none;background:linear-gradient(145deg,color-mix(in srgb,var(--garuda-accent) 82%,white),var(--garuda-accent));color:var(--garuda-accent-text);font-size:17px;font-weight:800;box-shadow:inset 0 0 0 1px rgba(255,255,255,.22),0 6px 14px color-mix(in srgb,var(--garuda-accent) 22%,transparent);}',
       '.gw-identity-copy{min-width:0;}',
-      '.gw-title{font-size:15px;font-weight:760;letter-spacing:-.018em;color:#111827;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:235px;}',
+      '.gw-avatar-image{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;}',
+      '.gw-title{font-size:15px;font-weight:760;letter-spacing:-.018em;color:var(--garuda-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:235px;}',
+      '.gw-tagline{margin-top:1px;color:var(--garuda-muted);font-size:11px;font-weight:520;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:235px;}',
       '.gw-status{display:flex;align-items:center;gap:6px;margin-top:3px;color:#64748B;font-size:11px;font-weight:530;}',
       '.gw-status-dot{width:7px;height:7px;border-radius:50%;background:#94A3B8;box-shadow:0 0 0 3px rgba(148,163,184,.12);}',
       '.gw-status[data-state="online"] .gw-status-dot{background:#22C55E;box-shadow:0 0 0 3px rgba(34,197,94,.13);}',
@@ -1734,7 +2273,7 @@
       '.gw-icon-button svg{width:21px;height:21px;}',
       '.gw-notice{padding:9px 12px;background:#FFF7ED;border-bottom:1px solid #FED7AA;color:#9A3412;display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:11px;line-height:1.4;}',
       '.gw-notice-action{border:0;background:transparent;color:#9A3412;text-decoration:underline;font-weight:750;cursor:pointer;white-space:nowrap;}',
-      '.gw-body{min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:#CBD5E1 transparent;background:linear-gradient(180deg,#F8FAFD 0%,#FFF 42%);}',
+      '.gw-body{min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:#CBD5E1 transparent;background:linear-gradient(180deg,var(--garuda-surface) 0%,var(--garuda-background) 42%);}',
       '.gw-body::-webkit-scrollbar{width:6px}.gw-body::-webkit-scrollbar-thumb{background:#CBD5E1;border-radius:8px;}',
       '.gw-messages{padding:18px 15px 7px;display:flex;flex-direction:column;gap:12px;}',
       '.gw-history-status{align-self:center;margin:0 0 2px;padding:5px 9px;border-radius:999px;background:#EEF2FF;color:#4F46E5;font-size:10px;font-weight:650;text-align:center;}',
@@ -1743,7 +2282,7 @@
       '.gw-message-row.gw-assistant{align-self:flex-start;}',
       '.gw-bubble{padding:10px 12px;border-radius:16px;font-size:13px;line-height:1.55;letter-spacing:-.004em;box-shadow:0 1px 2px rgba(15,23,42,.05);}',
       '.gw-bubble p{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;}',
-      '.gw-assistant .gw-bubble{background:#fff;color:#273244;border:1px solid #E6EAF0;border-bottom-left-radius:5px;}',
+      '.gw-assistant .gw-bubble{background:var(--garuda-surface);color:var(--garuda-text);border:1px solid var(--garuda-line);border-bottom-left-radius:5px;}',
       '.gw-user .gw-bubble{background:var(--garuda-accent);color:var(--garuda-accent-text);border:1px solid color-mix(in srgb,var(--garuda-accent) 88%,black);border-bottom-right-radius:5px;}',
       '.gw-mini-avatar{width:24px;height:24px;border-radius:9px;flex:none;display:grid;place-items:center;background:color-mix(in srgb,var(--garuda-accent) 12%,white);color:var(--garuda-accent);border:1px solid color-mix(in srgb,var(--garuda-accent) 18%,white);font-size:10px;font-weight:800;}',
       '.gw-streaming .gw-bubble::after{content:"";display:inline-block;width:5px;height:13px;margin-left:3px;vertical-align:-2px;border-radius:2px;background:var(--garuda-accent);animation:gw-cursor .8s steps(1) infinite;}',
@@ -1751,50 +2290,63 @@
       '.gw-suggestion{border:1px solid color-mix(in srgb,var(--garuda-accent) 22%,#DCE2EA);border-radius:999px;padding:8px 11px;background:#fff;color:color-mix(in srgb,var(--garuda-accent) 80%,#172033);font-size:11px;font-weight:650;line-height:1.25;cursor:pointer;text-align:left;transition:background .15s,border-color .15s,transform .15s;}',
       '.gw-suggestion:hover{background:color-mix(in srgb,var(--garuda-accent) 6%,white);border-color:color-mix(in srgb,var(--garuda-accent) 42%,#DCE2EA);transform:translateY(-1px);}',
       '.gw-suggestion:disabled{opacity:.45;cursor:default;transform:none;}',
-      '.gw-typing{height:23px;padding:2px 18px 5px;display:flex;align-items:center;gap:4px;background:#fff;}',
+      '.gw-typing{height:23px;padding:2px 18px 5px;display:flex;align-items:center;gap:4px;background:var(--garuda-background);}',
       '.gw-typing span{width:5px;height:5px;border-radius:50%;background:#94A3B8;animation:gw-typing 1.1s ease-in-out infinite;}',
       '.gw-typing span:nth-child(2){animation-delay:.14s}.gw-typing span:nth-child(3){animation-delay:.28s;}',
-      '.gw-contact-row{padding:4px 15px 3px;background:#fff;}',
+      '.gw-contact-row{padding:4px 15px 3px;background:var(--garuda-background);}',
       '.gw-contact-button{min-height:35px;border:0;background:transparent;color:#5B6475;display:flex;align-items:center;gap:6px;padding:5px 3px;font-size:11px;font-weight:680;cursor:pointer;}',
       '.gw-contact-button:hover{color:var(--garuda-accent);}',
       '.gw-contact-button svg{width:15px;height:15px;}',
-      '.gw-composer{display:flex;align-items:flex-end;gap:8px;padding:9px 12px 11px;background:#fff;border-top:1px solid #EEF1F6;}',
+      '.gw-composer{display:flex;align-items:flex-end;gap:8px;padding:9px 12px 11px;background:var(--garuda-background);border-top:1px solid var(--garuda-line);}',
       '.gw-input-wrap{position:relative;flex:1;min-width:0;}',
-      '.gw-input{display:block;width:100%;min-height:44px;max-height:112px;resize:none;border:1px solid #DCE2EA;border-radius:15px;background:#F8FAFC;padding:11px 12px;color:#172033;font-size:13px;line-height:1.45;outline:0;overflow-y:auto;transition:border-color .15s,box-shadow .15s,background .15s;}',
+      '.gw-input{display:block;width:100%;min-height:44px;max-height:112px;resize:none;border:1px solid var(--garuda-line);border-radius:15px;background:var(--garuda-surface);padding:11px 12px;color:var(--garuda-text);font-size:13px;line-height:1.45;outline:0;overflow-y:auto;transition:border-color .15s,box-shadow .15s,background .15s;}',
       '.gw-input::placeholder{color:#94A3B8;}',
-      '.gw-input:focus{border-color:color-mix(in srgb,var(--garuda-accent) 55%,#DCE2EA);box-shadow:0 0 0 3px color-mix(in srgb,var(--garuda-accent) 10%,transparent);background:#fff;}',
+      '.gw-input:focus{border-color:color-mix(in srgb,var(--garuda-accent) 55%,#DCE2EA);box-shadow:0 0 0 3px color-mix(in srgb,var(--garuda-accent) 10%,transparent);background:var(--garuda-background);}',
       '.gw-input:disabled{cursor:not-allowed;opacity:.65;}',
       '.gw-counter{position:absolute;right:8px;bottom:-17px;font-size:9px;color:#64748B;}',
-      '.gw-send{width:44px;height:44px;flex:none;border:0;border-radius:14px;display:grid;place-items:center;background:var(--garuda-accent);color:var(--garuda-accent-text);box-shadow:0 6px 14px color-mix(in srgb,var(--garuda-accent) 23%,transparent);cursor:pointer;transition:transform .15s,opacity .15s;}',
+      '.gw-send{position:relative;width:44px;height:44px;flex:none;border:0;border-radius:14px;display:grid;place-items:center;background:var(--garuda-accent);color:var(--garuda-accent-text);box-shadow:0 6px 14px color-mix(in srgb,var(--garuda-accent) 23%,transparent);cursor:pointer;transition:transform .15s,opacity .15s;}',
       '.gw-send:hover:not(:disabled){transform:translateY(-1px)}.gw-send:active:not(:disabled){transform:scale(.97)}',
       '.gw-send:disabled{opacity:.35;cursor:not-allowed;box-shadow:none;}',
       '.gw-send svg{width:20px;height:20px;}',
-      '.gw-footer{min-height:28px;padding:0 12px 8px;display:flex;align-items:center;justify-content:center;color:#94A3B8;background:#fff;font-size:9px;letter-spacing:.01em;}',
+      '.gw-footer{min-height:28px;padding:0 12px 8px;display:flex;align-items:center;justify-content:center;color:#94A3B8;background:var(--garuda-background);font-size:9px;letter-spacing:.01em;}',
       '.gw-footer svg{width:10px;height:10px;margin-right:4px}.gw-brand{margin-left:3px;color:#64748B;font-weight:780;}',
-      '.gw-consent-card{margin:5px 0 7px;padding:17px;border-radius:19px;background:#fff;border:1px solid #E4E9F0;box-shadow:0 9px 25px rgba(15,23,42,.07);text-align:left;}',
+      '.gw-consent-card{margin:5px 0 7px;padding:17px;border-radius:19px;background:var(--garuda-background);border:1px solid var(--garuda-line);box-shadow:0 9px 25px rgba(15,23,42,.07);text-align:left;}',
       '.gw-consent-icon{width:35px;height:35px;border-radius:12px;display:grid;place-items:center;margin-bottom:11px;background:color-mix(in srgb,var(--garuda-accent) 10%,white);color:var(--garuda-accent);}',
       '.gw-consent-icon svg{width:19px;height:19px;}',
-      '.gw-consent-card h2,.gw-lead-card h2,.gw-lead-success h2{margin:0;color:#172033;font-size:15px;letter-spacing:-.015em;}',
-      '.gw-consent-card p,.gw-lead-card p,.gw-lead-success p{margin:6px 0 0;color:#64748B;font-size:11px;line-height:1.55;}',
+      '.gw-consent-card h2,.gw-lead-card h2,.gw-lead-success h2{margin:0;color:var(--garuda-text);font-size:15px;letter-spacing:-.015em;}',
+      '.gw-consent-card p,.gw-lead-card p,.gw-lead-success p{margin:6px 0 0;color:var(--garuda-muted);font-size:11px;line-height:1.55;}',
       '.gw-consent-actions{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:14px;}',
       '.gw-primary-button,.gw-secondary-button{min-height:40px;border-radius:12px;padding:8px 11px;font-size:11px;font-weight:740;cursor:pointer;}',
-      '.gw-primary-button{border:1px solid var(--garuda-accent);background:var(--garuda-accent);color:var(--garuda-accent-text);}',
+      '.gw-primary-button{border:1px solid var(--garuda-primary);background:var(--garuda-primary);color:var(--garuda-primary-text);}',
       '.gw-primary-button:disabled{opacity:.55;cursor:not-allowed;}',
+      '.gw-busy{cursor:progress;}',
+      '.gw-primary-button.gw-busy::before,.gw-notice-action.gw-busy::before,.gw-suggestion.gw-busy::before{content:"";display:inline-block;width:11px;height:11px;margin-right:7px;vertical-align:-1px;border-radius:50%;border:2px solid currentColor;border-top-color:transparent;animation:gw-spin .7s linear infinite;}',
+      '.gw-send.gw-busy svg{opacity:0;}',
+      '.gw-send.gw-busy::after{content:"";position:absolute;width:17px;height:17px;border-radius:50%;border:2px solid currentColor;border-top-color:transparent;animation:gw-spin .7s linear infinite;}',
       '.gw-secondary-button{border:1px solid #DCE2EA;background:#fff;color:#475569;}',
       '.gw-secondary-button:hover{background:#F8FAFC;}',
       '.gw-privacy-link{display:inline-block;margin-top:10px;color:var(--garuda-accent);font-size:10px;font-weight:650;text-underline-offset:2px;}',
       '.gw-lead-region{padding:0 15px 13px;}',
-      '.gw-lead-card{border-radius:19px;padding:15px;background:#fff;border:1px solid color-mix(in srgb,var(--garuda-accent) 19%,#E4E9F0);box-shadow:0 11px 30px rgba(15,23,42,.08);}',
+      '.gw-lead-card{border-radius:19px;padding:15px;background:var(--garuda-background);border:1px solid color-mix(in srgb,var(--garuda-accent) 19%,#E4E9F0);box-shadow:0 11px 30px rgba(15,23,42,.08);}',
       '.gw-lead-top{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;}',
       '.gw-lead-eyebrow{display:block;margin-bottom:3px;color:var(--garuda-accent);font-size:9px;font-weight:820;text-transform:uppercase;letter-spacing:.12em;}',
       '.gw-lead-dismiss{width:34px;height:34px;flex:none}.gw-lead-dismiss svg{width:16px;height:16px;}',
       '.gw-lead-form{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:13px;}',
-      '.gw-field{display:flex;flex-direction:column;gap:4px;}',
-      '.gw-field label{color:#475569;font-size:10px;font-weight:700}.gw-field label span{color:#94A3B8;font-weight:500;}',
-      '.gw-field input{width:100%;height:39px;border:1px solid #DCE2EA;border-radius:11px;padding:0 10px;background:#FAFBFC;color:#172033;font-size:11px;outline:0;}',
-      '.gw-field input:focus{border-color:var(--garuda-accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--garuda-accent) 9%,transparent);background:#fff;}',
+      '.gw-field{display:flex;flex-direction:column;gap:4px;min-width:0;}',
+      '.gw-field-textarea,.gw-field-select,.gw-field-checkbox{grid-column:1/-1;}',
+      '.gw-field label{color:var(--garuda-muted);font-size:10px;font-weight:700}.gw-field label span{color:#94A3B8;font-weight:500;}',
+      '.gw-field label .gw-required{color:#B91C1C;font-weight:800;}',
+      '.gw-field input,.gw-field select,.gw-field textarea{width:100%;min-height:39px;border:1px solid var(--garuda-line);border-radius:11px;padding:9px 10px;background:var(--garuda-surface);color:var(--garuda-text);font-size:11px;outline:0;}',
+      '.gw-field textarea{resize:vertical;min-height:66px;line-height:1.45;}',
+      '.gw-field input:focus,.gw-field select:focus,.gw-field textarea:focus{border-color:var(--garuda-accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--garuda-accent) 9%,transparent);background:var(--garuda-background);}',
+      '.gw-field [aria-invalid="true"]{border-color:#B91C1C;}',
+      '.gw-field-checkbox{flex-direction:row;align-items:center;gap:8px;flex-wrap:wrap;}',
+      '.gw-field-checkbox input{width:16px;height:16px;min-height:0;flex:none;padding:0;accent-color:var(--garuda-accent);}',
+      '.gw-field-checkbox label{order:1;}',
+      '.gw-field-error{width:100%;margin:0!important;color:#B91C1C!important;font-size:10px!important;}',
       '.gw-check{grid-column:1/-1;display:flex;align-items:flex-start;gap:8px;margin-top:2px;color:#526075;font-size:10px;line-height:1.45;cursor:pointer;}',
       '.gw-check input{width:16px;height:16px;margin:0;flex:none;accent-color:var(--garuda-accent);}',
+      '.gw-consent-error{grid-column:1/-1;}',
       '.gw-lead-privacy-copy{grid-column:1/-1;margin:-3px 0 0!important;color:#7B8798!important;font-size:9px!important;}',
       '.gw-lead-form>.gw-privacy-link{grid-column:1/-1;margin:0;}',
       '.gw-lead-submit{grid-column:1/-1;width:100%;}',
@@ -1802,12 +2354,18 @@
       '.gw-lead-success{text-align:center;padding:11px 5px 8px;}',
       '.gw-success-icon{width:40px;height:40px;margin:0 auto 9px;border-radius:14px;display:grid;place-items:center;background:#DCFCE7;color:#15803D;}',
       '.gw-success-icon svg{width:21px;height:21px;}',
+      '.gw-glowing .gw-launcher{animation:gw-glow 2.6s ease-in-out infinite;}',
+      '.gw-transparent .gw-panel{background:color-mix(in srgb,var(--garuda-background) 78%,transparent);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);}',
+      '.gw-transparent .gw-header,.gw-transparent .gw-body,.gw-transparent .gw-typing,.gw-transparent .gw-contact-row,.gw-transparent .gw-composer,.gw-transparent .gw-footer{background:transparent;}',
+      '.gw-transparent .gw-assistant .gw-bubble,.gw-transparent .gw-lead-card,.gw-transparent .gw-consent-card{background:color-mix(in srgb,var(--garuda-background) 70%,transparent);}',
+      '@keyframes gw-glow{0%,100%{box-shadow:0 14px 35px rgba(30,41,59,.22),0 0 0 0 color-mix(in srgb,var(--garuda-accent) 55%,transparent)}55%{box-shadow:0 14px 35px rgba(30,41,59,.22),0 0 0 13px color-mix(in srgb,var(--garuda-accent) 0%,transparent)}}',
+      '@keyframes gw-spin{to{transform:rotate(360deg)}}',
       '@keyframes gw-enter{from{opacity:0;transform:translateY(13px) scale(.96)}to{opacity:1;transform:none}}',
       '@keyframes gw-message{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}',
       '@keyframes gw-pulse{50%{opacity:.42;transform:scale(.82)}}',
       '@keyframes gw-typing{0%,65%,100%{transform:translateY(0);opacity:.45}35%{transform:translateY(-3px);opacity:1}}',
       '@keyframes gw-cursor{50%{opacity:0}}',
-      '@media(max-width:520px){.gw-shell,.gw-shell.gw-left{right:max(10px,env(safe-area-inset-right));left:max(10px,env(safe-area-inset-left));bottom:max(10px,env(safe-area-inset-bottom));align-items:flex-end}.gw-panel{width:100%;height:min(690px,calc(100dvh - 88px));min-height:380px;border-radius:22px}.gw-launcher{height:56px;min-width:56px;border-radius:18px}.gw-launcher-icon{width:42px;height:42px;border-radius:13px}.gw-title{max-width:220px}.gw-launcher-label{display:none}}',
+      '@media(max-width:520px){.gw-shell,.gw-shell[data-position$="_left"]{right:max(10px,env(safe-area-inset-right));left:max(10px,env(safe-area-inset-left));align-items:flex-end}.gw-shell[data-position^="bottom_"]{bottom:max(10px,env(safe-area-inset-bottom))}.gw-shell[data-position^="top_"]{top:max(10px,env(safe-area-inset-top))}.gw-panel{width:100%;height:min(690px,calc(100dvh - 88px));min-height:380px;border-radius:22px}.gw-launcher{height:56px;min-width:56px;border-radius:18px}.gw-launcher-icon{width:42px;height:42px;border-radius:13px}.gw-title{max-width:220px}.gw-launcher-label{display:none}}',
       '@media(max-width:360px){.gw-panel{border-radius:18px}.gw-messages{padding-left:12px;padding-right:12px}.gw-lead-form{grid-template-columns:1fr}.gw-field,.gw-check,.gw-lead-submit,.gw-form-status{grid-column:1}.gw-consent-actions{grid-template-columns:1fr}}',
       '@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}',
       '@media(prefers-contrast:more){.gw-panel,.gw-bubble,.gw-input,.gw-field input,.gw-suggestion{border-color:#64748B}.gw-status,.gw-footer{color:#475569}}'

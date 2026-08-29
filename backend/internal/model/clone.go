@@ -51,12 +51,63 @@ func (o Onboarding) Clone() Onboarding {
 	return cloned
 }
 
+func cloneBool(source *bool) *bool {
+	if source == nil {
+		return nil
+	}
+	value := *source
+	return &value
+}
+
+// Clone returns a copy of the branding configuration that shares no mutable
+// state with the store. CustomColors and Toggles are pointers, so copying the
+// struct copies only the addresses: without this the caller would hand out a
+// handle into live state that a concurrent write can change underneath it.
+func (b BrandingConfig) Clone() BrandingConfig {
+	cloned := b
+	cloned.AllowedDomains = cloneStrings(b.AllowedDomains)
+	if b.CustomColors != nil {
+		colors := *b.CustomColors
+		cloned.CustomColors = &colors
+	}
+	if b.Toggles != nil {
+		cloned.Toggles = &WidgetToggles{
+			Transcription:   cloneBool(b.Toggles.Transcription),
+			Chat:            cloneBool(b.Toggles.Chat),
+			Autostart:       cloneBool(b.Toggles.Autostart),
+			MuteOnMinimize:  cloneBool(b.Toggles.MuteOnMinimize),
+			MuteOnTabChange: cloneBool(b.Toggles.MuteOnTabChange),
+			ShowLeadForm:    cloneBool(b.Toggles.ShowLeadForm),
+			IsGlowing:       cloneBool(b.Toggles.IsGlowing),
+			IsTransparent:   cloneBool(b.Toggles.IsTransparent),
+			AgentMute:       cloneBool(b.Toggles.AgentMute),
+		}
+	}
+	return cloned
+}
+
+// Clone returns a copy of the lead capture configuration that shares no mutable
+// state with the store. Every form field carries its own Options slice, so the
+// field slice has to be rebuilt element by element rather than appended whole.
+func (l LeadCaptureConfig) Clone() LeadCaptureConfig {
+	cloned := l
+	cloned.Fields = cloneStrings(l.Fields)
+	if l.FormFields != nil {
+		cloned.FormFields = make([]LeadFormField, len(l.FormFields))
+		for index, field := range l.FormFields {
+			field.Options = cloneStrings(field.Options)
+			cloned.FormFields[index] = field
+		}
+	}
+	return cloned
+}
+
 // Clone returns a copy of the agent that shares no mutable state with the store.
 func (a Agent) Clone() Agent {
 	cloned := a
 	cloned.SuggestedReplies = cloneStrings(a.SuggestedReplies)
-	cloned.Branding.AllowedDomains = cloneStrings(a.Branding.AllowedDomains)
-	cloned.LeadCapture.Fields = cloneStrings(a.LeadCapture.Fields)
+	cloned.Branding = a.Branding.Clone()
+	cloned.LeadCapture = a.LeadCapture.Clone()
 	if a.Knowledge != nil {
 		cloned.Knowledge = append([]KnowledgeItem(nil), a.Knowledge...)
 	}

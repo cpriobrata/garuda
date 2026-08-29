@@ -2,20 +2,42 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, Bot, BrainCircuit, Edit3, Globe2, MessageSquareText, Target, UsersRound } from "lucide-react";
+import { AlertCircle, ArrowLeft, Bot, BrainCircuit, Edit3, Globe2, Loader2, MessageSquareText, Pause, Play, Target, UsersRound } from "lucide-react";
 import { AgentTestPanel } from "@/components/agents/agent-test-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { garudaApi, type AgentRecord } from "@/lib/api";
+import { ApiError, apiRequest, garudaApi, type AgentRecord } from "@/lib/api";
 import { agents as demoAgents } from "@/lib/demo-data";
 import { cn } from "@/lib/utils";
+
+// pauseAction resolves what the pause control does for one agent status.
+//
+// Only an agent that is on the air, or one already taken off it, has anything to
+// toggle: a draft was never serving, and an archived agent is gone as far as the
+// API is concerned. Keeping that decision in one function is what stops the
+// button, its label and the route it calls from disagreeing.
+export function pauseAction(status: string | undefined) {
+  const live = status === "published" || status === "live";
+  const paused = status === "paused";
+  return {
+    live,
+    paused,
+    available: live || paused,
+    path: paused ? "unpause" : "pause",
+    label: paused ? "Resume agent" : "Pause agent",
+    busyLabel: paused ? "Resuming…" : "Pausing…",
+    failure: paused ? "The agent could not be resumed." : "The agent could not be paused.",
+  };
+}
 
 export function AgentDetail({ agentId }: { agentId: string }) {
   const connected = Boolean(process.env.NEXT_PUBLIC_API_URL);
   const demo = demoAgents.find((item) => item.id === agentId) || demoAgents[0];
   const [record, setRecord] = useState<AgentRecord | null>(null);
   const [error, setError] = useState("");
+  const [switching, setSwitching] = useState(false);
+  const [switchError, setSwitchError] = useState("");
 
   useEffect(() => {
     if (!connected) return;
@@ -26,16 +48,44 @@ export function AgentDetail({ agentId }: { agentId: string }) {
 
   const name = connected ? record?.name : demo.name;
   const status = connected ? record?.status : demo.status;
-  const live = status === "published" || status === "live";
+  const action = pauseAction(status);
+  const { live, paused } = action;
   const domain = connected ? record?.branding?.allowed_domains?.[0] : "northstar.example";
+
+  // Pausing moves the agent's status to "paused", which is what every widget
+  // entry point refuses to serve. The configuration is untouched, so unpausing is
+  // the same call in the other direction rather than a republish.
+  async function togglePause() {
+    if (switching) return;
+    setSwitching(true);
+    setSwitchError("");
+    try {
+      setRecord(await apiRequest<AgentRecord>(`/agents/${encodeURIComponent(agentId)}/${action.path}`, { method: "POST" }));
+    } catch (reason) {
+      setSwitchError(reason instanceof ApiError ? reason.message : action.failure);
+    } finally {
+      setSwitching(false);
+    }
+  }
 
   return <div className="mx-auto max-w-[1320px] space-y-6">
     <Button variant="ghost" size="sm" className="-ml-2 text-slate-500" asChild><Link href="/app/agents"><ArrowLeft className="mr-1.5 h-3.5 w-3.5" /> Back to agents</Link></Button>
 
     {!name ? <Card className="shadow-none"><CardContent className="flex items-center gap-3 p-6"><span className="grid h-11 w-11 place-items-center rounded-xl bg-slate-100 text-slate-500"><Bot className="h-5 w-5" /></span><div><p className="text-sm font-semibold text-slate-800">{error ? "Agent unavailable" : "Retrieving agent configuration"}</p><p className="mt-1 text-xs text-slate-500">{error || "Garuda is loading the current server record."}</p></div></CardContent></Card> : <>
       <div className="flex flex-col justify-between gap-5 sm:flex-row sm:items-center">
-        <div className="flex items-center gap-4"><div className={cn("grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br text-lg font-bold text-white shadow-md", connected ? "from-indigo-500 to-violet-600" : demo.color)}>{name[0]?.toUpperCase()}</div><div><div className="flex items-center gap-2"><h1 className="text-2xl font-bold tracking-[-.035em] text-slate-950">{name}</h1><Badge variant={live ? "success" : "secondary"} className="capitalize">{status?.replaceAll("_", " ")}</Badge>{!connected && <Badge variant="secondary">Demo</Badge>}</div><p className="mt-1 text-sm text-slate-500">{connected ? (record?.description || "AI website agent") : `${demo.type} · ${demo.lastActive}`}</p></div></div>
-        <div className="flex gap-2"><Button variant="outline" size="sm" disabled>Pause · coming soon</Button><Button size="sm" asChild><Link href={`/app/agents/${encodeURIComponent(agentId)}/edit`}><Edit3 className="mr-1.5 h-3.5 w-3.5" /> Edit agent</Link></Button></div>
+        <div className="flex items-center gap-4"><div className={cn("grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br text-lg font-bold text-white shadow-md", connected ? "from-indigo-500 to-violet-600" : demo.color)}>{name[0]?.toUpperCase()}</div><div><div className="flex items-center gap-2"><h1 className="text-2xl font-bold tracking-[-.035em] text-slate-950">{name}</h1><Badge variant={live ? "success" : paused ? "warning" : "secondary"} className="capitalize">{status?.replaceAll("_", " ")}</Badge>{!connected && <Badge variant="secondary">Demo</Badge>}</div><p className="mt-1 text-sm text-slate-500">{connected ? (record?.description || "AI website agent") : `${demo.type} · ${demo.lastActive}`}</p></div></div>
+        <div className="flex flex-col items-stretch gap-1.5 sm:items-end">
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={togglePause} disabled={!connected || switching || !action.available} title={!connected ? "Connect the Garuda API to pause this agent" : !action.available ? "Only a published agent can be paused" : undefined}>
+              {switching ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : paused ? <Play className="mr-1.5 h-3.5 w-3.5" /> : <Pause className="mr-1.5 h-3.5 w-3.5" />}
+              {switching ? action.busyLabel : action.label}
+            </Button>
+            <Button size="sm" asChild><Link href={`/app/agents/${encodeURIComponent(agentId)}/edit`}><Edit3 className="mr-1.5 h-3.5 w-3.5" /> Edit agent</Link></Button>
+          </div>
+          {switchError ? <p className="flex items-center gap-1.5 text-[10px] font-medium text-rose-600"><AlertCircle className="h-3 w-3" /> {switchError}</p>
+            : paused ? <p className="text-[10px] text-amber-600">The widget is not serving this agent. Its configuration is kept.</p>
+            : null}
+        </div>
       </div>
 
       {connected ? <div className="grid gap-4 md:grid-cols-3">

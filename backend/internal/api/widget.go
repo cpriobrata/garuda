@@ -621,13 +621,26 @@ func (s *Server) widgetOriginAllowed(agent model.Agent, origin string) bool {
 	return s.cfg.DemoMode && len(agent.Branding.AllowedDomains) == 0
 }
 
+// publicAgent is the agent half of the widget bootstrap: everything a visitor's
+// browser is allowed to know, and nothing else.
+//
+// The base map is the shape the deployed widget has always received, so an older
+// cached bundle keeps working. widgetBrandingPayload is then overlaid on top,
+// which is what carries the studio's identity, theme, placement, toggles and
+// authored lead form. Without that overlay nothing a customer configures ever
+// reaches their website, so the order matters: resolved values win over the raw
+// stored ones they replace.
 func publicAgent(agent model.Agent) map[string]any {
-	return map[string]any{
+	payload := map[string]any{
 		"display_name": agent.Name, "welcome_message": agent.WelcomeMessage, "suggested_prompts": agent.SuggestedReplies,
 		"accent_color": agent.Branding.AccentColor, "position": agent.Branding.Position, "launcher_label": agent.Branding.LauncherText,
 		"avatar_url": agent.Branding.AvatarURL, "privacy_url": agent.Branding.PrivacyURL, "memory_enabled": true,
 		"lead_capture_enabled": agent.LeadCapture.Enabled, "lead_capture_fields": agent.LeadCapture.Fields,
 	}
+	for key, value := range widgetBrandingPayload(agent) {
+		payload[key] = value
+	}
+	return payload
 }
 
 func writeSSE(w http.ResponseWriter, event string, payload any) {

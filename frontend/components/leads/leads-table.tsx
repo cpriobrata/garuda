@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Mail, Phone, Search, Sparkles, UserRound } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
+import { Spinner } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { garudaApi } from "@/lib/api";
@@ -16,11 +17,14 @@ export function LeadsTable() {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("All");
   const [selected, setSelected] = useState<Lead | null>(null);
+  // Only the connected workspace waits on a request; the demo table already
+  // holds its rows, so it must not flash a loading state it never needed.
+  const [loading, setLoading] = useState(connected);
   const statuses = connected ? ["All", "New", "Qualified", "Contacted", "Customer"] : ["All", "New", "Qualified", "Meeting booked", "Customer"];
   const filtered = useMemo(() => items.filter((lead) => (status === "All" || lead.status === status) && `${lead.name} ${lead.email} ${lead.company}`.toLowerCase().includes(query.toLowerCase())), [items, query, status]);
 
   useEffect(() => {
-    garudaApi.listLeads().then(setItems).catch(() => undefined);
+    garudaApi.listLeads().then(setItems).catch(() => undefined).finally(() => setLoading(false));
   }, []);
 
   return <>
@@ -34,9 +38,11 @@ export function LeadsTable() {
           <thead><tr className="border-b bg-slate-50/70 text-[9px] font-bold uppercase tracking-[.12em] text-slate-400"><th className="px-5 py-3">Lead</th>{!connected && <th className="px-3 py-3">Demo score</th>}<th className="px-3 py-3">Status</th><th className="px-3 py-3">Source</th><th className="px-5 py-3">Captured</th></tr></thead>
           <tbody className="divide-y">{filtered.map((lead, index) => <tr key={lead.id} onClick={() => setSelected(lead)} className="cursor-pointer transition hover:bg-slate-50/80"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><Avatar className="h-9 w-9"><AvatarFallback className={cn("text-[10px]", index % 2 ? "bg-cyan-100 text-cyan-700" : "bg-indigo-100 text-indigo-700")}>{initials(lead.name)}</AvatarFallback></Avatar><div><p className="text-xs font-semibold text-slate-900">{lead.name}</p><p className="mt-1 text-[10px] text-slate-500">{lead.email}{lead.company && lead.company !== "Not provided" ? ` · ${lead.company}` : ""}</p></div></div></td>{!connected && <td className="px-3 py-3.5"><Score score={lead.score} /></td>}<td className="px-3 py-3.5"><LeadStatus status={lead.status} /></td><td className="px-3 py-3.5 text-[10px] font-medium text-slate-600">{lead.source}</td><td className="px-5 py-3.5 text-[10px] text-slate-500">{lead.captured}</td></tr>)}</tbody>
         </table>
-        {!filtered.length && <div className="p-10 text-center"><UserRound className="mx-auto h-6 w-6 text-slate-300" /><p className="mt-3 text-xs font-semibold text-slate-700">No leads found</p><p className="mt-1 text-[10px] text-slate-400">Consented widget leads will appear here.</p></div>}
+        {!filtered.length && (loading
+          ? <div role="status" aria-busy="true" className="p-10 text-center"><Spinner className="mx-auto h-6 w-6 text-slate-300" /><p className="mt-3 text-xs font-semibold text-slate-700">Loading leads…</p><p className="mt-1 text-[10px] text-slate-400">Reading the captured leads for this workspace.</p></div>
+          : <div className="p-10 text-center"><UserRound className="mx-auto h-6 w-6 text-slate-300" /><p className="mt-3 text-xs font-semibold text-slate-700">No leads found</p><p className="mt-1 text-[10px] text-slate-400">Consented widget leads will appear here.</p></div>)}
       </div>
-      <div className="flex items-center justify-between border-t px-4 py-3"><p className="text-[10px] text-slate-500">Showing {filtered.length} lead{filtered.length === 1 ? "" : "s"}{connected ? " from the API" : " · demo data"}</p><Badge variant="secondary">{connected ? "Read-only" : "Demo preview"}</Badge></div>
+      <div className="flex items-center justify-between border-t px-4 py-3"><p className="text-[10px] text-slate-500">{loading ? "Loading leads…" : <>Showing {filtered.length} lead{filtered.length === 1 ? "" : "s"}{connected ? " from the API" : " · demo data"}</>}</p><Badge variant="secondary">{connected ? "Read-only" : "Demo preview"}</Badge></div>
     </div>
 
     <Dialog open={Boolean(selected)} onOpenChange={(open) => !open && setSelected(null)}>

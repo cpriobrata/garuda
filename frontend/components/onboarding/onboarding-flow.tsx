@@ -1,15 +1,16 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowUp, Building2, Check, MessageSquareText, Sparkles, Target, UsersRound } from "lucide-react";
 import { Brand } from "@/components/brand";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, Spinner } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { Textarea } from "@/components/ui/textarea";
 import { garudaApi } from "@/lib/api";
+import { keepBusyUntilNavigation, useBusyAction } from "@/lib/busy-action";
 import { cn } from "@/lib/utils";
 
 type Question = {
@@ -53,12 +54,21 @@ export function OnboardingFlow() {
     { from: "garuda", text: "Welcome — I’m Garuda. I’ll create your first AI agent with you through four useful business questions." },
   ]);
   const [error, setError] = useState("");
+  const complete = useBusyAction();
+  // The step this flow has already answered. A ref, not state: the second of
+  // two fast clicks arrives before React has re-rendered, so a state read would
+  // still say the question is unanswered — and on the last question that second
+  // answer is another full agent generation, billed and capable of colliding
+  // with the first.
+  const answeredStep = useRef(-1);
   const current = questions[step];
   const progress = useMemo(() => Math.round(((step + 1) / questions.length) * 100), [step]);
 
   async function answer(nextValue: string) {
     const clean = nextValue.trim();
     if (!clean) return;
+    if (answeredStep.current === step) return;
+    answeredStep.current = step;
     const nextAnswers = { ...answers, [current.id]: clean };
     setAnswers(nextAnswers);
     setHistory((items) => [...items, { from: "user", text: current.kind === "choices" ? labelFor(clean) : clean }, { from: "garuda", text: current.response(clean) }]);
@@ -68,14 +78,21 @@ export function OnboardingFlow() {
       setStep((currentStep) => currentStep + 1);
       return;
     }
-    try {
-      const result = await garudaApi.completeOnboarding(nextAnswers);
-      window.sessionStorage.setItem("garuda_new_agent_id", result.agent_id);
-      window.sessionStorage.setItem("garuda_new_agent_name", result.agent_name);
-      router.push("/app/generating");
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "We couldn’t save your answers. Please try again.");
-    }
+    await complete.run(async () => {
+      try {
+        const result = await garudaApi.completeOnboarding(nextAnswers);
+        window.sessionStorage.setItem("garuda_new_agent_id", result.agent_id);
+        window.sessionStorage.setItem("garuda_new_agent_name", result.agent_name);
+        router.push("/app/generating");
+        // Building the agent takes a while and the route is already changing,
+        // so the control stays busy rather than inviting another attempt.
+        return keepBusyUntilNavigation;
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : "We couldn’t save your answers. Please try again.");
+        // The attempt failed, so this question is open for answering again.
+        answeredStep.current = -1;
+      }
+    });
   }
 
   function submit(event: FormEvent) {
@@ -108,12 +125,12 @@ export function OnboardingFlow() {
           </div>
           <div className="border-t bg-white p-4 sm:p-5">
             {current.kind === "choices" ? (
-              <div className="grid gap-2 sm:grid-cols-2">{current.choices?.map((choice) => <button key={choice.value} onClick={() => answer(choice.value)} className="group rounded-xl border p-3 text-left transition hover:border-indigo-300 hover:bg-indigo-50/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"><div className="flex items-start gap-3"><span className="mt-0.5 h-4 w-4 shrink-0 rounded-full border-2 border-slate-300 transition group-hover:border-indigo-500" /><div><p className="text-xs font-semibold text-slate-900">{choice.label}</p><p className="mt-1 text-[10px] leading-4 text-slate-500">{choice.description}</p></div></div></button>)}</div>
+              <div className="grid gap-2 sm:grid-cols-2">{current.choices?.map((choice) => { const chosen = complete.busy && answers[current.id] === choice.value; return <button key={choice.value} onClick={() => answer(choice.value)} disabled={complete.busy} aria-busy={chosen || undefined} className={cn("group rounded-xl border p-3 text-left transition focus:outline-none focus:ring-2 focus:ring-indigo-500/20", complete.busy ? "cursor-progress" : "hover:border-indigo-300 hover:bg-indigo-50/50", complete.busy && !chosen && "opacity-50")}><div className="flex items-start gap-3"><span className="mt-0.5 grid h-4 w-4 shrink-0 place-items-center">{chosen ? <Spinner className="h-4 w-4 text-indigo-600" /> : <span className={cn("h-4 w-4 rounded-full border-2 border-slate-300 transition", !complete.busy && "group-hover:border-indigo-500")} />}</span><div><p className="text-xs font-semibold text-slate-900">{choice.label}</p><p className="mt-1 text-[10px] leading-4 text-slate-500">{choice.description}</p>{chosen && <p className="mt-1 text-[10px] font-semibold text-indigo-600">Building your agent…</p>}</div></div></button>; })}</div>
             ) : (
               <form onSubmit={submit} className="relative">
                 {current.kind === "textarea" ? <Textarea value={value} onChange={(event) => setValue(event.target.value)} placeholder={current.placeholder} className="min-h-[90px] resize-none pr-12" autoFocus /> : <Input value={value} onChange={(event) => setValue(event.target.value)} type={current.kind === "url" ? "url" : "text"} placeholder={current.placeholder} className="h-12 pr-12" autoFocus />}
-                <Button type="submit" size="icon" className={cn("absolute right-2 h-8 w-8", current.kind === "textarea" ? "bottom-2" : "top-2")} disabled={!value.trim()} aria-label="Send answer"><ArrowUp className="h-4 w-4" /></Button>
-                {current.kind === "url" && <button type="button" onClick={() => answer("Pre-launch — no website yet")} className="mt-2 text-[11px] font-semibold text-slate-500 hover:text-indigo-600">I don’t have a website yet</button>}
+                <Button type="submit" size="icon" className={cn("absolute right-2 h-8 w-8", current.kind === "textarea" ? "bottom-2" : "top-2")} disabled={!value.trim()} loading={complete.busy} loadingLabel="Building your agent" aria-label="Send answer"><ArrowUp className="h-4 w-4" /></Button>
+                {current.kind === "url" && <button type="button" onClick={() => answer("Pre-launch — no website yet")} disabled={complete.busy} className="mt-2 text-[11px] font-semibold text-slate-500 hover:text-indigo-600 disabled:opacity-50">I don’t have a website yet</button>}
               </form>
             )}
             {error && <p role="alert" className="mt-3 text-xs text-red-600">{error}</p>}

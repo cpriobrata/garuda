@@ -29,12 +29,65 @@ const buttonVariants = cva(
 
 export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement>, VariantProps<typeof buttonVariants> {
   asChild?: boolean;
+  // Marks the button as performing an async action: it disables itself, shows a
+  // spinner in place of its label, and reports aria-busy to assistive tech.
+  loading?: boolean;
+  // What the spinner means, announced to screen readers while the label is hidden.
+  loadingLabel?: string;
 }
 
-const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(({ className, variant, size, asChild = false, ...props }, ref) => {
-  const Comp = asChild ? Slot : "button";
-  return <Comp className={cn(buttonVariants({ variant, size, className }))} ref={ref} {...props} />;
+// The same busy mark the Button paints, exported for the handful of controls
+// that are not Buttons but still start an async action.
+function Spinner({ className }: { className?: string }) {
+  return (
+    // The spin is the pleasant part, not the message: under prefers-reduced-motion
+    // the ring stops but stays, so the busy state is still visible without motion.
+    <svg className={cn("h-4 w-4 animate-spin motion-reduce:animate-none", className)} viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
+      <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeOpacity=".25" strokeWidth="2" />
+      <path d="M14.5 8A6.5 6.5 0 0 0 8 1.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(({ className, variant, size, asChild = false, loading = false, loadingLabel = "Working", disabled, children, ...props }, ref) => {
+  if (asChild) {
+    // A Slot renders someone else's element -- usually a link -- so it takes the
+    // busy flag but never the spinner, which would be a second child.
+    //
+    // An anchor has no disabled attribute, so the flag has to be expressed the way
+    // assistive technology and CSS can both see. Dropping it silently, as this
+    // branch did before, meant a disabled link stayed fully clickable.
+    const inactive = disabled || loading;
+    return (
+      <Slot
+        className={cn(buttonVariants({ variant, size, className }), inactive && "pointer-events-none opacity-50")}
+        ref={ref}
+        aria-busy={loading || undefined}
+        aria-disabled={inactive || undefined}
+        tabIndex={inactive ? -1 : undefined}
+        {...props}
+      >
+        {children}
+      </Slot>
+    );
+  }
+
+  return (
+    <button
+      className={cn(buttonVariants({ variant, size, className }), loading && "relative cursor-progress disabled:opacity-100")}
+      ref={ref}
+      disabled={disabled || loading}
+      aria-busy={loading || undefined}
+      data-loading={loading ? "true" : undefined}
+      {...props}
+    >
+      {/* The label keeps its own space while it is hidden, so the button is
+          exactly as wide working as it is idle and nothing around it moves. */}
+      <span className={cn("inline-flex items-center justify-center", loading && "invisible")}>{children}</span>
+      {loading && <span className="absolute inset-0 grid place-items-center"><Spinner /><span className="sr-only">{loadingLabel}</span></span>}
+    </button>
+  );
 });
 Button.displayName = "Button";
 
-export { Button, buttonVariants };
+export { Button, buttonVariants, Spinner };

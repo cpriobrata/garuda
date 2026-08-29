@@ -147,8 +147,7 @@ func (s *Server) updateLead(w http.ResponseWriter, r *http.Request) {
 	if !s.decodeJSON(w, r, &input) {
 		return
 	}
-	validStatuses := map[string]bool{"new": true, "qualified": true, "contacted": true, "converted": true, "disqualified": true}
-	if input.Status != nil && !validStatuses[*input.Status] {
+	if input.Status != nil && !validLeadStatus(*input.Status) {
 		s.writeError(w, r, http.StatusUnprocessableEntity, "validation_failed", "Lead status is invalid", nil)
 		return
 	}

@@ -109,6 +109,9 @@ func New(cfg config.Config, dataStore store.Store, logger *slog.Logger) *Server 
 }
 
 func (s *Server) Handler() http.Handler {
+	// Outbound webhook delivery runs off the request path, so a customer endpoint
+	// that is slow or down never degrades the product.
+	s.StartOutboundWebhooks()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /readyz", s.ready)
@@ -170,6 +173,33 @@ func (s *Server) Handler() http.Handler {
 	protected("GET /v1/integrations/connections", s.listIntegrationConnections)
 	protectedLimited("POST /v1/integrations/connections", "integrations.connect", 30, time.Minute, s.connectIntegration)
 	protected("DELETE /v1/integrations/connections/{connectionID}", s.disconnectIntegration)
+
+	// In-app billing: everything the hosted Stripe portal used to do.
+	protectedLimited("GET /v1/billing/invoices", "billing.invoices", 60, time.Minute, s.listBillingInvoices)
+	protectedLimited("GET /v1/billing/payment-methods", "billing.payment_methods", 60, time.Minute, s.listBillingPaymentMethods)
+	protectedLimited("POST /v1/billing/payment-methods/setup-intent", "billing.setup_intent", 20, time.Minute, s.createBillingSetupIntent)
+	protectedLimited("POST /v1/billing/payment-methods/default", "billing.default_payment_method", 20, time.Minute, s.setDefaultBillingPaymentMethod)
+	protectedLimited("GET /v1/billing/subscription/detail", "billing.subscription_detail", 60, time.Minute, s.getBillingSubscriptionDetail)
+	protectedLimited("POST /v1/billing/subscription/cancel", "billing.subscription_cancel", 20, time.Minute, s.cancelBillingSubscription)
+	protectedLimited("POST /v1/billing/subscription/resume", "billing.subscription_resume", 20, time.Minute, s.resumeBillingSubscription)
+
+	// Lead export and manual capture.
+	protectedLimited("GET /v1/leads/export", "leads.export", 30, time.Minute, s.exportLeads)
+	protectedLimited("POST /v1/leads", "leads.create", 60, time.Minute, s.createLead)
+
+	// Pause a published agent without archiving it.
+	protected("POST /v1/agents/{agentID}/pause", s.pauseAgent)
+	protected("POST /v1/agents/{agentID}/unpause", s.unpauseAgent)
+
+	// Outbound webhooks: the CRM path that needs no per-provider integration.
+	protected("GET /v1/integrations/events", s.listIntegrationEvents)
+	protected("GET /v1/integrations/webhooks", s.listWebhookEndpoints)
+	protectedLimited("POST /v1/integrations/webhooks", "integrations.webhook_create", 30, time.Hour, s.createWebhookEndpoint)
+	protectedLimited("PATCH /v1/integrations/webhooks/{endpointID}", "integrations.webhook_update", 60, time.Hour, s.updateWebhookEndpoint)
+	protected("DELETE /v1/integrations/webhooks/{endpointID}", s.deleteWebhookEndpoint)
+	protectedLimited("POST /v1/integrations/webhooks/{endpointID}/secret", "integrations.webhook_rotate", 20, time.Hour, s.rotateWebhookSecret)
+	protectedLimited("POST /v1/integrations/webhooks/{endpointID}/test", "integrations.webhook_test", 30, time.Hour, s.sendWebhookTestEvent)
+	protected("GET /v1/integrations/webhooks/{endpointID}/deliveries", s.listWebhookDeliveries)
 	protected("GET /v1/analytics/overview", s.analyticsOverview)
 	protected("GET /v1/leads", s.listLeads)
 	protected("GET /v1/leads/{leadID}", s.getLead)

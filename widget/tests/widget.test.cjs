@@ -405,3 +405,736 @@ test('the non-modal panel lets Tab leave and still closes on Escape', () => {
     'the panel claims to be non-modal; making it modal means revisiting focus handling'
   );
 });
+
+// ---------------------------------------------------------------------------
+// Rendering tests.
+//
+// The widget draws into a shadow root, and neither this package nor the service
+// it ships with carries a third-party dependency, so there is no jsdom to lend
+// these tests a document. The stub below is the smallest DOM the widget itself
+// touches: elements, classes, attributes, text, listeners and a shadow root.
+// ---------------------------------------------------------------------------
+
+function createNode(tagName, namespace) {
+  const node = {
+    tagName: String(tagName).toLowerCase(),
+    namespace: namespace || 'html',
+    childNodes: [],
+    parentNode: null,
+    attributes: new Map(),
+    handlers: new Map(),
+    hidden: false,
+    disabled: false,
+    required: false,
+    checked: false,
+    value: '',
+    scrollHeight: 0,
+    isConnected: true,
+    focusCount: 0,
+    style: {
+      properties: new Map(),
+      setProperty(name, value) { this.properties.set(name, String(value)); },
+      getPropertyValue(name) { return this.properties.has(name) ? this.properties.get(name) : ''; }
+    }
+  };
+
+  const classes = new Set();
+  Object.defineProperty(node, 'className', {
+    get() { return Array.from(classes).join(' '); },
+    set(value) {
+      classes.clear();
+      String(value).split(/\s+/).filter(Boolean).forEach((name) => classes.add(name));
+    }
+  });
+  node.classList = {
+    add(name) { classes.add(name); },
+    remove(name) { classes.delete(name); },
+    contains(name) { return classes.has(name); },
+    toggle(name, force) {
+      const next = force === undefined ? !classes.has(name) : Boolean(force);
+      if (next) classes.add(name);
+      else classes.delete(name);
+      return next;
+    }
+  };
+
+  let ownText = '';
+  Object.defineProperty(node, 'textContent', {
+    get() {
+      return ownText + node.childNodes.map((child) => child.textContent).join('');
+    },
+    set(value) {
+      node.childNodes.forEach((child) => { child.parentNode = null; });
+      node.childNodes = [];
+      ownText = value === null || value === undefined ? '' : String(value);
+    }
+  });
+
+  node.appendChild = (child) => {
+    if (child.parentNode) child.parentNode.removeChild(child);
+    child.parentNode = node;
+    node.childNodes.push(child);
+    return child;
+  };
+  node.removeChild = (child) => {
+    node.childNodes = node.childNodes.filter((candidate) => candidate !== child);
+    child.parentNode = null;
+    return child;
+  };
+  node.remove = () => { if (node.parentNode) node.parentNode.removeChild(node); };
+  node.replaceChildren = (...children) => {
+    node.childNodes.forEach((child) => { child.parentNode = null; });
+    node.childNodes = [];
+    ownText = '';
+    children.forEach(node.appendChild);
+  };
+  node.setAttribute = (name, value) => { node.attributes.set(name, String(value)); };
+  node.getAttribute = (name) => (node.attributes.has(name) ? node.attributes.get(name) : null);
+  node.hasAttribute = (name) => node.attributes.has(name);
+  node.removeAttribute = (name) => { node.attributes.delete(name); };
+  node.addEventListener = (type, handler) => {
+    if (!node.handlers.has(type)) node.handlers.set(type, []);
+    node.handlers.get(type).push(handler);
+  };
+  node.removeEventListener = (type, handler) => {
+    node.handlers.set(type, (node.handlers.get(type) || []).filter((candidate) => candidate !== handler));
+  };
+  node.focus = () => { node.focusCount += 1; };
+  node.scrollTo = () => {};
+  node.attachShadow = () => {
+    node.shadowRoot = createNode('#shadow');
+    return node.shadowRoot;
+  };
+  node.querySelector = (selector) => queryAll(node, selector)[0] || null;
+  node.querySelectorAll = (selector) => queryAll(node, selector);
+  return node;
+}
+
+function matchesSelector(node, selector) {
+  return selector.split(',').map((part) => part.trim()).filter(Boolean).some((part) => {
+    if (part.startsWith('.')) return node.classList.contains(part.slice(1));
+    if (part.startsWith('[')) return node.hasAttribute(part.slice(1, -1));
+    return node.tagName === part.toLowerCase();
+  });
+}
+
+function queryAll(node, selector) {
+  const found = [];
+  node.childNodes.forEach((child) => {
+    if (matchesSelector(child, selector)) found.push(child);
+    queryAll(child, selector).forEach((descendant) => found.push(descendant));
+  });
+  return found;
+}
+
+function dispatch(node, type, extra) {
+  const handlers = (node.handlers.get(type) || []).slice();
+  const event = Object.assign({
+    type,
+    target: node,
+    preventDefault() {},
+    stopPropagation() {}
+  }, extra || {});
+  return Promise.all(handlers.map((handler) => handler.call(node, event)));
+}
+
+function installFakeBrowser(fetchStub) {
+  const saved = {
+    document: global.document,
+    hadDocument: 'document' in global,
+    fetch: global.fetch,
+    addEventListener: global.addEventListener,
+    requestAnimationFrame: global.requestAnimationFrame,
+    location: global.location,
+    hadLocation: 'location' in global
+  };
+  const documentStub = {
+    title: 'Customer page',
+    referrer: '',
+    createElement: (tagName) => createNode(tagName),
+    createElementNS: (namespace, tagName) => createNode(tagName, namespace),
+    addEventListener() {},
+    querySelectorAll() { return []; },
+    currentScript: null
+  };
+  documentStub.body = createNode('body');
+  global.document = documentStub;
+  global.addEventListener = () => {};
+  global.requestAnimationFrame = () => 0;
+  global.location = { href: 'https://customer.example/pricing' };
+  if (fetchStub) global.fetch = fetchStub;
+  return {
+    document: documentStub,
+    restore() {
+      if (saved.hadDocument) global.document = saved.document;
+      else delete global.document;
+      if (saved.hadLocation) global.location = saved.location;
+      else delete global.location;
+      global.fetch = saved.fetch;
+      global.addEventListener = saved.addEventListener;
+      global.requestAnimationFrame = saved.requestAnimationFrame;
+    }
+  };
+}
+
+// Mounts one widget against the stub DOM and hands it the bootstrap payload the
+// server sends, normalized exactly as a live bootstrap would be.
+function renderWidget(payload, options) {
+  options = options || {};
+  const browser = installFakeBrowser(options.fetch);
+  const instance = new widget.GarudaWidget({
+    agentKey: 'pub_live_renderAgent',
+    mode: 'live',
+    apiOrigin: 'https://api.garuda.example',
+    memorySetting: 'false',
+    analytics: false,
+    launcherLabel: '',
+    startOpen: false,
+    zIndex: 2147482000
+  });
+  instance.createUI();
+  // A session already in hand keeps these tests on the rendering path rather
+  // than the bootstrap path, which has its own tests above.
+  instance.agentLoaded = true;
+  instance.session = options.session === null
+    ? null
+    : { sessionID: 'session-1', sessionToken: 'short-lived-token' };
+  instance.applyAgent(widget.normalizeAgentPayload(payload));
+  return { instance, nodes: instance.nodes, browser, restore: browser.restore };
+}
+
+function leadFieldGroups(instance) {
+  return instance.nodes.leadRegion.querySelectorAll('.gw-field').map((group) => ({
+    group,
+    label: group.querySelector('label'),
+    control: group.querySelector('input,select,textarea'),
+    error: group.querySelector('.gw-field-error')
+  }));
+}
+
+test('a bootstrap with none of the new keys still resolves to the widget deployed today', () => {
+  const agent = widget.normalizeAgentPayload({
+    display_name: 'Northstar',
+    accent_color: '#F97316',
+    primary_color: '#111827',
+    position: 'bottom_right',
+    lead_capture_enabled: true,
+    lead_capture_fields: ['name', 'email', 'phone']
+  });
+
+  assert.equal(agent.tagline, '');
+  assert.equal(agent.logoUrl, '');
+  assert.equal(agent.theme, '');
+  assert.equal(agent.accentColor, '#F97316', 'the colour the widget paints with today is untouched');
+  assert.deepEqual(agent.colors, {
+    primary: '#111827',
+    accent: '#F97316',
+    background: '#FFFFFF',
+    surface: '#F3F4F6',
+    text: '#111827',
+    onPrimary: '#FFFFFF',
+    onAccent: '#FFFFFF'
+  });
+  assert.equal(agent.toggles.chat, true, 'chat has to stay on for every agent that predates the switches');
+  Object.keys(agent.toggles).filter((name) => name !== 'chat').forEach((name) => {
+    assert.equal(agent.toggles[name], false, name + ' defaults off');
+  });
+  assert.equal(agent.leadForm.fromServer, false);
+  assert.deepEqual(
+    agent.leadForm.fields.map((field) => field.id + ':' + field.type + ':' + field.label),
+    ['name:text:Name', 'email:email:Email', 'phone:telephone:Phone']
+  );
+});
+
+test('an absent toggle object is not a set of false toggles', () => {
+  assert.equal(widget.normalizeToggles(undefined).chat, true);
+  assert.equal(widget.normalizeToggles(null).chat, true);
+  assert.equal(widget.normalizeToggles({ chat: null }).chat, true, 'null means the customer never chose');
+  assert.equal(widget.normalizeToggles({ chat: false }).chat, false);
+  assert.equal(widget.normalizeToggles({ chat: 'false' }).chat, true, 'only a real boolean is a choice');
+  const both = widget.normalizeToggles({ autostart: true, show_lead_form: true });
+  assert.equal(both.showLeadForm, true);
+  assert.equal(both.autostart, false, 'autostart and show_lead_form are mutually exclusive');
+});
+
+test('the widget consumes resolved colours and carries no theme table of its own', () => {
+  const rendered = renderWidget({
+    display_name: 'Nova',
+    theme: 'ocean_blue',
+    accent_color: '#F97316',
+    theme_colors: {
+      primary: '#0F4C81',
+      accent: '#2E8BC0',
+      background: '#FFFFFF',
+      surface: '#EEF4FA',
+      text: '#0F1D2B',
+      on_primary: '#FFFFFF',
+      on_accent: '#FFFFFF'
+    }
+  });
+  try {
+    const style = rendered.nodes.host.style;
+    assert.equal(style.getPropertyValue('--garuda-primary'), '#0F4C81');
+    assert.equal(style.getPropertyValue('--garuda-accent'), '#2E8BC0');
+    assert.equal(style.getPropertyValue('--garuda-background'), '#FFFFFF');
+    assert.equal(style.getPropertyValue('--garuda-surface'), '#EEF4FA');
+    assert.equal(style.getPropertyValue('--garuda-text'), '#0F1D2B');
+    assert.equal(style.getPropertyValue('--garuda-primary-text'), '#FFFFFF');
+    assert.equal(style.getPropertyValue('--garuda-accent-text'), '#FFFFFF');
+    assert.equal(rendered.nodes.host.getAttribute('data-theme'), 'ocean_blue');
+  } finally {
+    rendered.restore();
+  }
+
+  // A preset retuned on the server has to reach every embedded widget without a
+  // release, which it cannot do if the palette is compiled into this file.
+  const source = readFileSync(resolve(__dirname, '..', 'src', 'v1.js'), 'utf8');
+  ['#0F4C81', '#1B5E3F', '#B23A0B', '#A16207', '#4C1D95'].forEach((preset) => {
+    assert.doesNotMatch(source, new RegExp(preset, 'i'), preset + ' is a preset colour and must live on the server');
+  });
+  assert.doesNotMatch(source, /forest_green|sunset_orange|summer_yellow|royal_purple/);
+});
+
+test('the header shows the name, the tagline and the logo, and keeps the monogram as the fallback', async () => {
+  const rendered = renderWidget({
+    display_name: 'Nova',
+    tagline: 'Answers in seconds',
+    logo_url: 'https://cdn.example.com/logo.png'
+  });
+  try {
+    assert.equal(rendered.nodes.title.textContent, 'Nova');
+    assert.equal(rendered.nodes.tagline.textContent, 'Answers in seconds');
+    assert.equal(rendered.nodes.tagline.hidden, false);
+    assert.equal(rendered.nodes.monogram.textContent, 'N');
+
+    const image = rendered.nodes.logo;
+    assert.ok(image, 'a configured logo is rendered');
+    assert.equal(image.tagName, 'img');
+    assert.equal(image.src, 'https://cdn.example.com/logo.png');
+    assert.equal(image.alt, '', 'the logo is decorative beside the name that is already there');
+    assert.equal(image.hidden, true, 'the monogram holds the space until the logo decodes');
+    assert.equal(rendered.nodes.monogram.hidden, false);
+
+    await dispatch(image, 'load');
+    assert.equal(image.hidden, false);
+    assert.equal(rendered.nodes.monogram.hidden, true);
+
+    // A logo that 404s on the customer's CDN must not leave a broken image icon
+    // in the header of every visitor's chat.
+    await dispatch(image, 'error');
+    assert.equal(rendered.nodes.logo, null, 'the failed image is removed');
+    assert.equal(rendered.nodes.avatar.querySelectorAll('img').length, 0);
+    assert.equal(rendered.nodes.monogram.hidden, false, 'the monogram comes back');
+    assert.equal(rendered.nodes.avatar.textContent, 'N');
+  } finally {
+    rendered.restore();
+  }
+});
+
+test('a tagline-less agent hides the line instead of leaving a gap, and an insecure logo is refused', () => {
+  assert.equal(widget.safeImageURL('http://cdn.example.com/logo.png'), '', 'mixed content would not load');
+  assert.equal(widget.safeImageURL('javascript:alert(1)'), '');
+  assert.equal(widget.safeImageURL('https://cdn.example.com/logo.png'), 'https://cdn.example.com/logo.png');
+
+  const rendered = renderWidget({ display_name: 'Nova' });
+  try {
+    assert.equal(rendered.nodes.tagline.hidden, true);
+    assert.equal(rendered.nodes.logo, null);
+    assert.equal(rendered.nodes.avatar.textContent, 'N');
+  } finally {
+    rendered.restore();
+  }
+});
+
+test('all six placements reach the shell and an unknown one lands bottom right', () => {
+  const placements = [
+    'bottom_right', 'bottom_left', 'middle_right', 'middle_left', 'top_right', 'top_left'
+  ];
+  placements.forEach((placement) => {
+    assert.equal(widget.normalizePosition(placement), placement);
+  });
+  assert.equal(widget.normalizePosition('middle_centre'), 'bottom_right');
+  assert.equal(widget.normalizePosition(undefined), 'bottom_right');
+
+  const rendered = renderWidget({ display_name: 'Nova', position: 'top_left' });
+  try {
+    assert.equal(rendered.nodes.shell.getAttribute('data-position'), 'top_left');
+    placements.forEach((placement) => {
+      rendered.instance.applyAgent(widget.normalizeAgentPayload({ position: placement }));
+      assert.equal(rendered.nodes.shell.getAttribute('data-position'), placement);
+    });
+    rendered.instance.applyAgent(widget.normalizeAgentPayload({ position: 'nowhere' }));
+    assert.equal(rendered.nodes.shell.getAttribute('data-position'), 'bottom_right');
+
+    const source = readFileSync(resolve(__dirname, '..', 'src', 'v1.js'), 'utf8');
+    placements.forEach((placement) => {
+      assert.match(source, new RegExp('data-position\\^?\\$?="?' + placement.split('_')[0]), 'the stylesheet places ' + placement);
+    });
+  } finally {
+    rendered.restore();
+  }
+});
+
+test('the toggles the widget can act on change what a visitor sees', () => {
+  const glowing = renderWidget({
+    display_name: 'Nova',
+    toggles: { is_glowing: true, is_transparent: true, agent_mute: true, transcription: true, mute_on_minimize: true }
+  });
+  try {
+    assert.equal(glowing.nodes.shell.classList.contains('gw-glowing'), true);
+    assert.equal(glowing.nodes.shell.classList.contains('gw-transparent'), true);
+    assert.equal(glowing.nodes.mutedBadge.hidden, false, 'agent_mute says the assistant will not speak');
+    assert.equal(glowing.nodes.mutedBadge.getAttribute('aria-label'), 'Assistant audio is muted');
+    // The widget has no audio of its own. The switches that describe when audio
+    // stops are published rather than acted out, so a voice surface can read
+    // them and support can see them.
+    assert.equal(glowing.nodes.host.getAttribute('data-transcription'), 'true');
+    assert.equal(glowing.nodes.host.getAttribute('data-mute-on-minimize'), 'true');
+    assert.equal(glowing.nodes.host.getAttribute('data-mute-on-tab-change'), 'false');
+    assert.equal(glowing.nodes.host.hidden, false);
+  } finally {
+    glowing.restore();
+  }
+
+  const chatOff = renderWidget({ display_name: 'Nova', toggles: { chat: false } });
+  try {
+    assert.equal(chatOff.nodes.host.hidden, true, 'chat off means no bubble on the customer site');
+    assert.equal(chatOff.nodes.panel.hidden, true);
+    assert.equal(chatOff.instance.open, false);
+    // all:initial on the host outranks the browser's own [hidden] rule, so
+    // hiding the host only works while the stylesheet says so itself.
+    const stylesheet = readFileSync(resolve(__dirname, '..', 'src', 'v1.js'), 'utf8');
+    assert.ok(
+      stylesheet.includes(':host([hidden]){display:none!important;}'),
+      'the host element has to hide itself explicitly'
+    );
+  } finally {
+    chatOff.restore();
+  }
+
+  const autostart = renderWidget({ display_name: 'Nova', toggles: { autostart: true } });
+  try {
+    assert.equal(autostart.instance.open, true, 'autostart opens the panel without a click');
+    assert.equal(autostart.nodes.panel.hidden, false);
+    assert.equal(autostart.nodes.launcher.getAttribute('aria-expanded'), 'true');
+  } finally {
+    autostart.restore();
+  }
+
+  const both = renderWidget({
+    display_name: 'Nova',
+    lead_capture_enabled: true,
+    toggles: { autostart: true, show_lead_form: true }
+  });
+  try {
+    assert.equal(both.instance.agent.toggles.autostart, false, 'the server refuses both, and so does the widget');
+    assert.equal(both.instance.open, false);
+    both.instance.setOpen(true);
+    assert.equal(both.nodes.leadRegion.querySelectorAll('form').length, 1, 'show_lead_form greets with the form');
+  } finally {
+    both.restore();
+  }
+});
+
+test('the lead form is rendered from the fields the server resolved, labelled and typed', () => {
+  const rendered = renderWidget({
+    display_name: 'Nova',
+    lead_capture_enabled: true,
+    lead_form: {
+      enabled: true,
+      heading: 'Tell us where to reach you',
+      submit_label: 'Send it',
+      privacy_text: 'Used only for this follow-up.',
+      fields: [
+        { id: 'full_name', label: 'Full name', type: 'text', required: true, placeholder: 'Ada Lovelace' },
+        { id: 'work_email', label: 'Work email', type: 'email', required: true },
+        { id: 'mobile', label: 'Mobile', type: 'telephone' },
+        { id: 'seats', label: 'Seats', type: 'number' },
+        { id: 'brief', label: 'Brief', type: 'textarea' },
+        { id: 'budget', label: 'Budget', type: 'select', options: ['Under 5k', '5k to 20k'] },
+        { id: 'newsletter', label: 'Send me the newsletter', type: 'checkbox' },
+        { id: 'start_date', label: 'Start date', type: 'date' }
+      ]
+    }
+  });
+  try {
+    rendered.instance.showLeadForm(null);
+    const card = rendered.nodes.leadRegion.querySelector('.gw-lead-card');
+    assert.equal(card.querySelector('h2').textContent, 'Tell us where to reach you');
+    assert.equal(card.querySelector('.gw-lead-submit').textContent, 'Send it');
+
+    const groups = leadFieldGroups(rendered.instance);
+    assert.deepEqual(
+      groups.map((entry) => entry.control.name),
+      ['full_name', 'work_email', 'mobile', 'seats', 'brief', 'budget', 'newsletter', 'start_date']
+    );
+    assert.deepEqual(
+      groups.map((entry) => (entry.control.tagName === 'input' ? entry.control.type : entry.control.tagName)),
+      ['text', 'email', 'tel', 'number', 'textarea', 'select', 'checkbox', 'date']
+    );
+
+    groups.forEach((entry) => {
+      assert.ok(entry.label, entry.control.name + ' has a label element');
+      assert.equal(entry.label.htmlFor, entry.control.id, entry.control.name + ' is labelled by id, not by placement');
+      assert.ok(entry.control.id, 'every control has an id to be labelled by');
+      assert.equal(entry.control.getAttribute('aria-describedby'), entry.error.id);
+    });
+
+    assert.equal(groups[0].control.required, true);
+    assert.equal(groups[1].control.required, true);
+    assert.equal(groups[2].control.required, false);
+    assert.match(groups[0].label.textContent, /Full name \*/);
+    assert.match(groups[2].label.textContent, /optional/);
+    assert.equal(groups[0].control.placeholder, 'Ada Lovelace');
+
+    const options = groups[5].control.querySelectorAll('option');
+    assert.deepEqual(options.map((option) => option.value), ['', 'Under 5k', '5k to 20k']);
+    assert.equal(options[0].textContent, 'Select an option');
+    assert.equal(card.querySelectorAll('.gw-lead-privacy-copy')[0].textContent, 'Used only for this follow-up.');
+  } finally {
+    rendered.restore();
+  }
+});
+
+test('a bootstrap without a built form still draws the form the widget has always drawn', () => {
+  const rendered = renderWidget({
+    display_name: 'Nova',
+    lead_capture_enabled: true,
+    lead_capture_fields: ['name', 'email', 'phone']
+  });
+  try {
+    rendered.instance.showLeadForm({ fields: ['name', 'email'], required_fields: ['email'] });
+    const groups = leadFieldGroups(rendered.instance);
+    assert.deepEqual(groups.map((entry) => entry.control.name), ['name', 'email']);
+    assert.equal(groups[1].control.required, true, 'the stream can still mark a field required');
+    const card = rendered.nodes.leadRegion.querySelector('.gw-lead-card');
+    assert.equal(card.querySelector('h2').textContent, 'How can the team reach you?');
+    assert.equal(card.querySelector('.gw-lead-submit').textContent, 'Send securely');
+  } finally {
+    rendered.restore();
+  }
+});
+
+test('a submitted form sends reserved ids at the top level and every other answer as a custom field', async () => {
+  const calls = [];
+  const rendered = renderWidget({
+    display_name: 'Nova',
+    lead_capture_enabled: true,
+    lead_form: {
+      enabled: true,
+      fields: [
+        { id: 'name', label: 'Name', type: 'text' },
+        { id: 'email', label: 'Work email', type: 'email', required: true },
+        { id: 'budget', label: 'Budget', type: 'select', options: ['Under 5k', '5k to 20k'] },
+        { id: 'newsletter', label: 'Newsletter', type: 'checkbox' }
+      ]
+    }
+  }, {
+    fetch: async (url, options) => {
+      calls.push({ url, body: JSON.parse(options.body) });
+      return new Response(JSON.stringify({ data: { lead_id: 'lead-1', status: 'new' } }), {
+        status: 201, headers: { 'Content-Type': 'application/json' }
+      });
+    }
+  });
+  try {
+    rendered.instance.showLeadForm(null);
+    const groups = leadFieldGroups(rendered.instance);
+    groups[0].control.value = 'Ada Lovelace';
+    groups[1].control.value = 'ada@example.com';
+    groups[2].control.value = '5k to 20k';
+    groups[3].control.checked = true;
+    const form = rendered.nodes.leadRegion.querySelector('form');
+    form.querySelector('.gw-check').querySelector('input').checked = true;
+
+    await dispatch(form, 'submit');
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'https://api.garuda.example/widget/v1/sessions/session-1/leads');
+    assert.deepEqual(calls[0].body.fields, { name: 'Ada Lovelace', email: 'ada@example.com' });
+    assert.deepEqual(calls[0].body.custom_fields, { budget: '5k to 20k', newsletter: 'yes' });
+    assert.equal(calls[0].body.consent.granted, true);
+    assert.equal(
+      rendered.nodes.leadRegion.querySelectorAll('.gw-lead-success').length,
+      1,
+      'the visitor is told the details arrived'
+    );
+  } finally {
+    rendered.restore();
+  }
+});
+
+test('the submit button says it is working and refuses the second and third click', async () => {
+  let releaseCapture = null;
+  const attempts = [];
+  const rendered = renderWidget({
+    display_name: 'Nova',
+    lead_capture_enabled: true,
+    lead_form: {
+      enabled: true,
+      submit_label: 'Send it',
+      fields: [{ id: 'email', label: 'Work email', type: 'email', required: true }]
+    }
+  }, {
+    fetch: (url, options) => {
+      attempts.push(JSON.parse(options.body));
+      return new Promise((settle) => {
+        releaseCapture = () => settle(new Response(JSON.stringify({ data: { lead_id: 'lead-1' } }), {
+          status: 201, headers: { 'Content-Type': 'application/json' }
+        }));
+      });
+    }
+  });
+  try {
+    rendered.instance.showLeadForm(null);
+    const form = rendered.nodes.leadRegion.querySelector('form');
+    const submit = form.querySelector('.gw-lead-submit');
+    leadFieldGroups(rendered.instance)[0].control.value = 'ada@example.com';
+    form.querySelector('.gw-check').querySelector('input').checked = true;
+
+    const pending = dispatch(form, 'submit');
+    await Promise.resolve();
+
+    assert.equal(submit.disabled, true, 'the control that started the work disables itself');
+    assert.equal(submit.getAttribute('aria-busy'), 'true');
+    assert.equal(submit.classList.contains('gw-busy'), true);
+    assert.equal(submit.textContent, 'Sending…');
+
+    await dispatch(form, 'submit');
+    await dispatch(form, 'submit');
+    assert.equal(attempts.length, 1, 'an impatient double click must not post the lead twice');
+
+    releaseCapture();
+    await pending;
+    assert.equal(rendered.nodes.leadRegion.querySelectorAll('.gw-lead-success').length, 1);
+  } finally {
+    rendered.restore();
+  }
+});
+
+test('a field the server rejects is named on that field, and the button comes back', async () => {
+  const rendered = renderWidget({
+    display_name: 'Nova',
+    lead_capture_enabled: true,
+    lead_form: {
+      enabled: true,
+      submit_label: 'Send it',
+      fields: [
+        { id: 'email', label: 'Work email', type: 'email', required: true },
+        { id: 'budget', label: 'Budget', type: 'text' }
+      ]
+    }
+  }, {
+    fetch: async () => new Response(JSON.stringify({
+      error: {
+        code: 'validation_failed',
+        message: 'Email address is invalid',
+        request_id: 'req_1',
+        details: { email: 'invalid', 'custom.budget': 'must not exceed 500 characters' }
+      }
+    }), { status: 422, headers: { 'Content-Type': 'application/json' } })
+  });
+  try {
+    rendered.instance.showLeadForm(null);
+    const form = rendered.nodes.leadRegion.querySelector('form');
+    const submit = form.querySelector('.gw-lead-submit');
+    const groups = leadFieldGroups(rendered.instance);
+    groups[0].control.value = 'ada@example.com';
+    groups[1].control.value = 'plenty';
+    form.querySelector('.gw-check').querySelector('input').checked = true;
+
+    await dispatch(form, 'submit');
+
+    assert.equal(groups[0].error.hidden, false, 'the rejected field says so under itself');
+    assert.equal(groups[0].error.textContent, 'Work email is invalid.');
+    assert.equal(groups[0].control.getAttribute('aria-invalid'), 'true');
+    assert.equal(groups[1].error.textContent, 'must not exceed 500 characters', 'a custom.<id> detail finds its field');
+    assert.equal(submit.disabled, false, 'the visitor can correct the field and send again');
+    assert.equal(submit.textContent, 'Send it', 'the customer wording comes back, not "Sending…"');
+    assert.equal(submit.getAttribute('aria-busy'), 'false');
+  } finally {
+    rendered.restore();
+  }
+});
+
+test('the form checks itself before it spends a round trip, and says which field', async () => {
+  const calls = [];
+  const rendered = renderWidget({
+    display_name: 'Nova',
+    lead_capture_enabled: true,
+    lead_form: {
+      enabled: true,
+      fields: [
+        { id: 'email', label: 'Work email', type: 'email', required: true },
+        { id: 'mobile', label: 'Mobile', type: 'telephone' }
+      ]
+    }
+  }, { fetch: async () => { calls.push('sent'); throw new Error('the form must not reach the network'); } });
+  try {
+    rendered.instance.showLeadForm(null);
+    const form = rendered.nodes.leadRegion.querySelector('form');
+    const groups = leadFieldGroups(rendered.instance);
+
+    await dispatch(form, 'submit');
+    assert.equal(calls.length, 0, 'a required field left empty never reaches the server');
+    assert.equal(groups[0].error.textContent, 'This field is required.');
+    assert.equal(groups[0].control.getAttribute('aria-invalid'), 'true');
+    assert.equal(groups[0].control.focusCount > 0, true, 'focus moves to the field to fix');
+
+    groups[0].control.value = 'ada@example';
+    groups[1].control.value = '123';
+    await dispatch(form, 'submit');
+    assert.equal(calls.length, 0);
+    assert.equal(groups[0].error.textContent, 'Enter an email address like you@example.com.');
+    assert.equal(groups[1].error.textContent, 'Enter a phone number the team can call.');
+
+    groups[0].control.value = 'ada@example.com';
+    groups[1].control.value = '+91 98765 43210';
+    await dispatch(form, 'submit');
+    assert.equal(calls.length, 0, 'consent is still required before anything is sent');
+    assert.equal(form.querySelector('.gw-consent-error').hidden, false);
+    assert.equal(groups[0].error.hidden, true, 'a corrected field clears its own line');
+    assert.equal(groups[0].control.hasAttribute('aria-invalid'), false);
+  } finally {
+    rendered.restore();
+  }
+});
+
+test('every control that starts network work says so and refuses the second click', async () => {
+  const rendered = renderWidget({ display_name: 'Nova' });
+  try {
+    let releaseRetry = null;
+    let attempts = 0;
+    rendered.instance.showNotice('The chat could not start.', () => {
+      attempts += 1;
+      return new Promise((settle) => { releaseRetry = settle; });
+    });
+
+    const retry = rendered.nodes.retryButton;
+    await dispatch(retry, 'click');
+    assert.equal(retry.disabled, true, 'the retry that is running cannot be started again');
+    assert.equal(retry.getAttribute('aria-busy'), 'true');
+    assert.equal(retry.classList.contains('gw-busy'), true);
+    assert.equal(retry.textContent, 'Retrying…');
+
+    await dispatch(retry, 'click');
+    assert.equal(attempts, 1, 'clicking again while it works must not start a second attempt');
+
+    releaseRetry();
+    await new Promise((done) => setTimeout(done, 0));
+    assert.equal(retry.disabled, false, 'the control comes back when the work finishes');
+    assert.equal(retry.textContent, 'Try again');
+    assert.equal(retry.getAttribute('aria-busy'), 'false');
+
+    // Sending a message is the other control the owner was clicking twice.
+    rendered.instance.setSending(true);
+    assert.equal(rendered.nodes.send.disabled, true);
+    assert.equal(rendered.nodes.send.getAttribute('aria-busy'), 'true');
+    assert.equal(rendered.nodes.send.classList.contains('gw-busy'), true);
+    rendered.instance.setSending(false);
+    assert.equal(rendered.nodes.send.getAttribute('aria-busy'), 'false');
+    assert.equal(rendered.nodes.send.classList.contains('gw-busy'), false);
+  } finally {
+    rendered.restore();
+  }
+});
