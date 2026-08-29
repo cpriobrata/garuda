@@ -39,11 +39,23 @@ import (
 const (
 	defaultAPIURL = "https://graph.facebook.com/v21.0"
 
-	// EventNameLead is Meta's standard event for a captured lead. A standard
-	// event name rather than a custom one because only standard events can be
-	// chosen as an optimisation goal without further setup in Events Manager,
-	// and optimisation is the entire point of sending this.
-	EventNameLead = "Lead"
+	// The three standard event names this package sends. Standard names rather
+	// than custom ones because only standard events can be chosen as an
+	// optimisation goal without further setup in Events Manager, and
+	// optimisation is the entire point of sending any of this.
+	//
+	// EventNameCompleteRegistration and EventNamePurchase are GARUDA's own
+	// funnel -- somebody signed up for Garuda, somebody paid for Garuda -- and
+	// are what the ad account should actually optimise against, because they are
+	// the outcomes the ad spend is buying. EventNameLead is a different signal
+	// entirely: a visitor on one of our CUSTOMERS' websites filled in that
+	// customer's contact form. It is useful (it says the product is working) but
+	// it is not the conversion an acquisition campaign is bidding for. Keep them
+	// on separate custom conversions in Events Manager or the optimiser will
+	// learn from the wrong number.
+	EventNameLead                 = "Lead"
+	EventNameCompleteRegistration = "CompleteRegistration"
+	EventNamePurchase             = "Purchase"
 
 	// actionSourceWebsite tells Meta the conversion happened on a website rather
 	// than in a shop, an app or over the phone. Meta rejects an event with no
@@ -110,23 +122,28 @@ func (c *Client) Enabled() bool {
 // conversions being attributed.
 func (c *Client) TestMode() bool { return c != nil && c.testEventCode != "" }
 
-// EventID is the deduplication key.
+// EventID is the deduplication key, derived from the id of the row the
+// conversion is about: a lead id, a user id or a subscription id.
 //
 // THIS IS THE PROPERTY THAT MATTERS MOST. Meta collapses a browser pixel event
 // and a server event into one conversion when they share an event_name and an
-// event_id. Get it wrong and every lead is counted twice, the ad account learns
-// from a number that is double the truth, and the bid strategy optimises towards
-// a cost per lead that does not exist.
+// event_id. Get it wrong and every conversion is counted twice, the ad account
+// learns from a number that is double the truth, and the bid strategy optimises
+// towards a cost per acquisition that does not exist.
 //
-// The derivation is deliberately the identity function on the lead id, trimmed.
-// The lead id is already unique, already stable for the life of the lead, and
-// already opaque -- it carries nothing about the visitor. Any cleverer
+// The derivation is deliberately the identity function on the row id, trimmed.
+// A row id is already unique, already stable for the life of the row, and
+// already opaque -- it carries nothing about the person. Any cleverer
 // derivation (a hash, a prefix, a salt) has to be reimplemented byte for byte in
 // the browser, and the moment the two implementations disagree the dedup
 // silently stops working with no error anywhere. The safest derivation is the
 // one that cannot drift. frontend/components/analytics/meta-events.ts mirrors
 // this, and both sides have a test pinning the same literal.
-func EventID(leadID string) string { return strings.TrimSpace(leadID) }
+//
+// Ids from different tables cannot collide -- they are prefixed lead_, usr_ and
+// sub_ -- and Meta keys dedup on event_name as well as event_id, so even a
+// collision across two event names would not merge them.
+func EventID(rowID string) string { return strings.TrimSpace(rowID) }
 
 // UserData is the set of identifiers Meta matches a conversion against a person
 // with. Values are supplied RAW and are normalised and hashed by this package --
@@ -153,9 +170,35 @@ type Event struct {
 	// fragment are stripped before it is sent.
 	SourceURL string
 	User      UserData
+	// Custom carries the non-identifying detail of the conversion, which for a
+	// Purchase is what it was worth.
+	Custom CustomData
 }
 
-// LeadEvent builds the Lead conversion for one captured lead.
+// CustomData is the detail Meta attaches to a conversion beyond who it was.
+//
+// It is a fixed struct rather than a map[string]any on purpose. custom_data is
+// the field where a careless addition would put a visitor's email or a chat
+// message in front of an ad platform; a struct with three named, non-identifying
+// fields cannot carry one by accident.
+type CustomData struct {
+	// Value is what the conversion was worth, in major currency units (17.00,
+	// not 1700). Meta rejects a Purchase without it.
+	Value float64
+	// Currency is an ISO 4217 code. Required whenever Value is set, because a
+	// number with no currency is not a number Meta can bid against.
+	Currency string
+	// ContentName names what was bought or registered for. A plan code, never
+	// anything about the person.
+	ContentName string
+}
+
+func (c CustomData) empty() bool {
+	return c.Value == 0 && c.Currency == "" && c.ContentName == ""
+}
+
+// LeadEvent builds the Lead conversion for one lead captured on a CUSTOMER's
+// website. This is not Garuda's own funnel -- see the event name constants.
 func LeadEvent(leadID string, occurredAt time.Time, sourceURL string, user UserData) Event {
 	return Event{
 		Name:       EventNameLead,
@@ -163,6 +206,37 @@ func LeadEvent(leadID string, occurredAt time.Time, sourceURL string, user UserD
 		OccurredAt: occurredAt,
 		SourceURL:  sourceURL,
 		User:       user,
+	}
+}
+
+// RegistrationEvent builds the CompleteRegistration conversion for one person
+// who signed up for Garuda itself.
+func RegistrationEvent(userID string, occurredAt time.Time, sourceURL string, user UserData) Event {
+	return Event{
+		Name:       EventNameCompleteRegistration,
+		EventID:    EventID(userID),
+		OccurredAt: occurredAt,
+		SourceURL:  sourceURL,
+		User:       user,
+	}
+}
+
+// PurchaseEvent builds the Purchase conversion for one subscription that became
+// paid. valueCents is the plan price in minor units, which is how this codebase
+// carries money everywhere else (config.PlanAmountCents), and is divided here so
+// exactly one place does the conversion Meta expects.
+func PurchaseEvent(subscriptionID string, occurredAt time.Time, sourceURL string, user UserData, valueCents int, currency, planCode string) Event {
+	return Event{
+		Name:       EventNamePurchase,
+		EventID:    EventID(subscriptionID),
+		OccurredAt: occurredAt,
+		SourceURL:  sourceURL,
+		User:       user,
+		Custom: CustomData{
+			Value:       float64(valueCents) / 100,
+			Currency:    strings.TrimSpace(currency),
+			ContentName: strings.TrimSpace(planCode),
+		},
 	}
 }
 
@@ -254,13 +328,24 @@ type wireUserData struct {
 	LastName  []string `json:"ln,omitempty"`
 }
 
+type wireCustomData struct {
+	// Value is a pointer so a deliberate zero is distinguishable from absent. It
+	// matters: Meta reads a missing value and a zero value differently, and a
+	// Purchase reported as worth nothing teaches the optimiser that the
+	// conversion is worthless.
+	Value       *float64 `json:"value,omitempty"`
+	Currency    string   `json:"currency,omitempty"`
+	ContentName string   `json:"content_name,omitempty"`
+}
+
 type wireEvent struct {
-	EventName      string       `json:"event_name"`
-	EventTime      int64        `json:"event_time"`
-	EventID        string       `json:"event_id"`
-	ActionSource   string       `json:"action_source"`
-	EventSourceURL string       `json:"event_source_url,omitempty"`
-	UserData       wireUserData `json:"user_data"`
+	EventName      string          `json:"event_name"`
+	EventTime      int64           `json:"event_time"`
+	EventID        string          `json:"event_id"`
+	ActionSource   string          `json:"action_source"`
+	EventSourceURL string          `json:"event_source_url,omitempty"`
+	UserData       wireUserData    `json:"user_data"`
+	CustomData     *wireCustomData `json:"custom_data,omitempty"`
 }
 
 type wireRequest struct {
@@ -291,6 +376,21 @@ func (e Event) wire() (wireEvent, error) {
 	if user.empty() {
 		return wireEvent{}, errors.New("a conversion needs at least one identifier Meta can match against")
 	}
+	// A Purchase with no money on it is worse than no Purchase: Meta accepts it,
+	// value-based bidding then optimises against a revenue figure of zero, and
+	// nothing anywhere reports an error.
+	if name == EventNamePurchase && (e.Custom.Value <= 0 || e.Custom.Currency == "") {
+		return wireEvent{}, errors.New("a purchase conversion needs a value and a currency")
+	}
+	var custom *wireCustomData
+	if !e.Custom.empty() {
+		rendered := wireCustomData{Currency: e.Custom.Currency, ContentName: e.Custom.ContentName}
+		if e.Custom.Value != 0 {
+			value := e.Custom.Value
+			rendered.Value = &value
+		}
+		custom = &rendered
+	}
 	return wireEvent{
 		EventName:      name,
 		EventTime:      e.OccurredAt.UTC().Unix(),
@@ -298,6 +398,7 @@ func (e Event) wire() (wireEvent, error) {
 		ActionSource:   actionSourceWebsite,
 		EventSourceURL: sourceURL(e.SourceURL),
 		UserData:       user,
+		CustomData:     custom,
 	}, nil
 }
 

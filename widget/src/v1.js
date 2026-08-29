@@ -8,6 +8,31 @@
   var MESSAGE_REQUEST_TIMEOUT_MS = 60000;
   var STREAM_IDLE_TIMEOUT_MS = 30000;
   var TEAM_REPLY_POLL_MS = 12000;
+  // ---- visitor journey ----
+  // The numbers below mirror backend/internal/api/journey.go. Every one of them
+  // is enforced there as well; they are repeated here so the widget never builds
+  // a batch the server has to refuse, and never grows without bound on a page it
+  // does not own.
+  var JOURNEY_FLUSH_MS = 15000;
+  // maxJourneyBatch. A larger batch is answered with 422, not stored.
+  var MAX_JOURNEY_BATCH = 20;
+  // The server keeps fifty pages per session and drops the oldest. Holding a few
+  // more than that here leaves room for pages still waiting on a batch, and
+  // stops a very long visit from growing this array for the rest of the day.
+  var MAX_JOURNEY_PAGES = 60;
+  var MAX_JOURNEY_PATH = 512;
+  var MAX_JOURNEY_TITLE = 200;
+  var MAX_JOURNEY_CAMPAIGN = 120;
+  // maxPageSeconds. Four hours on one page is already a broken clock.
+  var MAX_PAGE_SECONDS = 4 * 60 * 60;
+  // No single accrual may add more than two flush intervals. Time is counted in
+  // steps between events while the tab is visible and focused, and a step far
+  // larger than the timer that produced it is a laptop that slept with the tab
+  // still open, not somebody reading.
+  var MAX_ENGAGED_STEP_MS = 2 * JOURNEY_FLUSH_MS;
+  // Analytics may never become a retry storm on somebody else's website. After
+  // this many consecutive failures the tracker stops for good.
+  var MAX_JOURNEY_FAILURES = 5;
   var DEFAULT_ACCENT = '#4F46E5';
   // The palette the widget painted with before themes existed. It is the only
   // colour table in this file: every other colour arrives already resolved from
@@ -621,6 +646,137 @@
     return new WidgetError('stream_error', 'The response was interrupted. Please try again.', 0);
   }
 
+  // ---- what the visitor's journey is made of ----
+  //
+  // These four are pure functions of the browser's own state so that the rules
+  // they encode -- which are the part a customer reads on a lead -- can be
+  // tested without mounting anything.
+
+  function decodeQueryValue(value) {
+    var text = String(value).replace(/\+/g, ' ');
+    try {
+      return decodeURIComponent(text);
+    } catch (_error) {
+      // A malformed percent escape is somebody else's URL, not a reason to stop.
+      return text;
+    }
+  }
+
+  // The campaign parameters, and whether an ad click carried the visitor here.
+  // The click id itself is deliberately never copied into the result: that the
+  // visit came from a Google or Meta ad is the useful part, and the id names one
+  // click by one person, so it stays in the address bar it arrived in.
+  function campaignParameters(search) {
+    var found = {
+      utm_source: '',
+      utm_medium: '',
+      utm_campaign: '',
+      utm_term: '',
+      utm_content: '',
+      google_click: false,
+      meta_click: false
+    };
+    var query = typeof search === 'string' ? search.replace(/^[?]/, '') : '';
+    if (!query) return found;
+    query.split('&').forEach(function (pair) {
+      if (!pair) return;
+      var separator = pair.indexOf('=');
+      var name = decodeQueryValue(separator === -1 ? pair : pair.slice(0, separator))
+        .trim().toLowerCase();
+      var value = separator === -1 ? '' : decodeQueryValue(pair.slice(separator + 1));
+      var present = value.trim() !== '';
+      if (name === 'gclid') {
+        found.google_click = found.google_click || present;
+        return;
+      }
+      if (name === 'fbclid') {
+        found.meta_click = found.meta_click || present;
+        return;
+      }
+      // Only the five campaign names are read, and only the first occurrence of
+      // each, so a duplicated parameter cannot rewrite one that already landed.
+      if (name.indexOf('utm_') !== 0) return;
+      if (!Object.prototype.hasOwnProperty.call(found, name)) return;
+      if (!found[name]) found[name] = asText(value, '', MAX_JOURNEY_CAMPAIGN);
+    });
+    return found;
+  }
+
+  // The path, and nothing after it. A customer's own URLs can carry an order id,
+  // a token in a reset link or an address in a tracking parameter, and none of
+  // that belongs on a lead record. The server strips query strings as well; this
+  // is here so the widget never sends one in the first place.
+  function journeyPath(location) {
+    var path = '';
+    if (location && typeof location.href === 'string') {
+      try {
+        path = new URL(location.href).pathname || '';
+      } catch (_error) {
+        path = '';
+      }
+    }
+    if (!path && location && typeof location.pathname === 'string') path = location.pathname;
+    var cut = path.search(/[?#]/);
+    if (cut !== -1) path = path.slice(0, cut);
+    if (!path) path = '/';
+    if (path.charAt(0) !== '/') path = '/' + path;
+    return path.slice(0, MAX_JOURNEY_PATH);
+  }
+
+  function journeyQuery(location) {
+    if (location && typeof location.href === 'string') {
+      try {
+        return new URL(location.href).search || '';
+      } catch (_error) {
+        // Fall through to whatever the location object itself exposes.
+      }
+    }
+    return location && typeof location.search === 'string' ? location.search : '';
+  }
+
+  function journeySource() {
+    var location = global.location || {};
+    var campaign = campaignParameters(journeyQuery(location));
+    var source = { landing_path: journeyPath(location) };
+    var referrer = asText(global.document && global.document.referrer, '', 2000);
+    if (referrer) source.referrer = referrer;
+    ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'].forEach(function (name) {
+      if (campaign[name]) source[name] = campaign[name];
+    });
+    // Booleans, never ids. Absent means false to the server, so only a real
+    // click is written into the batch at all.
+    if (campaign.google_click) source.google_click = true;
+    if (campaign.meta_click) source.meta_click = true;
+    return source;
+  }
+
+  // Viewport width rather than the user agent string, because the question the
+  // customer is really asking is whether the page they paid for works on a
+  // phone. The time zone stands in for a region: it costs nothing, adds no third
+  // party to the request path, and leaves no trail the way an IP lookup would.
+  function journeyDevice() {
+    var device = {};
+    var width = 0;
+    if (typeof global.innerWidth === 'number') width = global.innerWidth;
+    var root = global.document ? global.document.documentElement : null;
+    if (!width && root && typeof root.clientWidth === 'number') width = root.clientWidth;
+    width = Math.floor(width);
+    if (Number.isFinite(width) && width > 0) device.viewport_width = Math.min(width, 20000);
+    var language = asText(global.navigator && global.navigator.language, '', 32);
+    if (language) device.language = language;
+    // Intl is missing on a few old and stripped-down browsers, and resolving a
+    // time zone is the one call here that can throw.
+    try {
+      if (typeof Intl !== 'undefined' && Intl && typeof Intl.DateTimeFormat === 'function') {
+        var zone = asText(Intl.DateTimeFormat().resolvedOptions().timeZone, '', 64);
+        if (zone) device.timezone = zone;
+      }
+    } catch (_error) {
+      // A journey without a time zone is still a journey.
+    }
+    return device;
+  }
+
   function LiveAPI(config) {
     this.origin = config.apiOrigin;
     this.agentKey = config.agentKey;
@@ -765,6 +921,33 @@
     var data = isRecord(json) && isRecord(json.data) ? json.data : json;
     var messages = isRecord(data) && Array.isArray(data.messages) ? data.messages : [];
     return messages.map(normalizeMessage).filter(Boolean);
+  };
+
+  // One batch of the visitor's journey. The endpoint answers 204 and the widget
+  // reads nothing back, so the whole exchange stays small on a path that fires
+  // every fifteen seconds while somebody is on the customer's website.
+  //
+  // navigator.sendBeacon is not used, and cannot be. The session token is only
+  // accepted in the X-Garuda-Session-Token header -- see authorizeWidgetSession
+  // in backend/internal/api/widget.go, which reads that header and nothing else
+  // -- and a beacon cannot set a header, so a beacon would be answered 401. The
+  // keepalive flag below is what makes this request survive an unloading
+  // document, which is the only property of a beacon this needed.
+  LiveAPI.prototype.reportJourney = async function reportJourney(session, batch) {
+    var response = await this.request(
+      '/widget/v1/sessions/' + encodeURIComponent(session.sessionID) + '/activity',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Garuda-Session-Token': session.sessionToken
+        },
+        body: JSON.stringify(batch),
+        keepalive: true
+      }
+    );
+    if (!response.ok) throw await safeErrorFromResponse(response);
+    return true;
   };
 
   LiveAPI.prototype.captureLead = async function captureLead(session, request) {
@@ -1023,6 +1206,13 @@
     return [];
   };
 
+  // The demo runs on Garuda's own marketing page and has no customer to report
+  // a journey to. Nothing is collected there at all; this exists so the code
+  // path is the same shape in both modes.
+  DemoAPI.prototype.reportJourney = async function reportJourney() {
+    return true;
+  };
+
   DemoAPI.prototype.startHandoff = async function startHandoff() {
     throw new WidgetError('handoff_unavailable', 'Human handoff is not available in the demo.', 404);
   };
@@ -1089,6 +1279,10 @@
     normalizeLeadSpec: normalizeLeadSpec,
     normalizeSessionPayload: normalizeSessionPayload,
     createSSEParser: createSSEParser,
+    campaignParameters: campaignParameters,
+    journeyPath: journeyPath,
+    journeySource: journeySource,
+    journeyDevice: journeyDevice,
     storageKey: storageKey,
     clearVisitorMemory: clearVisitorMemory,
     contrastText: contrastText,
@@ -1202,6 +1396,9 @@
     this.handoffOffered = false;
     this.pollTimer = null;
     this.polling = false;
+    // Tracking is off until mount starts it, and null again the moment anything
+    // about it fails. Nothing else in the widget depends on it existing.
+    this.journey = null;
     this.memoryConsent = this.resolveInitialConsent();
     this.requiresConsent = this.memoryConsent === null;
   }
@@ -1230,6 +1427,10 @@
     var append = function () {
       if (!global.document.body) return;
       self.createUI();
+      // Tracking begins with the page, not with the panel: the pages somebody
+      // read before they decided to talk are the ones that explain the lead.
+      // Nothing is sent until there is a session to attach it to.
+      self.startJourney();
       self.agentPromise = self.loadAgent();
       if (!self.requiresConsent) {
         self.agentPromise.then(function () {
@@ -1733,6 +1934,336 @@
     }
   };
 
+  // ---- the visitor's journey ----
+  //
+  // Where they came from, which pages they read, and how long they actually
+  // spent. All of it lives in one object hanging off the widget, so a failure
+  // anywhere in here is answered by dropping that object: a widget with no
+  // journey state reports nothing, and the customer's website never learns that
+  // anything went wrong.
+  //
+  // CONSENT. There is exactly one consent rule in this file and the journey
+  // follows it rather than inventing a second one. ensureSession refuses to open
+  // a session while requiresConsent is true, so a visitor still looking at the
+  // consent card -- or one who never answers it -- has no session, and
+  // journeyAllowed below reports nothing without one. The journey is stored on
+  // the session record, so it lives exactly as long as the conversation the
+  // visitor already agreed to have.
+
+  GarudaWidget.prototype.startJourney = function startJourney() {
+    var self = this;
+    // The demo has nobody to report to, and a second tracker on the same page
+    // would double every number on it.
+    if (this.journey || this.config.mode === 'demo') return;
+    try {
+      var doc = global.document;
+      var state = {
+        pages: [],
+        source: journeySource(),
+        device: journeyDevice(),
+        sourceSent: false,
+        sessionID: '',
+        visible: !(doc && doc.hidden === true),
+        focused: true,
+        engagedSince: 0,
+        timer: null,
+        sending: false,
+        failures: 0,
+        listeners: [],
+        patches: []
+      };
+      if (doc && typeof doc.hasFocus === 'function') {
+        state.focused = doc.hasFocus() === true;
+      }
+      this.journey = state;
+      this.journeyOpenPage(
+        journeyPath(global.location || {}),
+        asText(doc && doc.title, '', MAX_JOURNEY_TITLE)
+      );
+      this.journeyAccrue();
+      this.watchJourney();
+      if (global.setInterval) {
+        state.timer = global.setInterval(function () { self.journeyTick(); }, JOURNEY_FLUSH_MS);
+      }
+    } catch (_error) {
+      // Analytics is never worth a broken page. Tracking simply does not run.
+      this.journey = null;
+    }
+  };
+
+  GarudaWidget.prototype.stopJourney = function stopJourney() {
+    var state = this.journey;
+    if (!state) return;
+    this.journey = null;
+    try {
+      if (state.timer && global.clearInterval) global.clearInterval(state.timer);
+      state.timer = null;
+      state.listeners.forEach(function (entry) {
+        if (entry.target && typeof entry.target.removeEventListener === 'function') {
+          entry.target.removeEventListener(entry.type, entry.handler);
+        }
+      });
+      state.patches.forEach(function (patch) {
+        // Only what is still ours is unwrapped. A host page that wrapped history
+        // on top of this keeps its wrapper instead of having it silently
+        // removed, which would break its routing rather than ours.
+        if (global.history && global.history[patch.name] === patch.patched) {
+          global.history[patch.name] = patch.original;
+        }
+      });
+    } catch (_error) {
+      // Teardown is best effort; tracking is already off either way.
+    }
+  };
+
+  // Engaged time, not wall clock time. A tab is counted only while the document
+  // is visible AND the window has focus, which is why a tab left open overnight
+  // behind another window adds nothing at all.
+  GarudaWidget.prototype.journeyEngaged = function journeyEngaged() {
+    var state = this.journey;
+    return Boolean(state && state.visible && state.focused);
+  };
+
+  // Closes off the period that just ended and opens the next one. Callers change
+  // visible or focused FIRST and then call this, because the period being closed
+  // belongs to the state the tab was in until this moment.
+  GarudaWidget.prototype.journeyAccrue = function journeyAccrue() {
+    var state = this.journey;
+    if (!state) return;
+    var current = state.pages[state.pages.length - 1];
+    var now = Date.now();
+    if (state.engagedSince > 0 && current) {
+      var elapsed = now - state.engagedSince;
+      // A clock that moved backwards adds nothing, and a step far larger than
+      // the timer that should have produced it is a machine that was asleep.
+      if (elapsed > 0) current.millis += Math.min(elapsed, MAX_ENGAGED_STEP_MS);
+    }
+    state.engagedSince = this.journeyEngaged() ? now : 0;
+  };
+
+  GarudaWidget.prototype.journeyOpenPage = function journeyOpenPage(path, title) {
+    var state = this.journey;
+    if (!state) return;
+    state.pages.push({
+      path: path,
+      title: asText(title, '', MAX_JOURNEY_TITLE),
+      millis: 0,
+      reportedSeconds: -1,
+      reportedTitle: null
+    });
+    // The oldest entries have already been reported, and the server keeps its
+    // own fifty. Dropping the front is what stops this array from growing for
+    // the rest of a very long visit.
+    while (state.pages.length > MAX_JOURNEY_PAGES) state.pages.shift();
+  };
+
+  // A router changes the URL first and sets the document title afterwards, so
+  // the title of the page being read is taken again on every tick rather than
+  // once at navigation. The server only fills a title it does not already have,
+  // so a page first reported without one still gets it on the next batch.
+  GarudaWidget.prototype.journeyRefreshTitle = function journeyRefreshTitle() {
+    var state = this.journey;
+    var current = state && state.pages[state.pages.length - 1];
+    if (!current) return;
+    var title = asText(global.document && global.document.title, '', MAX_JOURNEY_TITLE);
+    if (title) current.title = title;
+  };
+
+  GarudaWidget.prototype.journeyNavigated = function journeyNavigated() {
+    var state = this.journey;
+    if (!state) return;
+    var path = journeyPath(global.location || {});
+    var current = state.pages[state.pages.length - 1];
+    // A router that rewrites the query string on every filter change is still on
+    // the same page. The server strips query strings too, so an entry for it
+    // would merge straight back into the one already there and say nothing.
+    if (current && current.path === path) return;
+    this.journeyAccrue();
+    this.journeyRefreshTitle();
+    // The new page starts without a title on purpose: at this moment the
+    // document still carries the title of the page just left.
+    this.journeyOpenPage(path, '');
+  };
+
+  GarudaWidget.prototype.watchJourney = function watchJourney() {
+    var self = this;
+    var state = this.journey;
+    var doc = global.document;
+    // Every listener is passive and every handler is wrapped. This code runs
+    // inside somebody else's page, where an exception thrown from an event
+    // handler is their bug report, and a listener that could block scrolling
+    // would be their slow page.
+    function listen(target, type, handler) {
+      if (!target || typeof target.addEventListener !== 'function') return;
+      var wrapped = function (event) {
+        try {
+          handler(event);
+        } catch (_error) {
+          // A tracking failure is never visible to the visitor.
+        }
+      };
+      target.addEventListener(type, wrapped, { passive: true });
+      state.listeners.push({ target: target, type: type, handler: wrapped });
+    }
+
+    listen(doc, 'visibilitychange', function () {
+      var visible = doc.hidden !== true;
+      if (visible === state.visible) return;
+      state.visible = visible;
+      self.journeyAccrue();
+      // Hidden is the last reliable moment on mobile, where a tab is very often
+      // never unloaded in a way the page gets to see.
+      if (!visible) self.flushJourney();
+    });
+    listen(global, 'blur', function () {
+      if (!state.focused) return;
+      state.focused = false;
+      self.journeyAccrue();
+    });
+    listen(global, 'focus', function () {
+      if (state.focused) return;
+      state.focused = true;
+      self.journeyAccrue();
+    });
+    listen(global, 'pagehide', function (event) {
+      self.journeyAccrue();
+      self.flushJourney();
+      // A persisted pagehide is the back/forward cache, and the page can come
+      // back. Anything else is the document going away for good.
+      if (!event || event.persisted !== true) self.stopJourney();
+    });
+    listen(global, 'popstate', function () { self.journeyNavigated(); });
+    this.patchJourneyHistory();
+  };
+
+  // Most customer websites are single page applications, where a navigation is a
+  // history call and no document ever loads. The two methods are wrapped rather
+  // than replaced: the original is called first with the arguments it was given,
+  // its return value is handed back untouched, and everything this widget does
+  // afterwards sits in a try/catch, so the host page's own routing behaves
+  // exactly as it did before the widget was on the page.
+  GarudaWidget.prototype.patchJourneyHistory = function patchJourneyHistory() {
+    var self = this;
+    var state = this.journey;
+    var history = global.history;
+    if (!history) return;
+    ['pushState', 'replaceState'].forEach(function (name) {
+      var original = history[name];
+      if (typeof original !== 'function') return;
+      var patched = function () {
+        var result = original.apply(this, arguments);
+        try {
+          self.journeyNavigated();
+        } catch (_error) {
+          // The host's navigation has already happened and is unaffected.
+        }
+        return result;
+      };
+      history[name] = patched;
+      state.patches.push({ name: name, original: original, patched: patched });
+    });
+  };
+
+  GarudaWidget.prototype.journeyTick = function journeyTick() {
+    try {
+      this.journeyAccrue();
+      this.journeyRefreshTitle();
+      this.flushJourney();
+    } catch (_error) {
+      // A tracking failure must never reach the customer's page.
+    }
+  };
+
+  GarudaWidget.prototype.journeyAllowed = function journeyAllowed() {
+    return Boolean(
+      this.journey &&
+      !this.requiresConsent &&
+      this.session &&
+      this.session.sessionID
+    );
+  };
+
+  // One batch, or null when there is nothing to say. Returning null is the whole
+  // of the cost discipline: a visitor sitting still on one page, and a tab left
+  // open overnight, both produce no request at all.
+  GarudaWidget.prototype.journeyBatch = function journeyBatch() {
+    var state = this.journey;
+    // A session the widget had to open again -- a restart, or a refresh after an
+    // expiry -- starts with an empty journey on the server, so the whole visit is
+    // offered to it rather than half of it going missing.
+    if (state.sessionID !== this.session.sessionID) {
+      state.sessionID = this.session.sessionID;
+      state.sourceSent = false;
+      state.pages.forEach(function (page) {
+        page.reportedSeconds = -1;
+        page.reportedTitle = null;
+      });
+    }
+    var pages = [];
+    var pending = [];
+    for (var index = 0; index < state.pages.length && pages.length < MAX_JOURNEY_BATCH; index += 1) {
+      var page = state.pages[index];
+      var seconds = Math.min(Math.floor(page.millis / 1000), MAX_PAGE_SECONDS);
+      if (page.reportedSeconds === seconds && page.reportedTitle === page.title) continue;
+      var entry = { path: page.path };
+      if (page.title) entry.title = page.title;
+      if (seconds > 0) entry.seconds = seconds;
+      pages.push(entry);
+      pending.push({ page: page, seconds: seconds, title: page.title });
+    }
+    var body = {};
+    // Source and device travel once, on the first batch this session accepts.
+    // Later batches leave them out so an internal navigation can never overwrite
+    // the referrer that brought the visitor to the site.
+    if (!state.sourceSent) {
+      body.source = state.source;
+      body.device = state.device;
+    }
+    if (pages.length) body.pages = pages;
+    if (!body.source && !body.pages) return null;
+    return { body: body, pending: pending };
+  };
+
+  GarudaWidget.prototype.flushJourney = function flushJourney() {
+    var self = this;
+    var state = this.journey;
+    // One batch at a time. Two in flight could append the same page twice on the
+    // server, because a page only merges in place when it is the last one stored.
+    if (!state || state.sending || !this.journeyAllowed()) return;
+    var session = this.session;
+    var batch = null;
+    var request = null;
+    try {
+      batch = this.journeyBatch();
+      if (!batch) return;
+      state.sending = true;
+      // Called here rather than inside a promise so the keepalive fetch is
+      // already issued by the time this returns: on pagehide there may be no
+      // later turn of the event loop to issue it in.
+      request = this.api.reportJourney(session, batch.body);
+    } catch (_error) {
+      // Building or issuing a batch is not allowed to reach the host page.
+      state.sending = false;
+      return;
+    }
+    Promise.resolve(request).then(function () {
+      state.failures = 0;
+      state.sourceSent = true;
+      batch.pending.forEach(function (item) {
+        item.page.reportedSeconds = item.seconds;
+        item.page.reportedTitle = item.title;
+      });
+    }, function () {
+      // A failed report is silent, and a visitor never sees an error because
+      // analytics did not land. Nothing was marked as delivered, so the next
+      // batch carries it again -- but only so many times.
+      state.failures += 1;
+      if (state.failures >= MAX_JOURNEY_FAILURES) self.stopJourney();
+    }).then(function () {
+      state.sending = false;
+    });
+  };
+
   GarudaWidget.prototype.handlePanelKeys = function handlePanelKeys(event) {
     if (event.key !== 'Escape') return;
     event.preventDefault();
@@ -1839,6 +2370,9 @@
         }
       }
       self.hydrateConversation(session.conversation);
+      // The visit so far belongs to this session, so it is offered the moment
+      // there is one to offer it to.
+      self.flushJourney();
       self.nodes.textarea.disabled = false;
       self.resizeInput();
       self.setStatus(self.config.mode === 'demo' ? 'Demo · Online' : 'Online', 'online');

@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import { MetaPixel } from "@/components/analytics/meta-pixel";
 import {
   SITE_DESCRIPTION,
   SITE_NAME,
@@ -78,6 +79,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
       <body>
         {children}
         <script {...jsonLdScriptProps([organizationJsonLd(), softwareApplicationJsonLd(siteFeatureList)])} />
+        <MetaPixel />
       </body>
     </html>
   );

@@ -36,6 +36,9 @@ export type Lead = {
   status: "New" | "Qualified" | "Contacted" | "Meeting booked" | "Customer";
   source: string;
   captured: string;
+  // The conversation this lead came out of, when there is one. Absent for a lead
+  // somebody typed in by hand, which is why it is optional rather than empty.
+  sessionId?: string;
 };
 
 export const agents: Agent[] = [

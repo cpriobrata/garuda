@@ -538,43 +538,117 @@ function dispatch(node, type, extra) {
   return Promise.all(handlers.map((handler) => handler.call(node, event)));
 }
 
+// The journey tracker listens on the window and the document, reads the page's
+// size and language, and wraps the host page's history. The stub below records
+// what it registers so a test can fire those events, and hands back the host's
+// own history functions so a test can prove they survived the wrapping.
+function listenerRegistry() {
+  const listeners = new Map();
+  return {
+    listeners,
+    addEventListener(type, handler) {
+      if (!listeners.has(type)) listeners.set(type, []);
+      listeners.get(type).push(handler);
+    },
+    removeEventListener(type, handler) {
+      listeners.set(type, (listeners.get(type) || []).filter((candidate) => candidate !== handler));
+    },
+    fire(type, extra) {
+      const handlers = (listeners.get(type) || []).slice();
+      return Promise.all(handlers.map((handler) => handler(Object.assign({ type }, extra || {}))));
+    }
+  };
+}
+
 function installFakeBrowser(fetchStub) {
   const saved = {
     document: global.document,
     hadDocument: 'document' in global,
     fetch: global.fetch,
     addEventListener: global.addEventListener,
+    removeEventListener: global.removeEventListener,
     requestAnimationFrame: global.requestAnimationFrame,
     location: global.location,
-    hadLocation: 'location' in global
+    hadLocation: 'location' in global,
+    history: global.history,
+    hadHistory: 'history' in global,
+    innerWidth: global.innerWidth,
+    hadInnerWidth: 'innerWidth' in global,
+    // navigator is a getter on globalThis in modern Node, so it is swapped by
+    // descriptor rather than by assignment.
+    navigator: Object.getOwnPropertyDescriptor(global, 'navigator')
   };
+  const documentEvents = listenerRegistry();
+  const windowEvents = listenerRegistry();
   const documentStub = {
     title: 'Customer page',
     referrer: '',
+    hidden: false,
+    documentElement: { clientWidth: 1280 },
     createElement: (tagName) => createNode(tagName),
     createElementNS: (namespace, tagName) => createNode(tagName, namespace),
-    addEventListener() {},
+    addEventListener: documentEvents.addEventListener,
+    removeEventListener: documentEvents.removeEventListener,
+    hasFocus: () => true,
     querySelectorAll() { return []; },
     currentScript: null
   };
   documentStub.body = createNode('body');
   global.document = documentStub;
-  global.addEventListener = () => {};
+  global.addEventListener = windowEvents.addEventListener;
+  global.removeEventListener = windowEvents.removeEventListener;
   global.requestAnimationFrame = () => 0;
   global.location = { href: 'https://customer.example/pricing' };
+  global.innerWidth = 1280;
+  // The customer's own history, which has to keep working exactly as it did.
+  const historyCalls = [];
+  const nativeHistory = {
+    pushState(...args) { historyCalls.push(['pushState', ...args]); return 'host-pushed'; },
+    replaceState(...args) { historyCalls.push(['replaceState', ...args]); return 'host-replaced'; }
+  };
+  global.history = { pushState: nativeHistory.pushState, replaceState: nativeHistory.replaceState };
+  Object.defineProperty(global, 'navigator', {
+    value: { language: 'en-GB' },
+    configurable: true,
+    writable: true
+  });
   if (fetchStub) global.fetch = fetchStub;
   return {
     document: documentStub,
+    nativeHistory,
+    historyCalls,
+    fireWindow: windowEvents.fire,
+    fireDocument: documentEvents.fire,
+    windowListeners: windowEvents.listeners,
+    documentListeners: documentEvents.listeners,
     restore() {
       if (saved.hadDocument) global.document = saved.document;
       else delete global.document;
       if (saved.hadLocation) global.location = saved.location;
       else delete global.location;
+      if (saved.hadHistory) global.history = saved.history;
+      else delete global.history;
+      if (saved.hadInnerWidth) global.innerWidth = saved.innerWidth;
+      else delete global.innerWidth;
+      if (saved.navigator) Object.defineProperty(global, 'navigator', saved.navigator);
+      else delete global.navigator;
       global.fetch = saved.fetch;
       global.addEventListener = saved.addEventListener;
+      global.removeEventListener = saved.removeEventListener;
       global.requestAnimationFrame = saved.requestAnimationFrame;
     }
   };
+}
+
+// Lets every pending microtask run, which is all a reported batch needs: the
+// keepalive fetch is issued synchronously and only the bookkeeping that follows
+// it is deferred.
+function settle() {
+  return new Promise((resolve) => { setImmediate(resolve); });
+}
+
+function noContent() {
+  return new Response(null, { status: 204 });
 }
 
 // Mounts one widget against the stub DOM and hands it the bootstrap payload the
@@ -603,7 +677,7 @@ function renderWidget(payload, options) {
   // An open panel holds a polling interval, and a live interval keeps the test
   // runner from ever exiting. Teardown stops it whether the test opened the
   // panel or not.
-  const restore = () => { instance.stopPolling(); browser.restore(); };
+  const restore = () => { instance.stopPolling(); instance.stopJourney(); browser.restore(); };
   return { instance, nodes: instance.nodes, browser, restore };
 }
 
@@ -1354,6 +1428,338 @@ test('a failed restart keeps the visitor where they were', async () => {
     assert.equal(rendered.instance.messages[0].content, 'still here');
     assert.match(rendered.instance.messages[rendered.instance.messages.length - 1].content, /could not start a new conversation/i);
     assert.equal(rendered.nodes.restart.disabled, false);
+  } finally {
+    rendered.restore();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The visitor's journey.
+//
+// Where a lead came from, which pages they read, and how long they actually
+// spent on them. The last of those is the number a customer will either trust
+// or dismiss, so the tests below pin down what is and is not counted.
+// ---------------------------------------------------------------------------
+
+test('campaign parameters are read, and an ad click is reported as a boolean rather than an id', () => {
+  const parsed = widget.campaignParameters(
+    '?utm_source=Google%20Ads&utm_medium=cpc&utm_campaign=spring+sale' +
+    '&utm_term=crm+for+builders&utm_content=variant_b' +
+    '&gclid=Cj0KCQjwSECRETCLICK&fbclid=IwAR1SECRETMETA&order=A-1029&email=someone%40example.com'
+  );
+
+  assert.equal(parsed.utm_source, 'Google Ads');
+  assert.equal(parsed.utm_medium, 'cpc');
+  assert.equal(parsed.utm_campaign, 'spring sale');
+  assert.equal(parsed.utm_term, 'crm for builders');
+  assert.equal(parsed.utm_content, 'variant_b');
+  assert.equal(parsed.google_click, true);
+  assert.equal(parsed.meta_click, true);
+  assert.doesNotMatch(
+    JSON.stringify(parsed),
+    /SECRET|A-1029|someone@example\.com/,
+    'a click id names one click by one person, and the rest of the query is the customer own business'
+  );
+
+  const empty = widget.campaignParameters('?gclid=&fbclid=&utm_source=');
+  assert.equal(empty.google_click, false, 'an empty gclid= is not a click');
+  assert.equal(empty.meta_click, false);
+  assert.equal(empty.utm_source, '');
+
+  const first = widget.campaignParameters('?utm_source=first&utm_source=second');
+  assert.equal(first.utm_source, 'first', 'a repeated parameter cannot rewrite the one that landed');
+  assert.deepEqual(widget.campaignParameters(''), widget.campaignParameters(undefined));
+
+  // The path is kept and everything after it is dropped, here as well as on the
+  // server, because a customer's own URLs can carry anything.
+  assert.equal(widget.journeyPath({ href: 'https://shop.example/orders/9?token=abc#top' }), '/orders/9');
+  assert.equal(widget.journeyPath({ href: 'https://shop.example' }), '/');
+  assert.equal(widget.journeyPath({ pathname: 'plans?tier=team' }), '/plans');
+  assert.equal(widget.journeyPath({}), '/');
+});
+
+test('the first batch reports the source and the device once, with the session token in a header', async () => {
+  const calls = [];
+  const rendered = renderWidget({ display_name: 'Nova' }, {
+    fetch: async (url, options) => {
+      calls.push({ url, options, body: JSON.parse(options.body) });
+      return noContent();
+    }
+  });
+  try {
+    global.location = {
+      href: 'https://customer.example/pricing?utm_source=newsletter&utm_medium=email&gclid=Cj0SECRETCLICK'
+    };
+    rendered.browser.document.referrer = 'https://mail.example/inbox';
+    rendered.instance.startJourney();
+    rendered.instance.flushJourney();
+    await settle();
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'https://api.garuda.example/widget/v1/sessions/session-1/activity');
+    assert.equal(calls[0].options.method, 'POST');
+    assert.equal(
+      calls[0].options.headers['X-Garuda-Session-Token'],
+      'short-lived-token',
+      'the activity endpoint accepts the token in this header and nowhere else'
+    );
+    assert.equal(
+      calls[0].options.keepalive,
+      true,
+      'sendBeacon cannot set that header, so the request that survives unload is a keepalive fetch'
+    );
+
+    const first = calls[0].body;
+    assert.deepEqual(Object.keys(first).sort(), ['device', 'pages', 'source']);
+    assert.deepEqual(first.source, {
+      landing_path: '/pricing',
+      referrer: 'https://mail.example/inbox',
+      utm_source: 'newsletter',
+      utm_medium: 'email',
+      google_click: true
+    });
+    assert.doesNotMatch(calls[0].options.body, /SECRETCLICK/, 'the click id itself never leaves the browser');
+    assert.deepEqual(Object.keys(first.device).sort(), ['language', 'timezone', 'viewport_width']);
+    assert.equal(first.device.viewport_width, 1280);
+    assert.equal(first.device.language, 'en-GB');
+    assert.equal(typeof first.device.timezone, 'string');
+    assert.ok(first.device.timezone.length > 0, 'the time zone stands in for a region');
+    assert.deepEqual(first.pages, [{ path: '/pricing', title: 'Customer page' }]);
+
+    // Nothing changed, so nothing is sent: the endpoint fires every fifteen
+    // seconds per open page and an empty batch would be pure cost.
+    rendered.instance.flushJourney();
+    await settle();
+    assert.equal(calls.length, 1, 'a visitor sitting still produces no request at all');
+
+    // A later batch leaves the source out, so an internal navigation can never
+    // overwrite the referrer that brought the visitor to the site.
+    global.location = { href: 'https://customer.example/contact' };
+    global.history.pushState({}, '', '/contact');
+    rendered.instance.flushJourney();
+    await settle();
+    assert.equal(calls.length, 2);
+    assert.deepEqual(Object.keys(calls[1].body), ['pages']);
+    assert.equal(calls[1].body.pages[0].path, '/contact');
+  } finally {
+    rendered.restore();
+  }
+});
+
+test('engaged time counts only a visible, focused tab, so a tab left open overnight adds nothing', async () => {
+  const realNow = Date.now;
+  let clock = 1767225600000;
+  Date.now = () => clock;
+  const batches = [];
+  const rendered = renderWidget({ display_name: 'Nova' }, {
+    fetch: async (_url, options) => {
+      batches.push(JSON.parse(options.body));
+      return noContent();
+    }
+  });
+  const seconds = () => batches[batches.length - 1].pages[0].seconds;
+  try {
+    rendered.instance.startJourney();
+
+    clock += 12000;
+    rendered.instance.journeyTick();
+    await settle();
+    assert.equal(seconds(), 12, 'twelve seconds of reading is twelve seconds');
+
+    // The visitor switches to another tab and leaves it there overnight.
+    rendered.browser.document.hidden = true;
+    await rendered.browser.fireDocument('visibilitychange');
+    await settle();
+    const atHide = batches.length;
+    clock += 8 * 60 * 60 * 1000;
+    rendered.instance.journeyTick();
+    await settle();
+    assert.equal(batches.length, atHide, 'a hidden tab has nothing to report, so it reports nothing');
+
+    rendered.browser.document.hidden = false;
+    await rendered.browser.fireDocument('visibilitychange');
+    clock += 9000;
+    rendered.instance.journeyTick();
+    await settle();
+    assert.equal(seconds(), 21, 'the night added nothing to the number the customer reads');
+
+    // The window loses focus to another application while the tab stays visible.
+    await rendered.browser.fireWindow('blur');
+    clock += 60 * 60 * 1000;
+    await rendered.browser.fireWindow('focus');
+    clock += 4000;
+    rendered.instance.journeyTick();
+    await settle();
+    assert.equal(seconds(), 25, 'an hour spent in another window is not time spent reading');
+
+    // A machine that slept with the tab focused cannot report the sleep either:
+    // no single step may add more than the interval that should have produced it.
+    clock += 8 * 60 * 60 * 1000;
+    rendered.instance.journeyTick();
+    await settle();
+    assert.equal(seconds(), 55, 'one step is capped at two flush intervals');
+  } finally {
+    Date.now = realNow;
+    rendered.restore();
+  }
+});
+
+test('a single page application navigation is a new page, and the host keeps its own history', async () => {
+  const rendered = renderWidget({ display_name: 'Nova' });
+  const paths = () => rendered.instance.journey.pages.map((page) => page.path);
+  try {
+    rendered.instance.startJourney();
+    assert.notEqual(
+      global.history.pushState,
+      rendered.browser.nativeHistory.pushState,
+      'history is wrapped so a route change registers'
+    );
+
+    global.location = { href: 'https://customer.example/plans/pro' };
+    const returned = global.history.pushState({ route: 'pro' }, '', '/plans/pro');
+
+    assert.equal(returned, 'host-pushed', 'the wrapper hands back what the host page own function returned');
+    assert.deepEqual(
+      rendered.browser.historyCalls,
+      [['pushState', { route: 'pro' }, '', '/plans/pro']],
+      'the original is called through with the arguments it was given'
+    );
+    assert.deepEqual(paths(), ['/pricing', '/plans/pro'], 'the route change is a new page');
+
+    // A router that rewrites the query string on every filter change is still on
+    // the same page, and the server strips query strings anyway.
+    global.location = { href: 'https://customer.example/plans/pro?tier=team' };
+    global.history.replaceState({}, '', '/plans/pro?tier=team');
+    assert.deepEqual(paths(), ['/pricing', '/plans/pro']);
+    assert.equal(rendered.browser.historyCalls.length, 2, 'the host still ran its own replaceState');
+
+    global.location = { href: 'https://customer.example/pricing' };
+    await rendered.browser.fireWindow('popstate');
+    assert.deepEqual(
+      paths(),
+      ['/pricing', '/plans/pro', '/pricing'],
+      'going back is a visit of its own, and the order is the story'
+    );
+
+    rendered.instance.stopJourney();
+    assert.equal(
+      global.history.pushState,
+      rendered.browser.nativeHistory.pushState,
+      'the patch is reversible and the host page is left as it was found'
+    );
+    assert.equal(global.history.replaceState, rendered.browser.nativeHistory.replaceState);
+  } finally {
+    rendered.restore();
+  }
+});
+
+test('a batch never carries more pages than the server accepts, and the rest follow in order', async () => {
+  const batches = [];
+  const rendered = renderWidget({ display_name: 'Nova' }, {
+    fetch: async (_url, options) => {
+      batches.push(JSON.parse(options.body));
+      return noContent();
+    }
+  });
+  try {
+    rendered.instance.startJourney();
+    for (let index = 0; index < 25; index += 1) {
+      global.location = { href: 'https://customer.example/page-' + index };
+      global.history.pushState({}, '', '/page-' + index);
+    }
+    assert.equal(rendered.instance.journey.pages.length, 26);
+
+    rendered.instance.flushJourney();
+    await settle();
+    assert.equal(batches[0].pages.length, 20, 'maxJourneyBatch in journey.go refuses anything larger');
+    assert.equal(batches[0].pages[0].path, '/pricing');
+    assert.equal(batches[0].pages[19].path, '/page-18');
+
+    rendered.instance.flushJourney();
+    await settle();
+    assert.deepEqual(
+      batches[1].pages.map((page) => page.path),
+      ['/page-19', '/page-20', '/page-21', '/page-22', '/page-23', '/page-24'],
+      'the overflow follows in the order it was read'
+    );
+
+    rendered.instance.flushJourney();
+    await settle();
+    assert.equal(batches.length, 2, 'once everything has landed there is nothing left to send');
+  } finally {
+    rendered.restore();
+  }
+});
+
+test('no journey is reported until the visitor has a session, and none at all while consent is pending', async () => {
+  const calls = [];
+  const rendered = renderWidget({ display_name: 'Nova' }, {
+    session: null,
+    fetch: async (_url, options) => {
+      calls.push(JSON.parse(options.body));
+      return noContent();
+    }
+  });
+  try {
+    rendered.instance.startJourney();
+    rendered.instance.flushJourney();
+    await settle();
+    assert.equal(calls.length, 0, 'there is nowhere to report a journey without a session');
+
+    // The same gate ensureSession uses: while the consent card is on screen the
+    // widget has not been told it may open a session, so nothing is reported.
+    rendered.instance.requiresConsent = true;
+    rendered.instance.session = { sessionID: 'session-1', sessionToken: 'short-lived-token' };
+    rendered.instance.flushJourney();
+    await settle();
+    assert.equal(calls.length, 0, 'a visitor still looking at the consent card is not reported');
+
+    rendered.instance.requiresConsent = false;
+    rendered.instance.flushJourney();
+    await settle();
+    assert.equal(calls.length, 1, 'the visit is reported once the visitor has a session');
+    // The pages read before the widget had a session are still in the batch, so
+    // a visitor who browsed and then opened the chat arrives with their journey.
+    assert.equal(calls[0].pages[0].path, '/pricing');
+    assert.equal(calls[0].source.landing_path, '/pricing');
+  } finally {
+    rendered.restore();
+  }
+});
+
+test('a failed report is silent, retried, and eventually gives up rather than becoming a retry storm', async () => {
+  let failing = true;
+  const attempts = [];
+  const rendered = renderWidget({ display_name: 'Nova' }, {
+    fetch: async (_url, options) => {
+      attempts.push(JSON.parse(options.body));
+      if (failing) throw new Error('offline');
+      return noContent();
+    }
+  });
+  try {
+    rendered.instance.startJourney();
+    rendered.instance.flushJourney();
+    await settle();
+    assert.equal(attempts.length, 1);
+    assert.equal(rendered.instance.journey.sourceSent, false, 'nothing is marked delivered when it was not');
+
+    failing = false;
+    rendered.instance.flushJourney();
+    await settle();
+    assert.equal(attempts.length, 2);
+    assert.deepEqual(attempts[1], attempts[0], 'the batch that failed is simply offered again');
+    assert.equal(rendered.instance.journey.sourceSent, true);
+
+    failing = true;
+    for (let index = 0; index < 6; index += 1) {
+      global.location = { href: 'https://customer.example/step-' + index };
+      global.history.pushState({}, '', '/step-' + index);
+      rendered.instance.flushJourney();
+      await settle();
+    }
+    assert.equal(rendered.instance.journey, null, 'tracking stops rather than retrying forever on a broken network');
+    assert.equal(attempts.length, 7, 'and it stops making requests once it has stopped');
   } finally {
     rendered.restore();
   }

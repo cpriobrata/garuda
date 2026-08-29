@@ -3,6 +3,7 @@ package meta
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -60,7 +61,27 @@ func (rec *recorder) count() int {
 	return len(rec.bodies)
 }
 
-func (rec *recorder) lastEventIDs(t *testing.T) []string {
+// sentEvent is one event as it appeared on the wire.
+type sentEvent struct {
+	EventName      string `json:"event_name"`
+	EventTime      int64  `json:"event_time"`
+	EventID        string `json:"event_id"`
+	ActionSource   string `json:"action_source"`
+	EventSourceURL string `json:"event_source_url"`
+	UserData       struct {
+		Email     []string `json:"em"`
+		Phone     []string `json:"ph"`
+		FirstName []string `json:"fn"`
+		LastName  []string `json:"ln"`
+	} `json:"user_data"`
+	CustomData *struct {
+		Value       *float64 `json:"value"`
+		Currency    string   `json:"currency"`
+		ContentName string   `json:"content_name"`
+	} `json:"custom_data"`
+}
+
+func (rec *recorder) lastEvents(t *testing.T) []sentEvent {
 	t.Helper()
 	rec.mutex.Lock()
 	defer rec.mutex.Unlock()
@@ -68,17 +89,35 @@ func (rec *recorder) lastEventIDs(t *testing.T) []string {
 		t.Fatal("nothing was sent")
 	}
 	var payload struct {
-		Data []struct {
-			EventName      string `json:"event_name"`
-			EventID        string `json:"event_id"`
-			EventSourceURL string `json:"event_source_url"`
-		} `json:"data"`
+		Data []sentEvent `json:"data"`
 	}
 	if err := json.Unmarshal(rec.bodies[len(rec.bodies)-1], &payload); err != nil {
 		t.Fatalf("decode request: %v", err)
 	}
-	identifiers := make([]string, 0, len(payload.Data))
-	for _, event := range payload.Data {
+	return payload.Data
+}
+
+// only returns the single event of the given name in the last request, failing
+// if there is not exactly one.
+func (rec *recorder) only(t *testing.T, eventName string) sentEvent {
+	t.Helper()
+	var found []sentEvent
+	for _, event := range rec.lastEvents(t) {
+		if event.EventName == eventName {
+			found = append(found, event)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("%s events in the last request: got %d, want 1", eventName, len(found))
+	}
+	return found[0]
+}
+
+func (rec *recorder) lastEventIDs(t *testing.T) []string {
+	t.Helper()
+	events := rec.lastEvents(t)
+	identifiers := make([]string, 0, len(events))
+	for _, event := range events {
 		if event.EventName != EventNameLead {
 			t.Fatalf("event name: got %q, want %q", event.EventName, EventNameLead)
 		}
@@ -115,6 +154,85 @@ func writeSession(t *testing.T, dataStore store.Store, session model.Session) {
 	}); err != nil {
 		t.Fatalf("write session: %v", err)
 	}
+}
+
+func writeUser(t *testing.T, dataStore store.Store, user model.User) {
+	t.Helper()
+	if err := dataStore.Update(func(state *model.State) error {
+		state.Users = append(state.Users, user)
+		return nil
+	}); err != nil {
+		t.Fatalf("write user: %v", err)
+	}
+}
+
+// verifyUser performs the state transition CompleteRegistration keys on: the
+// EmailVerifiedAt stamp landing on an existing row.
+func verifyUser(t *testing.T, dataStore store.Store, userID string, at time.Time) {
+	t.Helper()
+	if err := dataStore.Update(func(state *model.State) error {
+		for index := range state.Users {
+			if state.Users[index].ID == userID {
+				verifiedAt := at
+				state.Users[index].EmailVerifiedAt = &verifiedAt
+				state.Users[index].UpdatedAt = at
+				return nil
+			}
+		}
+		return errors.New("user not found")
+	}); err != nil {
+		t.Fatalf("verify user: %v", err)
+	}
+}
+
+func writeSubscription(t *testing.T, dataStore store.Store, subscription model.Subscription) {
+	t.Helper()
+	if err := dataStore.Update(func(state *model.State) error {
+		state.Subscriptions = append(state.Subscriptions, subscription)
+		return nil
+	}); err != nil {
+		t.Fatalf("write subscription: %v", err)
+	}
+}
+
+// setSubscriptionStatus is the transition Purchase keys on, and also the
+// renewal write that must NOT be reported as a second purchase.
+func setSubscriptionStatus(t *testing.T, dataStore store.Store, subscriptionID, status string, at time.Time) {
+	t.Helper()
+	if err := dataStore.Update(func(state *model.State) error {
+		for index := range state.Subscriptions {
+			if state.Subscriptions[index].ID == subscriptionID {
+				state.Subscriptions[index].Status = status
+				state.Subscriptions[index].UpdatedAt = at
+				return nil
+			}
+		}
+		return errors.New("subscription not found")
+	}); err != nil {
+		t.Fatalf("set subscription status: %v", err)
+	}
+}
+
+// newFunnelReporter is a reporter wired the way cmd/api/main.go wires it, with
+// the plan price the config carries.
+func newFunnelReporter(t *testing.T, clock *testClock, dataStore store.Store) (*Reporter, *recorder) {
+	t.Helper()
+	provider := &recorder{}
+	server := httptest.NewServer(provider.handler())
+	t.Cleanup(server.Close)
+	reporter := NewReporter(ReporterOptions{
+		Client:            New(server.URL, "1234567890", "EAAtoken", ""),
+		Store:             dataStore,
+		Path:              filepath.Join(t.TempDir(), "meta-conversions.json"),
+		Now:               clock.Now,
+		DisableBackground: true,
+		PlanValueCents:    1700,
+		PlanCurrency:      "usd",
+		SignUpSourceURL:   "https://garuda.ravan.ai/auth/verify-email?token=secret",
+		CheckoutSourceURL: "https://garuda.ravan.ai/checkout/success?checkout=success",
+	})
+	t.Cleanup(reporter.Close)
+	return reporter, provider
 }
 
 // TestReporterSendsEachLeadExactlyOnce is the hook working end to end: a lead

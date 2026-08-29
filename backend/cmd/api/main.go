@@ -13,6 +13,7 @@ import (
 
 	"garuda/backend/internal/api"
 	"garuda/backend/internal/config"
+	"garuda/backend/internal/meta"
 	"garuda/backend/internal/store"
 )
 
@@ -40,6 +41,26 @@ func main() {
 		os.Exit(1)
 	}
 	defer dataStore.Close()
+
+	// Meta conversion reporting. It polls committed state on its own goroutine,
+	// so a slow or dead Conversions API can never reach a visitor's conversation
+	// or delay a customer's webhook. With no META_* credentials it reads nothing
+	// and writes nothing, exactly like every other adapter here.
+	//
+	// The price is passed in rather than defaulted inside the reporter: a second
+	// copy of it could silently drift from what Stripe actually charges, and a
+	// wrong number in an ad platform's optimiser is worse than no number.
+	metaReporter := meta.NewReporter(meta.ReporterOptions{
+		Client:            meta.New(cfg.MetaAPIURL, cfg.MetaPixelID, cfg.MetaConversionsToken, cfg.MetaTestEventCode),
+		Store:             dataStore,
+		Path:              meta.StatePath(cfg.DataFile),
+		Logger:            logger,
+		PlanValueCents:    cfg.PlanAmountCents,
+		PlanCurrency:      cfg.PlanCurrency,
+		SignUpSourceURL:   cfg.AuthVerifyURL,
+		CheckoutSourceURL: cfg.PublicURL,
+	})
+	defer metaReporter.Close()
 
 	service := api.New(cfg, dataStore, logger)
 	server := &http.Server{

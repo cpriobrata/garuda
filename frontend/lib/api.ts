@@ -96,6 +96,51 @@ export type AgentRecord = {
   knowledge: Array<{ id?: string; type?: string; title: string; content: string; source_url?: string; status?: string }>;
 };
 
+// The visitor journey the API hangs off a conversation: where the visitor came
+// from, every page they read before they spoke, and how long they spent on each.
+// Mirrors publicJourney in backend/internal/api/journey.go — the keys that carry
+// `omitempty` on the Go side are the ones optional here.
+export type JourneySource = {
+  // One of direct, organic, paid, social, email, referral, campaign. Derived on
+  // the server, and empty when a visit was recorded before any source batch
+  // arrived, so it is a plain string rather than a union that lies about "".
+  channel: string;
+  referrer_domain?: string;
+  landing_path?: string;
+  utm_source?: string;
+  utm_medium?: string;
+  utm_campaign?: string;
+  utm_term?: string;
+  utm_content?: string;
+  // The ad platform, never the click id itself.
+  click_id_kind?: "google" | "meta";
+};
+
+export type JourneyDevice = {
+  form?: "mobile" | "tablet" | "desktop";
+  language?: string;
+  timezone?: string;
+  // Derived from the time zone above, never from an IP lookup. Approximate by
+  // construction, which is what region_is_approximate marks.
+  region?: string;
+};
+
+export type JourneyPage = { path: string; title: string; arrived_at: string; seconds: number };
+
+export type VisitorJourney = {
+  source: JourneySource;
+  device: JourneyDevice;
+  region_is_approximate: boolean;
+  pages: JourneyPage[];
+  // Every page the visitor was seen on, including any the server dropped from
+  // `pages` — so page_count can exceed pages.length, which pages_truncated marks.
+  page_count: number;
+  pages_truncated: boolean;
+  engaged_seconds: number;
+  first_seen_at: string;
+  last_seen_at: string;
+};
+
 export type ConversationDetail = {
   conversation: {
     id: string;
@@ -108,6 +153,9 @@ export type ConversationDetail = {
     created_at: string;
     updated_at: string;
     last_seen_at: string;
+    // Absent on sessions recorded before tracking existed and on visits the
+    // widget could not report — both mean "not known", never "nothing happened".
+    journey?: VisitorJourney;
   };
   messages: Array<{ id: string; role: string; content: string; created_at: string }>;
   lead: { id: string; name?: string; email?: string; phone?: string; company?: string; status: string; source: string; notes?: string } | null;
@@ -361,6 +409,10 @@ export const garudaApi = {
         status: statusMap[String(item.status)] || "New",
         source: String(item.source || "Website widget"),
         captured: item.created_at ? new Date(String(item.created_at)).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "Recently",
+        // Carried through so the visitor journey is one request rather than two:
+        // without it the lead panel had to fetch the lead again just to learn
+        // which conversation to ask for.
+        sessionId: typeof item.session_id === "string" ? item.session_id : undefined,
       };
     });
   },

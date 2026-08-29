@@ -2,11 +2,13 @@
 
 import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ArrowUp, Bot, CheckCircle2, Globe2, Inbox, Mail, Phone, Search, Sparkles, UserRound } from "lucide-react";
+import { useDemoJourney } from "@/components/journey/demo-journey";
+import { VisitorJourney } from "@/components/journey/visitor-journey";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { apiRequest, garudaApi, type ConversationDetail } from "@/lib/api";
+import { apiRequest, garudaApi, type ConversationDetail, type VisitorJourney as JourneyData } from "@/lib/api";
 import { useBusyAction } from "@/lib/busy-action";
 import { conversations as demoConversations, type Conversation } from "@/lib/demo-data";
 import { cn } from "@/lib/utils";
@@ -59,6 +61,7 @@ export function ConversationInbox() {
   const [replyError, setReplyError] = useState("");
   const [extraMessages, setExtraMessages] = useState<DisplayMessage[]>([]);
   const sendReply = useBusyAction();
+  const demoJourney = useDemoJourney();
   const transcriptRef = useRef<HTMLDivElement>(null);
   // Read by an in-flight send to check the owner has not moved on to another
   // conversation before the response landed.
@@ -190,6 +193,13 @@ export function ConversationInbox() {
             </div>
             <div ref={transcriptRef} className="hide-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-8">
               <div className="mx-auto max-w-2xl">
+                {/* The details rail only exists from xl up. Below that the journey
+                    rides above the transcript, folded shut: it is the context for
+                    the conversation, not a competitor for its space. */}
+                {(connected ? Boolean(detail) : Boolean(demoJourney)) && <details className="mb-5 rounded-xl border bg-white p-3 shadow-sm xl:hidden">
+                  <summary className="cursor-pointer text-[10px] font-bold uppercase tracking-[.13em] text-slate-500 marker:text-slate-300">{connected ? "Visitor journey" : "Demo visitor journey"}</summary>
+                  <div className="mt-3"><VisitorJourney journey={connected ? detail?.conversation.journey : demoJourney} startedAt={connected ? detail?.conversation.created_at : undefined} /></div>
+                </details>}
                 <div className="mb-6 flex items-center gap-3"><div className="h-px flex-1 bg-slate-200" /><span className="text-[9px] font-medium text-slate-400">{detail?.conversation.created_at ? new Date(detail.conversation.created_at).toLocaleString() : connected ? "TRANSCRIPT" : "DEMO TRANSCRIPT"}</span><div className="h-px flex-1 bg-slate-200" /></div>
                 {detailError && <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-700">{detailError}</div>}
                 {connected && !detail && !detailError && <div className="rounded-xl border border-dashed bg-white p-5 text-center text-xs text-slate-500">Retrieving the persisted transcript…</div>}
@@ -205,7 +215,7 @@ export function ConversationInbox() {
         <aside className="hidden min-h-0 border-l bg-white xl:flex xl:flex-col">
           <div className="flex h-16 items-center border-b px-4"><p className="text-xs font-semibold text-slate-900">{connected ? "Conversation details" : "Demo visitor details"}</p></div>
           <div className="hide-scrollbar min-h-0 flex-1 overflow-y-auto p-4">
-            {active ? <><div className="text-center"><Avatar className="mx-auto h-12 w-12"><AvatarFallback className="bg-indigo-100 text-xs font-bold text-indigo-700">{active.initials}</AvatarFallback></Avatar><p className="mt-3 text-sm font-semibold text-slate-900">{detail?.lead?.name || active.visitor}</p>{detail?.lead?.status && <Badge variant="success" className="mt-2 capitalize">{detail.lead.status}</Badge>}</div><div className="my-5 h-px bg-slate-100" />{connected ? <ConnectedDetails detail={detail} /> : <DemoDetails />}</> : <p className="text-center text-xs text-slate-400">Select a conversation to inspect it.</p>}
+            {active ? <><div className="text-center"><Avatar className="mx-auto h-12 w-12"><AvatarFallback className="bg-indigo-100 text-xs font-bold text-indigo-700">{active.initials}</AvatarFallback></Avatar><p className="mt-3 text-sm font-semibold text-slate-900">{detail?.lead?.name || active.visitor}</p>{detail?.lead?.status && <Badge variant="success" className="mt-2 capitalize">{detail.lead.status}</Badge>}</div><div className="my-5 h-px bg-slate-100" />{connected ? <ConnectedDetails detail={detail} /> : <DemoDetails journey={demoJourney} />}</> : <p className="text-center text-xs text-slate-400">Select a conversation to inspect it.</p>}
           </div>
         </aside>
       </div>
@@ -217,13 +227,14 @@ function ConnectedDetails({ detail }: { detail: ConversationDetail | null }) {
   if (!detail) return <p className="text-xs leading-5 text-slate-500">Persisted visitor and page metadata will appear after the transcript loads.</p>;
   return <div className="space-y-1">
     {detail.lead ? <><p className="mb-3 text-[10px] font-bold uppercase tracking-[.13em] text-slate-400">Captured lead</p>{detail.lead.email && <Detail label="Email" value={detail.lead.email} icon={Mail} />}{detail.lead.phone && <Detail label="Phone" value={detail.lead.phone} icon={Phone} />}{detail.lead.company && <Detail label="Company" value={detail.lead.company} icon={UserRound} />}</> : <p className="rounded-lg bg-slate-50 p-3 text-[10px] leading-4 text-slate-500">No lead was captured in this conversation.</p>}
+    <div className="my-5 h-px bg-slate-100" /><VisitorJourney journey={detail.conversation.journey} startedAt={detail.conversation.created_at} />
     <div className="my-5 h-px bg-slate-100" /><p className="mb-3 text-[10px] font-bold uppercase tracking-[.13em] text-slate-400">Page metadata</p>
     {detail.conversation.origin && <Detail label="Origin" value={detail.conversation.origin} icon={Globe2} />}{detail.conversation.page_title && <Detail label="Page" value={detail.conversation.page_title} icon={CheckCircle2} />}{detail.conversation.locale && <Detail label="Locale" value={detail.conversation.locale} icon={Globe2} />}
   </div>;
 }
 
-function DemoDetails() {
-  return <><Detail label="Email" value="maya@northstar.example" icon={Mail} /><Detail label="Phone" value="+1 415 555 0138" icon={Phone} /><Detail label="Location" value="San Francisco, CA" icon={Globe2} /><div className="my-5 h-px bg-slate-100" /><p className="text-[10px] font-bold uppercase tracking-[.13em] text-slate-400">Demo AI summary</p><p className="mt-3 text-[11px] leading-5 text-slate-600">A sample high-intent visitor evaluating conversational AI and asking for a product walkthrough.</p></>;
+function DemoDetails({ journey }: { journey: JourneyData | null }) {
+  return <><Detail label="Email" value="maya@northstar.example" icon={Mail} /><Detail label="Phone" value="+1 415 555 0138" icon={Phone} /><Detail label="Location" value="San Francisco, CA" icon={Globe2} /><div className="my-5 h-px bg-slate-100" /><VisitorJourney journey={journey} absentNote="The sample visit appears once this preview has loaded." /><div className="my-5 h-px bg-slate-100" /><p className="text-[10px] font-bold uppercase tracking-[.13em] text-slate-400">Demo AI summary</p><p className="mt-3 text-[11px] leading-5 text-slate-600">A sample high-intent visitor evaluating conversational AI and asking for a product walkthrough.</p></>;
 }
 
 function ChatMessage({ from, text, time, connected }: DisplayMessage & { connected: boolean }) {
