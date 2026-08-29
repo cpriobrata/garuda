@@ -132,6 +132,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /widget/v1/sessions/{sessionID}/messages", s.rateLimit("widget.message", 120, time.Minute, http.HandlerFunc(s.widgetMessage)))
 	mux.Handle("POST /widget/v1/sessions/{sessionID}/leads", s.rateLimit("widget.lead", 30, time.Minute, http.HandlerFunc(s.widgetLead)))
 	mux.Handle("POST /widget/v1/sessions/{sessionID}/reset", s.rateLimit("widget.session_reset", 20, time.Minute, http.HandlerFunc(s.resetWidgetSession)))
+	// The handoff link is behind a session token because the resolved wa.me URL
+	// carries the owner's personal number; the public bootstrap only says a
+	// handoff exists.
+	mux.Handle("POST /widget/v1/sessions/{sessionID}/handoff", s.rateLimit("widget.handoff", 20, time.Minute, http.HandlerFunc(s.startWidgetHandoff)))
 
 	protected := func(pattern string, handler http.HandlerFunc) {
 		mux.Handle(pattern, s.requireAuth(handler))

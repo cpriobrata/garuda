@@ -129,6 +129,7 @@ type Agent struct {
 	SuggestedReplies []string          `json:"suggested_replies,omitempty"`
 	LeadCapture      LeadCaptureConfig `json:"lead_capture"`
 	Branding         BrandingConfig    `json:"branding"`
+	Handoff          HandoffConfig     `json:"handoff"`
 	Knowledge        []KnowledgeItem   `json:"knowledge,omitempty"`
 	PublishedAt      *time.Time        `json:"published_at,omitempty"`
 	CreatedAt        time.Time         `json:"created_at"`

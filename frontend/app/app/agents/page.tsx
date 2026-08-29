@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { ArrowRight, ChevronRight, CircleDot, Globe2, Plus, Sparkles, WandSparkles } from "lucide-react";
+import { ArrowRight, BookOpen, ChevronRight, CircleDot, Globe2, Plus, WandSparkles } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -45,7 +45,7 @@ export default function AgentsPage() {
         </Link>
       </div>
 
-      <Card className="overflow-hidden border-indigo-200 bg-gradient-to-r from-indigo-50 to-violet-50 shadow-none"><CardContent className="flex flex-col items-start gap-5 p-6 sm:flex-row sm:items-center"><div className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-indigo-600 text-white shadow-md"><WandSparkles className="h-5 w-5" /></div><div className="flex-1"><h3 className="text-sm font-semibold text-indigo-950">Build one focused agent at a time</h3><p className="mt-1 text-xs leading-5 text-indigo-700">Give each agent a clear outcome, approved knowledge, and an allowed website domain before publishing.</p></div><Button variant="outline" className="border-indigo-200 bg-white text-indigo-700" disabled><Sparkles className="mr-2 h-4 w-4" /> Recommendations · coming soon</Button></CardContent></Card>
+      <Card className="overflow-hidden border-indigo-200 bg-gradient-to-r from-indigo-50 to-violet-50 shadow-none"><CardContent className="flex flex-col items-start gap-5 p-6 sm:flex-row sm:items-center"><div className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-indigo-600 text-white shadow-md"><WandSparkles className="h-5 w-5" /></div><div className="flex-1"><h3 className="text-sm font-semibold text-indigo-950">Build one focused agent at a time</h3><p className="mt-1 text-xs leading-5 text-indigo-700">Give each agent a clear outcome, approved knowledge, and an allowed website domain before publishing. An agent that owns one job answers it better than one asked to cover everything.</p></div><Button variant="outline" className="border-indigo-200 bg-white text-indigo-700" asChild><Link href="/help/creating-your-first-agent"><BookOpen className="mr-2 h-4 w-4" /> Read the setup guide</Link></Button></CardContent></Card>
     </div>
   );
 }

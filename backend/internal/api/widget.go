@@ -130,7 +130,7 @@ func (s *Server) createWidgetSession(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, message := range state.Messages {
 			if message.SessionID == session.ID {
-				history = append(history, message)
+				history = append(history, message.Clone())
 			}
 		}
 		return nil
@@ -636,6 +636,7 @@ func publicAgent(agent model.Agent) map[string]any {
 		"accent_color": agent.Branding.AccentColor, "position": agent.Branding.Position, "launcher_label": agent.Branding.LauncherText,
 		"avatar_url": agent.Branding.AvatarURL, "privacy_url": agent.Branding.PrivacyURL, "memory_enabled": true,
 		"lead_capture_enabled": agent.LeadCapture.Enabled, "lead_capture_fields": agent.LeadCapture.Fields,
+		"handoff": resolveHandoff(agent),
 	}
 	for key, value := range widgetBrandingPayload(agent) {
 		payload[key] = value

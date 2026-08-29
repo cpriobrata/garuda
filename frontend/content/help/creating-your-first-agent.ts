@@ -218,7 +218,7 @@ export const article: HelpArticle = {
         {
           kind: "p",
           text: [
-            "The plan allows 10 published agents at a time. Pause or unpublish one you are not using and try again — see ",
+            "The plan allows 10 published agents at a time. Pause one you are not using and try again — see ",
             {
               kind: "link",
               text: "Pausing or unpublishing an agent",

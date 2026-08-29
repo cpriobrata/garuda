@@ -19,7 +19,13 @@ const sections = [
   { id: "handoff", label: "Handoff rules", icon: Settings2 },
 ];
 
-const editableFields = ["name", "description", "greeting", "systemPrompt", "primaryColor", "accent", "launcherText", "widgetPosition", "allowedDomain"] as const;
+const editableFields = ["name", "description", "greeting", "systemPrompt", "primaryColor", "accent", "launcherText", "widgetPosition", "allowedDomain", "handoffEnabled", "handoffNumber", "handoffLabel", "handoffMessage", "handoffAvailability", "handoffTriggers", "handoffAutoOffer", "handoffNotifyEmail"] as const;
+
+// Every builder value is a string, including the two that are not text. The
+// form is one flat record so that "which fields did the writer touch" stays a
+// single set, and a boolean stored as "true"/"false" costs one parse at the
+// edges instead of a second shape running through the whole component.
+const handoffTriggerDefaults = "human, agent, real person, speak to someone, talk to a person";
 
 export type AgentFormField = (typeof editableFields)[number];
 export type AgentFormValues = Record<AgentFormField, string>;
@@ -42,6 +48,12 @@ const fieldSections: Record<string, string> = {
   "branding.colors": "appearance",
   "branding.position": "appearance",
   "branding.allowed_domains": "appearance",
+  "handoff.whatsapp_number": "handoff",
+  "handoff.button_label": "handoff",
+  "handoff.message": "handoff",
+  "handoff.availability": "handoff",
+  "handoff.auto_offer_after": "handoff",
+  "handoff.notify_email": "handoff",
 };
 
 export function agentFormValuesFromRecord(agent: AgentRecord, current: AgentFormValues): AgentFormValues {
@@ -55,6 +67,32 @@ export function agentFormValuesFromRecord(agent: AgentRecord, current: AgentForm
     launcherText: agent.branding?.launcher_text || "Ask Garuda",
     widgetPosition: agent.branding?.position || "bottom_right",
     allowedDomain: agent.branding?.allowed_domains?.[0] || "",
+    handoffEnabled: agent.handoff?.enabled ? "true" : "false",
+    handoffNumber: agent.handoff?.whatsapp_number || "",
+    handoffLabel: agent.handoff?.button_label || "",
+    handoffMessage: agent.handoff?.message || "",
+    handoffAvailability: agent.handoff?.availability || "",
+    handoffTriggers: (agent.handoff?.trigger_phrases || []).join(", "),
+    handoffAutoOffer: agent.handoff?.auto_offer_after ? String(agent.handoff.auto_offer_after) : "0",
+    handoffNotifyEmail: agent.handoff?.notify_email || "",
+  };
+}
+
+// The number is stored as E.164 digits because that is the only form the wa.me
+// link accepts. Doing it here as well as on the server means the writer sees
+// the same value the widget will use, rather than discovering on their next
+// load that their spacing was thrown away.
+export function handoffPayloadFrom(form: AgentFormValues) {
+  const autoOffer = Number.parseInt(form.handoffAutoOffer, 10);
+  return {
+    enabled: form.handoffEnabled === "true",
+    whatsapp_number: form.handoffNumber.replace(/\D+/g, ""),
+    button_label: form.handoffLabel.trim(),
+    message: form.handoffMessage.trim(),
+    availability: form.handoffAvailability.trim(),
+    trigger_phrases: form.handoffTriggers.split(",").map((phrase) => phrase.trim()).filter(Boolean).slice(0, 12),
+    auto_offer_after: Number.isFinite(autoOffer) && autoOffer > 0 ? autoOffer : 0,
+    notify_email: form.handoffNotifyEmail.trim(),
   };
 }
 
@@ -120,6 +158,14 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
     launcherText: "Ask Garuda",
     widgetPosition: "bottom_right",
     allowedDomain: existing && demoMode ? "northstarlabs.com" : "",
+    handoffEnabled: "false",
+    handoffNumber: "",
+    handoffLabel: "",
+    handoffMessage: "",
+    handoffAvailability: "",
+    handoffTriggers: handoffTriggerDefaults,
+    handoffAutoOffer: "0",
+    handoffNotifyEmail: "",
   }));
   const editedFields = useRef(new Set<AgentFormField>());
   const [published, setPublished] = useState(existing && demoMode);
@@ -182,6 +228,7 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
       system_prompt: form.systemPrompt,
       welcome_message: form.greeting,
       branding: { primary_color: form.primaryColor, accent_color: form.accent, position: form.widgetPosition, launcher_text: form.launcherText, allowed_domains: form.allowedDomain.trim() ? [form.allowedDomain.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "")] : [] },
+      handoff: handoffPayloadFrom(form),
       ...(demoMode ? { knowledge } : {}),
     };
   }
@@ -320,7 +367,7 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
             {section === "goal" && <GoalSection systemPrompt={form.systemPrompt} setSystemPrompt={updateField("systemPrompt")} messages={fieldMessages} />}
             {section === "knowledge" && <KnowledgeSection knowledge={knowledge} onAdd={addKnowledge} messages={fieldMessages} saving={pendingAction === "knowledge"} blocked={pendingAction !== "" && pendingAction !== "knowledge"} />}
             {section === "appearance" && <AppearanceSection primaryColor={form.primaryColor} setPrimaryColor={updateField("primaryColor")} accent={form.accent} setAccent={updateField("accent")} launcherText={form.launcherText} setLauncherText={updateField("launcherText")} widgetPosition={form.widgetPosition} setWidgetPosition={updateField("widgetPosition")} allowedDomain={form.allowedDomain} setAllowedDomain={updateField("allowedDomain")} messages={fieldMessages} />}
-            {section === "handoff" && <HandoffSection />}
+            {section === "handoff" && <HandoffSection enabled={form.handoffEnabled === "true"} setEnabled={(next) => updateField("handoffEnabled")(next ? "true" : "false")} number={form.handoffNumber} setNumber={updateField("handoffNumber")} label={form.handoffLabel} setLabel={updateField("handoffLabel")} message={form.handoffMessage} setMessage={updateField("handoffMessage")} availability={form.handoffAvailability} setAvailability={updateField("handoffAvailability")} triggers={form.handoffTriggers} setTriggers={updateField("handoffTriggers")} autoOffer={form.handoffAutoOffer} setAutoOffer={updateField("handoffAutoOffer")} notifyEmail={form.handoffNotifyEmail} setNotifyEmail={updateField("handoffNotifyEmail")} messages={fieldMessages} />}
             <div className="mt-8 flex justify-between border-t pt-5"><Button variant="ghost" size="sm" disabled={section === "identity"} onClick={() => setSection(sections[Math.max(0, sections.findIndex((item) => item.id === section) - 1)].id)}>Previous</Button><Button size="sm" onClick={() => { const index = sections.findIndex((item) => item.id === section); if (index < sections.length - 1) setSection(sections[index + 1].id); }}>Next section <ChevronRight className="ml-1.5 h-3.5 w-3.5" /></Button></div>
           </div>
         </section>
@@ -373,8 +420,103 @@ function AppearanceSection({ primaryColor, setPrimaryColor, accent, setAccent, l
   return <><SectionHeading eyebrow="Appearance" title="Make the widget look at home on your site." description="Match your colors and approve the website where this agent can run." /><div className="space-y-6"><div><Label>Accent color</Label><div className="mt-3 flex flex-wrap gap-3">{colors.map((color) => <button key={color} onClick={() => setAccent(color)} className={cn("grid h-10 w-10 place-items-center rounded-full border-4 border-white shadow-sm ring-offset-2", accent === color && "ring-2 ring-slate-400")} style={{ backgroundColor: color }} aria-label={`Use ${color}`}>{accent === color && <Check className="h-4 w-4 text-white" />}</button>)}</div><FieldMessage message={messages["branding.colors"]} /></div><div className="grid gap-4 sm:grid-cols-2"><div className="space-y-2"><Label htmlFor="primary-color">Header color</Label><Input id="primary-color" value={primaryColor} onChange={(event) => setPrimaryColor(event.target.value)} /></div><div className="space-y-2"><Label htmlFor="custom-color">Accent color</Label><Input id="custom-color" value={accent} onChange={(event) => setAccent(event.target.value)} /></div><div className="space-y-2"><Label htmlFor="launcher-text">Launcher text</Label><Input id="launcher-text" value={launcherText} onChange={(event) => setLauncherText(event.target.value)} /></div><div className="space-y-2"><Label htmlFor="widget-position">Widget position</Label><select id="widget-position" value={widgetPosition} onChange={(event) => setWidgetPosition(event.target.value)} className="h-11 w-full rounded-lg border bg-white px-3 text-sm"><option value="bottom_right">Bottom right</option><option value="bottom_left">Bottom left</option></select><FieldMessage message={messages["branding.position"]} /></div></div><div className="space-y-2"><Label htmlFor="allowed-domain">Allowed website domain</Label><Input id="allowed-domain" value={allowedDomain} onChange={(event) => setAllowedDomain(event.target.value)} placeholder="yourcompany.com" /><FieldMessage message={messages["branding.allowed_domains"]} /><p className="text-[10px] text-slate-400">Required to publish. Garuda rejects widget sessions from any other domain.</p></div></div></>;
 }
 
-function HandoffSection() {
-  return <><SectionHeading eyebrow="Handoff rules" title="Human handoff controls are coming soon." description="The current release persists conversations and captured leads. Team notifications and live takeover rules are not enabled yet." /><div className="rounded-xl border border-dashed bg-slate-50 p-6 text-center"><Settings2 className="mx-auto h-6 w-6 text-indigo-500" /><p className="mt-3 text-xs font-semibold text-slate-800">No handoff automation is active</p><p className="mx-auto mt-1 max-w-md text-[10px] leading-5 text-slate-500">Use the agent instructions to recommend a human follow-up. Configurable notifications and assignment rules will appear here in a later release.</p><Badge variant="secondary" className="mt-3">Coming soon</Badge></div></>;
+type HandoffSectionProps = {
+  enabled: boolean;
+  setEnabled: (value: boolean) => void;
+  number: string;
+  setNumber: (value: string) => void;
+  label: string;
+  setLabel: (value: string) => void;
+  message: string;
+  setMessage: (value: string) => void;
+  availability: string;
+  setAvailability: (value: string) => void;
+  triggers: string;
+  setTriggers: (value: string) => void;
+  autoOffer: string;
+  setAutoOffer: (value: string) => void;
+  notifyEmail: string;
+  setNotifyEmail: (value: string) => void;
+  messages: Record<string, string>;
+};
+
+function HandoffSection({ enabled, setEnabled, number, setNumber, label, setLabel, message, setMessage, availability, setAvailability, triggers, setTriggers, autoOffer, setAutoOffer, notifyEmail, setNotifyEmail, messages }: HandoffSectionProps) {
+  // The digits are what the wa.me link is built from, so the preview shows the
+  // exact link a visitor will open rather than a prettier approximation of it.
+  const digits = number.replace(/\D+/g, "");
+  const previewMessage = message.trim() || "Hi, I was chatting on your website and would like to speak with someone.";
+  return <><SectionHeading eyebrow="Handoff rules" title="Hand the conversation to a person on WhatsApp." description="When the assistant cannot help, the visitor taps one button and lands in a WhatsApp chat with you. Nothing to install, on either side." />
+    <div className="space-y-6">
+      <label htmlFor="handoff-enabled" className="flex cursor-pointer items-start gap-3 rounded-xl border p-4 transition hover:border-indigo-200">
+        <input id="handoff-enabled" type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300 text-indigo-600" />
+        <span><span className="block text-xs font-semibold text-slate-900">Offer a WhatsApp handoff</span><span className="mt-1 block text-[10px] leading-4 text-slate-500">A &ldquo;talk to a person&rdquo; button appears in the widget once this is published.</span></span>
+      </label>
+
+      <div className="space-y-2">
+        <Label htmlFor="handoff-number">Your WhatsApp number</Label>
+        <Input id="handoff-number" value={number} onChange={(event) => setNumber(event.target.value)} placeholder="+91 98765 43210" inputMode="tel" autoComplete="tel" aria-describedby="handoff-number-hint" />
+        <FieldMessage message={messages["handoff.whatsapp_number"]} />
+        <p id="handoff-number-hint" className="text-[10px] text-slate-400">Include the country code. Spaces, dashes and brackets are fine — Garuda stores {digits ? `+${digits}` : "the digits"}. Your number is never shown on your website; visitors only see the button.</p>
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="space-y-2">
+          <Label htmlFor="handoff-label">Button label</Label>
+          <Input id="handoff-label" value={label} onChange={(event) => setLabel(event.target.value)} placeholder="Talk to a person on WhatsApp" />
+          <FieldMessage message={messages["handoff.button_label"]} />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="handoff-availability">When you reply</Label>
+          <Input id="handoff-availability" value={availability} onChange={(event) => setAvailability(event.target.value)} placeholder="Mon–Fri, 9am–6pm IST" />
+          <FieldMessage message={messages["handoff.availability"]} />
+          <p className="text-[10px] text-slate-400">Shown under the button, so nobody reads a night-time silence as being ignored.</p>
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="handoff-message">Message we type for them</Label>
+        <Textarea id="handoff-message" value={message} onChange={(event) => setMessage(event.target.value)} className="min-h-[80px]" placeholder="Hi, I was chatting on your website and would like to speak with someone." />
+        <FieldMessage message={messages["handoff.message"]} />
+        <p className="text-[10px] text-slate-400">WhatsApp opens with this in the box and the page they were on beneath it. The visitor still presses send.</p>
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="space-y-2">
+          <Label htmlFor="handoff-auto-offer">Offer it automatically after</Label>
+          <select id="handoff-auto-offer" value={autoOffer} onChange={(event) => setAutoOffer(event.target.value)} className="h-11 w-full rounded-lg border bg-white px-3 text-sm">
+            <option value="0">Only when they ask</option>
+            <option value="3">3 messages</option>
+            <option value="5">5 messages</option>
+            <option value="8">8 messages</option>
+          </select>
+          <FieldMessage message={messages["handoff.auto_offer_after"]} />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="handoff-notify">Email me when this happens</Label>
+          <Input id="handoff-notify" value={notifyEmail} onChange={(event) => setNotifyEmail(event.target.value)} placeholder="you@yourcompany.com" type="email" autoComplete="email" />
+          <FieldMessage message={messages["handoff.notify_email"]} />
+          <p className="text-[10px] text-slate-400">Optional. One email per conversation, so a missed WhatsApp message is a choice rather than an accident.</p>
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="handoff-triggers">Phrases that offer it straight away</Label>
+        <Input id="handoff-triggers" value={triggers} onChange={(event) => setTriggers(event.target.value)} placeholder="human, real person, speak to someone" />
+        <p className="text-[10px] text-slate-400">Comma separated, up to twelve. Matching is case-insensitive and looks anywhere in what the visitor typed.</p>
+      </div>
+
+      {enabled && digits.length >= 8 ? (
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+          <p className="flex items-center gap-1.5 text-[10px] font-semibold text-emerald-800"><Check className="h-3.5 w-3.5" /> Ready after you publish</p>
+          <p className="mt-2 break-all text-[10px] leading-4 text-emerald-700">Visitors will open <span className="font-mono">https://wa.me/{digits}</span> with &ldquo;{previewMessage}&rdquo; already typed.</p>
+        </div>
+      ) : (
+        <div className="rounded-xl border border-dashed bg-slate-50 p-4">
+          <p className="flex items-center gap-1.5 text-[10px] font-semibold text-slate-700"><Settings2 className="h-3.5 w-3.5 text-indigo-500" /> Not active yet</p>
+          <p className="mt-2 text-[10px] leading-4 text-slate-500">{enabled ? "Add a WhatsApp number with its country code to switch the button on." : "Tick the box above, add your WhatsApp number, then publish."}</p>
+        </div>
+      )}
+    </div></>;
 }
 
 function ChatPreview({ name, greeting, accent, previewReply }: { name: string; greeting: string; accent: string; previewReply: string }) {

@@ -81,6 +81,18 @@ export type AgentRecord = {
   system_prompt: string;
   welcome_message: string;
   branding: { primary_color: string; accent_color: string; position: string; launcher_text?: string; allowed_domains?: string[] };
+  // The owner's own view of the agent, so the WhatsApp number is present here.
+  // The widget bootstrap is a different, deliberately thinner payload.
+  handoff?: {
+    enabled: boolean;
+    whatsapp_number?: string;
+    button_label?: string;
+    message?: string;
+    availability?: string;
+    trigger_phrases?: string[];
+    auto_offer_after?: number;
+    notify_email?: string;
+  };
   knowledge: Array<{ id?: string; type?: string; title: string; content: string; source_url?: string; status?: string }>;
 };
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AlertCircle, CalendarDays, ChevronRight, CreditCard, Gauge, ReceiptText, ShieldCheck, Sparkles } from "lucide-react";
+import { AlertCircle, CalendarDays, CreditCard, Gauge, Mail, ReceiptText, ShieldCheck, Sparkles } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,6 +9,10 @@ import { Progress } from "@/components/ui/progress";
 import { garudaApi } from "@/lib/api";
 
 type Subscription = Awaited<ReturnType<typeof garudaApi.billingSubscription>>;
+
+// The API sells exactly one plan (starter_17), so a larger allowance is a
+// conversation with a person rather than a self-serve upgrade.
+const SUPPORT_EMAIL = "info@ravan.ai";
 
 const demoSubscription: Subscription = {
   status: "active",
@@ -79,7 +83,7 @@ export default function BillingPage() {
 
       <Card className="border-slate-200/80 shadow-none"><CardHeader className="flex-row items-center justify-between space-y-0"><div><CardTitle className="text-sm">Billing history</CardTitle><p className="mt-1 text-xs text-slate-500">Receipts and invoices for your workspace</p></div><Button variant="outline" size="sm" onClick={openPortal}>Open Stripe billing</Button></CardHeader><CardContent className={connected ? "" : "px-0 pb-0"}>{connected ? <div className="flex items-center gap-3 rounded-xl border border-dashed bg-slate-50 p-5"><ReceiptText className="h-5 w-5 text-indigo-600" /><div><p className="text-xs font-semibold text-slate-800">Invoices live in your Stripe portal</p><p className="mt-1 text-[10px] text-slate-500">Open the secure portal to download receipts or update billing information.</p></div></div> : <div className="overflow-x-auto"><table className="w-full min-w-[620px] text-left"><thead><tr className="border-y bg-slate-50 text-[9px] font-bold uppercase tracking-[.12em] text-slate-400"><th className="px-6 py-3">Invoice</th><th className="px-4 py-3">Date</th><th className="px-4 py-3">Amount</th><th className="px-4 py-3">Status</th><th className="px-6 py-3 text-right">Receipt</th></tr></thead><tbody className="divide-y"><tr><td className="px-6 py-4 text-xs font-medium text-slate-700">GAR-DEMO-00829</td><td className="px-4 py-4 text-xs text-slate-500">Aug 29, 2026</td><td className="px-4 py-4 text-xs font-semibold text-slate-800">$17.00</td><td className="px-4 py-4"><Badge variant="secondary">Demo</Badge></td><td className="px-6 py-4 text-right"><span className="text-[10px] text-slate-400">Preview only</span></td></tr></tbody></table></div>}</CardContent></Card>
 
-      <div className="flex flex-col justify-between gap-4 rounded-xl border bg-white p-5 sm:flex-row sm:items-center"><div><p className="text-xs font-semibold text-slate-800">Need a larger allowance?</p><p className="mt-1 text-[10px] text-slate-500">Additional plans are being prepared.</p></div><Button variant="outline" disabled>Higher plans coming soon <ChevronRight className="ml-1.5 h-3.5 w-3.5" /></Button></div>
+      <div className="flex flex-col justify-between gap-4 rounded-xl border bg-white p-5 sm:flex-row sm:items-center"><div><p className="text-xs font-semibold text-slate-800">Need a larger allowance?</p><p className="mt-1 text-[10px] text-slate-500">Launch is the only plan Garuda sells today. Tell us the volume you expect and we will size one with you.</p></div><Button variant="outline" asChild><a href={`mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent("Garuda: larger conversation allowance")}`}><Mail className="mr-1.5 h-3.5 w-3.5" /> Email {SUPPORT_EMAIL}</a></Button></div>
     </div>
   );
 }

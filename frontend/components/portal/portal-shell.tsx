@@ -4,7 +4,6 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
-  Bell,
   Bot,
   ChevronDown,
   CircleHelp,
@@ -15,13 +14,15 @@ import {
   Menu,
   MessageSquareText,
   Plus,
-  Search,
   Settings,
   Sparkles,
   UsersRound,
   X,
 } from "lucide-react";
 import { Brand } from "@/components/brand";
+import { WorkspaceActivityMenu } from "@/components/portal/workspace-activity";
+import { useWorkspaceIndex } from "@/components/portal/workspace-index";
+import { WorkspaceSearch } from "@/components/portal/workspace-search";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -86,6 +87,9 @@ export function PortalShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const connected = Boolean(process.env.NEXT_PUBLIC_API_URL);
   const [mobileOpen, setMobileOpen] = useState(false);
+  // Shared by the header search and the activity bell: whichever the operator
+  // opens first pays for the fetch and the other reads the same cached lists.
+  const workspace = useWorkspaceIndex(connected);
   const [agentItems, setAgentItems] = useState<Agent[]>(connected ? [] : demoAgents);
   const [selectedAgentId, setSelectedAgentId] = useState(connected ? "" : demoAgents[0]?.id || "");
   // A connected workspace starts closed and only opens once the bootstrap call
@@ -184,7 +188,7 @@ export function PortalShell({ children }: { children: React.ReactNode }) {
         <div className="border-t p-3">
           <DropdownMenu>
             <DropdownMenuTrigger asChild><button className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left hover:bg-slate-50"><Avatar className="h-8 w-8"><AvatarFallback className="bg-slate-950 text-white">{accountInitials}</AvatarFallback></Avatar><span className="min-w-0 flex-1"><span className="block truncate text-xs font-semibold text-slate-900">{account.name}</span><span className="block truncate text-[10px] text-slate-500">{account.organization}</span></span><ChevronDown className="h-4 w-4 text-slate-400" /></button></DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-52"><DropdownMenuLabel>{account.email || "Authenticated account"}</DropdownMenuLabel><DropdownMenuSeparator /><DropdownMenuItem asChild><Link href="/app/settings"><Settings className="mr-2 h-4 w-4" /> Account settings</Link></DropdownMenuItem><DropdownMenuItem disabled={connected}><CircleHelp className="mr-2 h-4 w-4" /> Help center{connected ? " (coming soon)" : ""}</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem className="text-red-600" asChild><Link href="/auth/sign-in" onClick={clearAuthSession}><LogOut className="mr-2 h-4 w-4" /> Sign out</Link></DropdownMenuItem></DropdownMenuContent>
+            <DropdownMenuContent align="end" className="w-52"><DropdownMenuLabel>{account.email || "Authenticated account"}</DropdownMenuLabel><DropdownMenuSeparator /><DropdownMenuItem asChild><Link href="/app/settings"><Settings className="mr-2 h-4 w-4" /> Account settings</Link></DropdownMenuItem><DropdownMenuItem asChild><Link href="/help"><CircleHelp className="mr-2 h-4 w-4" /> Help centre</Link></DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem className="text-red-600" asChild><Link href="/auth/sign-in" onClick={clearAuthSession}><LogOut className="mr-2 h-4 w-4" /> Sign out</Link></DropdownMenuItem></DropdownMenuContent>
           </DropdownMenu>
         </div>
       </aside>
@@ -192,10 +196,10 @@ export function PortalShell({ children }: { children: React.ReactNode }) {
       <div className="lg:pl-[250px]">
         <header className="sticky top-0 z-30 flex h-16 items-center border-b border-slate-200 bg-white/90 px-4 backdrop-blur-xl sm:px-6 lg:px-8">
           <Button variant="ghost" size="icon" className="mr-2 lg:hidden" onClick={() => setMobileOpen(true)}><Menu className="h-5 w-5" /></Button>
-          <div className="relative hidden max-w-sm flex-1 sm:block"><Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" /><input className="h-9 w-full rounded-lg border-0 bg-slate-100/80 pl-9 pr-3 text-xs outline-none ring-indigo-500/20 transition placeholder:text-slate-400 focus:ring-2 disabled:cursor-not-allowed" placeholder={connected ? "Workspace search is coming soon" : "Search demo workspace…"} aria-label={connected ? "Workspace search is coming soon" : "Demo workspace search preview"} disabled={connected} readOnly={!connected} /></div>
+          <WorkspaceSearch index={workspace} />
           <div className="ml-auto flex items-center gap-1.5">
             {!connected && <Badge variant="secondary" className="hidden text-[9px] sm:inline-flex">Demo workspace</Badge>}
-            <Button variant="ghost" size="icon" className="relative h-9 w-9" aria-label={connected ? "Notifications are coming soon" : "Notifications"} disabled={connected}><Bell className="h-[18px] w-[18px] text-slate-600" />{!connected && <span className="absolute right-2 top-2 h-2 w-2 rounded-full border-2 border-white bg-indigo-600" />}</Button>
+            <WorkspaceActivityMenu index={workspace} />
             <Button size="sm" asChild><Link href="/app/agents/new"><Plus className="mr-1.5 h-3.5 w-3.5" /> <span className="hidden sm:inline">New agent</span><span className="sm:hidden">Agent</span></Link></Button>
           </div>
         </header>

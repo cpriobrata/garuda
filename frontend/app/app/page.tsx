@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { ArrowRight, Bot, ChevronRight, MessageSquareText, MousePointerClick, Plus, Sparkles, UsersRound } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -12,6 +12,8 @@ import { agents as seededAgents, chartData, conversations as seededConversations
 import { cn } from "@/lib/utils";
 
 type Metrics = { agents: number; published_agents: number; conversations: number; messages: number; leads: number; lead_conversion_rate: number };
+// One row per day for the last seven days, exactly as GET /v1/dashboard returns it.
+type ActivityPoint = Awaited<ReturnType<typeof garudaApi.dashboard>>["activity"][number];
 
 const demoMetrics: Metrics = { agents: 3, published_agents: 2, conversations: 2131, messages: 8492, leads: 364, lead_conversion_rate: 17.1 };
 
@@ -20,6 +22,8 @@ export default function DashboardPage() {
   const [name, setName] = useState(connected ? "there" : "Maya");
   const [metrics, setMetrics] = useState<Metrics | null>(connected ? null : demoMetrics);
   const [activity, setActivity] = useState<number[]>(connected ? [] : chartData);
+  const [series, setSeries] = useState<ActivityPoint[]>([]);
+  const [insight, setInsight] = useState<"loading" | "ready" | "error">("loading");
   const [agentItems, setAgentItems] = useState<Agent[]>(connected ? [] : seededAgents);
   const [conversationItems, setConversationItems] = useState<Conversation[]>(connected ? [] : seededConversations);
   // The date has to be produced in the browser after mount. Formatting it while
@@ -38,11 +42,19 @@ export default function DashboardPage() {
       if (dashboardResult.status === "fulfilled") {
         setMetrics(dashboardResult.value.metrics);
         setActivity(dashboardResult.value.activity.map((point) => point.conversations));
-      }
+        setSeries(dashboardResult.value.activity);
+        setInsight("ready");
+      } else setInsight("error");
       if (agentsResult.status === "fulfilled") setAgentItems(agentsResult.value);
       if (conversationsResult.status === "fulfilled") setConversationItems(conversationsResult.value);
     });
   }, [connected]);
+
+  const week = useMemo(() => ({
+    conversations: series.reduce((total, point) => total + point.conversations, 0),
+    leads: series.reduce((total, point) => total + point.leads, 0),
+    busiest: series.reduce<ActivityPoint | null>((best, point) => (!best || point.conversations > best.conversations ? point : best), null),
+  }), [series]);
 
   const stats = [
     { label: "Agents", value: metrics?.agents, note: metrics ? `${metrics.published_agents} published` : "Awaiting API", icon: Bot },
@@ -58,7 +70,7 @@ export default function DashboardPage() {
 
     <div className="grid gap-6 xl:grid-cols-[1.5fr_.72fr]">
       <Card className="shadow-none"><CardHeader><CardTitle className="text-sm">Conversation activity</CardTitle><p className="text-xs text-slate-500">{connected ? "Daily totals returned by the dashboard API" : "Fourteen-day demo preview"}</p></CardHeader><CardContent>{activity.length > 1 ? <ConversationChart data={activity} /> : <div className="grid h-[220px] place-items-center rounded-xl border border-dashed bg-slate-50 text-center"><div><MessageSquareText className="mx-auto h-6 w-6 text-slate-300" /><p className="mt-3 text-xs font-semibold text-slate-700">No activity series yet</p><p className="mt-1 text-[10px] text-slate-400">Conversation history will appear after widget traffic arrives.</p></div></div>}</CardContent></Card>
-      <Card className="border-slate-800 bg-gradient-to-br from-slate-950 to-indigo-950 text-white shadow-none"><CardContent className="flex h-full min-h-[300px] flex-col p-6"><span className="grid h-10 w-10 place-items-center rounded-xl bg-white/10 text-indigo-200"><Sparkles className="h-5 w-5" /></span>{connected ? <><h2 className="mt-8 text-xl font-semibold">Workspace insights are coming soon.</h2><p className="mt-3 text-sm leading-6 text-slate-300">Garuda will surface grounded trends after enough real conversation activity is available. No estimated recommendations are shown.</p><Button variant="secondary" size="sm" className="mt-auto w-fit" asChild><Link href="/app/conversations">Review conversations <ArrowRight className="ml-1.5 h-3.5 w-3.5" /></Link></Button></> : <><Badge className="mt-6 w-fit border-white/10 bg-white/10 text-indigo-100">Demo insight</Badge><h2 className="mt-4 text-xl font-semibold">Pricing visitors are ready to talk.</h2><p className="mt-3 text-sm leading-6 text-slate-300">Illustrative preview: a sales agent can reveal where visitors need the most help.</p><Button variant="secondary" size="sm" className="mt-auto w-fit" asChild><Link href="/app/agents/aria-sales">Open demo agent <ArrowRight className="ml-1.5 h-3.5 w-3.5" /></Link></Button></>}</CardContent></Card>
+      <Card className="border-slate-800 bg-gradient-to-br from-slate-950 to-indigo-950 text-white shadow-none"><CardContent className="flex h-full min-h-[300px] flex-col p-6"><span className="grid h-10 w-10 place-items-center rounded-xl bg-white/10 text-indigo-200"><Sparkles className="h-5 w-5" /></span>{connected ? <WorkspaceInsight state={insight} metrics={metrics} week={week} /> : <><Badge className="mt-6 w-fit border-white/10 bg-white/10 text-indigo-100">Demo insight</Badge><h2 className="mt-4 text-xl font-semibold">Pricing visitors are ready to talk.</h2><p className="mt-3 text-sm leading-6 text-slate-300">Illustrative preview: a sales agent can reveal where visitors need the most help.</p><Button variant="secondary" size="sm" className="mt-auto w-fit" asChild><Link href="/app/agents/aria-sales">Open demo agent <ArrowRight className="ml-1.5 h-3.5 w-3.5" /></Link></Button></>}</CardContent></Card>
     </div>
 
     <div className="grid gap-6 xl:grid-cols-[1.08fr_.92fr]">
@@ -68,6 +80,40 @@ export default function DashboardPage() {
 
     <div className="flex flex-col items-start gap-4 rounded-xl border border-indigo-200 bg-indigo-50/40 p-5 sm:flex-row sm:items-center"><span className="grid h-11 w-11 place-items-center rounded-xl bg-indigo-600 text-white"><Sparkles className="h-5 w-5" /></span><div className="flex-1"><p className="text-sm font-semibold text-indigo-950">Build a focused customer experience</p><p className="mt-1 text-xs text-indigo-700">Add approved knowledge, test the private preview, and configure an allowed domain before publishing.</p></div><Button variant="outline" className="border-indigo-200 bg-white text-indigo-700" asChild><Link href="/app/agents">Review agents <ArrowRight className="ml-2 h-3.5 w-3.5" /></Link></Button></div>
   </div>;
+}
+
+/**
+ * The one true statement this page can make about the week.
+ *
+ * Everything here is arithmetic over the seven daily rows GET /v1/dashboard
+ * returns plus the all-time conversion rate in the same response. There is no
+ * per-agent breakdown in that payload, so none is claimed; an account with
+ * nothing recorded gets the step that would actually produce data instead.
+ */
+function WorkspaceInsight({ state, metrics, week }: { state: "loading" | "ready" | "error"; metrics: Metrics | null; week: { conversations: number; leads: number; busiest: ActivityPoint | null } }) {
+  if (state === "error") return <><h2 className="mt-8 text-xl font-semibold">Workspace numbers are unavailable.</h2><p className="mt-3 text-sm leading-6 text-slate-300">The dashboard API did not answer, so nothing is shown here rather than a stale figure. Reload the page to try again.</p></>;
+  if (state === "loading" || !metrics) return <><h2 className="mt-8 text-xl font-semibold">Reading your workspace…</h2><p className="mt-3 text-sm leading-6 text-slate-300">This card fills in with the totals the dashboard API records for the last seven days.</p></>;
+
+  if (!week.conversations) {
+    const next = metrics.agents === 0
+      ? { heading: "Create your first agent.", body: "Nothing has been recorded yet. An agent is the thing your visitors talk to, so it is the first thing to build.", href: "/app/agents/new", label: "Create an agent" }
+      : metrics.published_agents === 0
+        ? { heading: `Publish an agent to start collecting conversations.`, body: `You have ${metrics.agents} agent${metrics.agents === 1 ? "" : "s"} that ${metrics.agents === 1 ? "is" : "are"} not published yet, so ${metrics.agents === 1 ? "it is" : "they are"} not answering anyone.`, href: "/app/agents", label: "Review agents" }
+        : { heading: "No conversations in the last seven days.", body: "An agent is published, so the remaining step is getting the widget script onto the pages your visitors actually land on.", href: "/app/widget", label: "Install the widget" };
+    return <><h2 className="mt-8 text-xl font-semibold">{next.heading}</h2><p className="mt-3 text-sm leading-6 text-slate-300">{next.body}</p><Button variant="secondary" size="sm" className="mt-auto w-fit" asChild><Link href={next.href}>{next.label} <ArrowRight className="ml-1.5 h-3.5 w-3.5" /></Link></Button></>;
+  }
+
+  return <>
+    <Badge className="mt-6 w-fit border-white/10 bg-white/10 text-indigo-100">Last 7 days</Badge>
+    <h2 className="mt-4 text-xl font-semibold">{week.conversations.toLocaleString()} conversation{week.conversations === 1 ? "" : "s"} and {week.leads.toLocaleString()} lead{week.leads === 1 ? "" : "s"} this week.</h2>
+    <p className="mt-3 text-sm leading-6 text-slate-300">{week.busiest && week.busiest.conversations > 0 ? `${weekdayName(week.busiest.date)} was the busiest day with ${week.busiest.conversations.toLocaleString()}. ` : ""}Across everything recorded so far, {metrics.lead_conversion_rate.toFixed(1)}% of conversations have captured a lead.</p>
+    <Button variant="secondary" size="sm" className="mt-auto w-fit" asChild><Link href="/app/conversations">Review conversations <ArrowRight className="ml-1.5 h-3.5 w-3.5" /></Link></Button>
+  </>;
+}
+
+// The API buckets each day in UTC, so the name has to be read back in UTC too.
+function weekdayName(date: string) {
+  return new Date(`${date}T00:00:00Z`).toLocaleDateString(undefined, { weekday: "long", timeZone: "UTC" });
 }
 
 function Empty({ text }: { text: string }) {

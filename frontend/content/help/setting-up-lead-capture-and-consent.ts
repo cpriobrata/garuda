@@ -5,9 +5,9 @@ export const article: HelpArticle = {
   category: "configuring",
   title: "Setting up lead capture and consent",
   description:
-    "Lead capture is on by default and offers the contact form after three exchanges. Nothing is stored until the visitor ticks the consent box, and the server refuses submissions without it.",
+    "Lead capture is on by default and offers the contact form from the visitor's third message. Nothing is stored until the visitor ticks the consent box, and the server refuses submissions without it.",
   answer:
-    "A new agent already captures leads: after three exchanges the widget offers a contact form, and nothing is saved unless the visitor ticks the consent box, which the server checks before it writes anything.",
+    "A new agent already captures leads: from the visitor's third message the widget offers a contact form, and nothing is saved unless they tick the consent box, which the server checks before it writes anything.",
   updated: "2026-08-30",
   keywords: [
     "lead capture",
@@ -31,7 +31,7 @@ export const article: HelpArticle = {
         {
           kind: "p",
           text: [
-            "An agent created in Garuda starts with lead capture switched on, a follow-up prompt, and a form asking for name, email and phone. After three exchanges the widget offers that form. A ",
+            "An agent created in Garuda starts with lead capture switched on, a follow-up prompt, and a form asking for name, email and phone. From the visitor's third message onward the widget offers that form. A ",
             { kind: "strong", text: "Contact the team" },
             " button also appears under the conversation once the visitor has sent a message and the agent has replied, so they can ask for follow-up sooner.",
           ],
@@ -156,7 +156,7 @@ export const article: HelpArticle = {
       tone: "caution",
       title: "The prompt wording and the three-exchange delay are not editable yet",
       body: [
-        "The portal has no input for the follow-up prompt, the number of exchanges before the form is offered, or the privacy sentence under the form. They are stored on the agent and carried through untouched by every save. Email info@ravan.ai if you need one of them changed.",
+        "The portal has no input for the follow-up prompt, the number of visitor messages before the form is offered, or the privacy sentence under the form. They are stored on the agent and carried through untouched by every save. Email info@ravan.ai if you need one of them changed.",
       ],
     },
     {

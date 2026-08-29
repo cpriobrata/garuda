@@ -255,6 +255,27 @@
     };
   }
 
+  // The bootstrap says only that a handoff exists and what to call it. The
+  // owner's phone number is deliberately absent: the bootstrap is public, and
+  // the number becomes a link only inside an endpoint that first checks the
+  // session token. See backend/internal/api/handoff.go.
+  function normalizeHandoff(raw) {
+    if (!isRecord(raw) || raw.enabled !== true) {
+      return { enabled: false, label: '', availability: '', triggerPhrases: [], autoOfferAfter: 0 };
+    }
+    var autoOffer = Number(raw.auto_offer_after);
+    return {
+      enabled: true,
+      channel: safeSlug(raw.channel, 20) || 'whatsapp',
+      label: asText(raw.label, 'Talk to a person', 60),
+      availability: asText(raw.availability, '', 120),
+      triggerPhrases: safeTextList(raw.trigger_phrases, 12, 60).map(function (phrase) {
+        return phrase.toLowerCase();
+      }),
+      autoOfferAfter: Number.isFinite(autoOffer) && autoOffer > 0 ? Math.min(Math.floor(autoOffer), 50) : 0
+    };
+  }
+
   function normalizeAgentPayload(payload) {
     var envelope = isRecord(payload) && isRecord(payload.data) ? payload.data : payload;
     var raw = isRecord(envelope) && isRecord(envelope.agent) ? envelope.agent : envelope;
@@ -310,7 +331,8 @@
       ).filter(function (field) {
         return RESERVED_LEAD_FIELDS.indexOf(field) !== -1;
       }),
-      launcherLabel: asText(raw.launcher_label || raw.launcher_text, '', 50)
+      launcherLabel: asText(raw.launcher_label || raw.launcher_text, '', 50),
+      handoff: normalizeHandoff(raw.handoff)
     };
   }
 
@@ -707,6 +729,31 @@
     }
   };
 
+  // The wa.me link is fetched rather than assembled here, because assembling
+  // it would mean the number had to travel in the bootstrap.
+  LiveAPI.prototype.startHandoff = async function startHandoff(session) {
+    var response = await this.request(
+      '/widget/v1/sessions/' + encodeURIComponent(session.sessionID) + '/handoff',
+      { method: 'POST', headers: { 'X-Garuda-Session-Token': session.sessionToken } }
+    );
+    if (!response.ok) throw await safeErrorFromResponse(response);
+    var json = await response.json();
+    var data = isRecord(json) && isRecord(json.data) ? json.data : json;
+    data = isRecord(data) ? data : {};
+    var url = safeHttpUrl(data.url);
+    if (!url) throw new WidgetError('invalid_response', 'The handoff link could not be opened.', 502);
+    return { url: url, label: asText(data.label, 'Talk to a person', 60) };
+  };
+
+  LiveAPI.prototype.resetSession = async function resetSession(session) {
+    var response = await this.request(
+      '/widget/v1/sessions/' + encodeURIComponent(session.sessionID) + '/reset',
+      { method: 'POST', headers: { 'X-Garuda-Session-Token': session.sessionToken } }
+    );
+    if (!response.ok) throw await safeErrorFromResponse(response);
+    return normalizeSessionPayload(await response.json());
+  };
+
   LiveAPI.prototype.captureLead = async function captureLead(session, request) {
     var response = await this.request(
       '/widget/v1/sessions/' + encodeURIComponent(session.sessionID) + '/leads',
@@ -957,6 +1004,25 @@
     return { message: message, leadRequested: selected.lead };
   };
 
+  // The demo has no owner and therefore no number to hand out. Saying so is
+  // better than opening WhatsApp on a number somebody made up.
+  DemoAPI.prototype.startHandoff = async function startHandoff() {
+    throw new WidgetError('handoff_unavailable', 'Human handoff is not available in the demo.', 404);
+  };
+
+  DemoAPI.prototype.resetSession = async function resetSession(session) {
+    if (this.storage) {
+      try {
+        this.storage.removeItem(this.historyKey);
+      } catch (_error) {
+        // Storage is optional; the transcript is cleared either way.
+      }
+    }
+    return Object.assign({}, session, {
+      conversation: { id: session.sessionID, resumed: false, messages: [] }
+    });
+  };
+
   DemoAPI.prototype.captureLead = async function captureLead() {
     await wait(480);
     return { lead_id: 'demo_lead_' + randomID(), status: 'new' };
@@ -1116,6 +1182,7 @@
     this.autoOpened = false;
     this.lastRetry = null;
     this.nodes = {};
+    this.handoffOffered = false;
     this.memoryConsent = this.resolveInitialConsent();
     this.requiresConsent = this.memoryConsent === null;
   }
@@ -1218,12 +1285,19 @@
     mutedBadge.setAttribute('role', 'img');
     mutedBadge.setAttribute('aria-label', 'Assistant audio is muted');
     mutedBadge.appendChild(svgIcon('M11 5 6.5 9H3v6h3.5L11 19V5Zm4 4 5 6m0-6-5 6'));
+    var restart = element('button', 'gw-icon-button');
+    restart.type = 'button';
+    restart.hidden = true;
+    restart.setAttribute('aria-label', 'Start a new conversation');
+    restart.setAttribute('title', 'Start a new conversation');
+    restart.appendChild(svgIcon('M4 12a8 8 0 1 1 2.3 5.6M4 12V7m0 5h5'));
     var close = element('button', 'gw-icon-button');
     close.type = 'button';
     close.setAttribute('aria-label', 'Minimize chat');
     close.appendChild(svgIcon('M6 9l6 6 6-6'));
     var headerActions = element('div', 'gw-header-actions');
     headerActions.appendChild(mutedBadge);
+    headerActions.appendChild(restart);
     headerActions.appendChild(close);
     header.appendChild(identity);
     header.appendChild(headerActions);
@@ -1269,7 +1343,21 @@
     contactButton.type = 'button';
     contactButton.hidden = true;
     contactButton.appendChild(svgIcon('M4 5.5h16v11H8l-4 3v-14Zm4 4h8M8 13h5'));
+    // The handoff sits beside "contact the team" rather than in the header,
+    // because it is an action about this conversation and belongs where the
+    // visitor is already looking when the assistant runs out of answers.
+    var handoffButton = element('button', 'gw-handoff-button');
+    handoffButton.type = 'button';
+    handoffButton.hidden = true;
+    var handoffIcon = svgIcon("M17.5 14.4c-.3-.2-1.8-.9-2-1s-.5-.2-.7.1-.8 1-1 1.2-.4.2-.7 0a8 8 0 0 1-2.4-1.5 9 9 0 0 1-1.6-2c-.2-.4 0-.6.1-.7l.5-.6.3-.5c.1-.2 0-.4 0-.6l-1-2.3c-.2-.6-.5-.5-.7-.5h-.6c-.2 0-.6.1-.9.4-.3.4-1.2 1.2-1.2 2.9s1.2 3.3 1.4 3.5a13 13 0 0 0 5 4.4c2.2.9 2.2.6 2.6.5.4 0 1.4-.5 1.6-1.1s.2-1.1.2-1.2l-.6-.3ZM12 3a9 9 0 0 0-7.7 13.6L3 21l4.5-1.2A9 9 0 1 0 12 3Z");
+    var handoffLabel = element('span', '', 'Talk to a person');
+    handoffButton.appendChild(handoffIcon);
+    handoffButton.appendChild(handoffLabel);
+    var handoffHint = element('p', 'gw-handoff-hint');
+    handoffHint.hidden = true;
     contactRow.appendChild(contactButton);
+    contactRow.appendChild(handoffButton);
+    contactRow.appendChild(handoffHint);
 
     var composer = element('form', 'gw-composer');
     var inputWrap = element('div', 'gw-input-wrap');
@@ -1339,6 +1427,10 @@
       leadRegion: leadRegion,
       typing: typing,
       contactButton: contactButton,
+      restart: restart,
+      handoffButton: handoffButton,
+      handoffLabel: handoffLabel,
+      handoffHint: handoffHint,
       composer: composer,
       textarea: textarea,
       counter: counter,
@@ -1371,6 +1463,8 @@
     contactButton.addEventListener('click', function () {
       self.showLeadForm(normalizeLeadSpec({}, self.agent));
     });
+    restart.addEventListener('click', function () { self.restartConversation(); });
+    handoffButton.addEventListener('click', function () { self.requestHandoff(); });
     panel.addEventListener('keydown', function (event) { self.handlePanelKeys(event); });
     global.addEventListener('online', function () { self.updateConnectionState(); });
     global.addEventListener('offline', function () { self.updateConnectionState(); });
@@ -1794,6 +1888,7 @@
       createdAt: ''
     });
     this.renderSuggestions();
+    this.maybeOfferHandoff(content);
     await this.generateReply(request, false);
   };
 
@@ -1883,6 +1978,127 @@
     this.nodes.send.disabled = this.sending || !this.session || !textarea.value.trim();
   };
 
+  // ---- human handoff, and starting over ----
+
+  GarudaWidget.prototype.handoffAvailable = function handoffAvailable() {
+    var handoff = isRecord(this.agent.handoff) ? this.agent.handoff : null;
+    return Boolean(handoff && handoff.enabled && this.session);
+  };
+
+  GarudaWidget.prototype.updateHandoffVisibility = function updateHandoffVisibility() {
+    var nodes = this.nodes;
+    if (!nodes.handoffButton) return;
+    nodes.restart.hidden = !this.session || this.messages.length === 0;
+    var available = this.handoffAvailable();
+    nodes.handoffButton.hidden = !available || this.leadVisible;
+    if (!available) {
+      nodes.handoffHint.hidden = true;
+      return;
+    }
+    var handoff = this.agent.handoff;
+    nodes.handoffLabel.textContent = handoff.label;
+    nodes.handoffButton.setAttribute('aria-label', handoff.label);
+    // The visitor is told when somebody is actually there before they commit to
+    // a channel where silence reads as being ignored.
+    nodes.handoffHint.textContent = handoff.availability;
+    nodes.handoffHint.hidden = nodes.handoffButton.hidden || !handoff.availability;
+  };
+
+  // A visitor who types "let me talk to a human" should not have to hunt for a
+  // button. Matching a phrase the owner listed, or simply taking several turns
+  // without getting anywhere, pulls the offer forward instead.
+  GarudaWidget.prototype.maybeOfferHandoff = function maybeOfferHandoff(content) {
+    if (!this.handoffAvailable() || this.handoffOffered) return;
+    var handoff = this.agent.handoff;
+    var text = String(content || '').toLowerCase();
+    var matched = handoff.triggerPhrases.some(function (phrase) {
+      return phrase && text.indexOf(phrase) !== -1;
+    });
+    if (!matched && handoff.autoOfferAfter > 0) {
+      var turns = this.messages.filter(function (message) {
+        return message.role === 'user';
+      }).length;
+      matched = turns >= handoff.autoOfferAfter;
+    }
+    if (!matched) return;
+    this.handoffOffered = true;
+    this.nodes.handoffButton.classList.add('gw-handoff-offered');
+  };
+
+  GarudaWidget.prototype.requestHandoff = async function requestHandoff() {
+    var nodes = this.nodes;
+    if (!this.handoffAvailable() || nodes.handoffButton.disabled) return;
+    nodes.handoffButton.disabled = true;
+    nodes.handoffLabel.textContent = 'Opening WhatsApp…';
+    try {
+      var result = await this.api.startHandoff(this.session);
+      // A blocked popup is the expected failure here, not an exception. The
+      // fallback navigates the tab the visitor already trusted rather than
+      // leaving a button that looks broken.
+      var opened = global.open(result.url, '_blank', 'noopener,noreferrer');
+      if (!opened) global.location.href = result.url;
+      this.appendMessage({
+        id: randomID(),
+        role: 'assistant',
+        content: 'Opening WhatsApp so you can speak with the team directly. This chat stays here if you would rather keep typing.'
+      });
+    } catch (error) {
+      this.appendMessage({
+        id: randomID(),
+        role: 'assistant',
+        content: error instanceof WidgetError && error.code === 'handoff_unavailable'
+          ? 'Speaking with a person is not set up for this website yet.'
+          : 'We could not open WhatsApp just now. Please try again in a moment.'
+      });
+    } finally {
+      nodes.handoffButton.disabled = false;
+      this.updateHandoffVisibility();
+    }
+  };
+
+  // Starting over means a new conversation, not being forgotten. The visitor
+  // keeps their identity so a returning customer is still recognised, and the
+  // previous transcript stays in the owner's inbox rather than being deleted.
+  GarudaWidget.prototype.restartConversation = async function restartConversation() {
+    var nodes = this.nodes;
+    if (!this.session || this.sending || nodes.restart.disabled) return;
+    nodes.restart.disabled = true;
+    try {
+      var session = await this.api.resetSession(this.session);
+      this.session = session;
+      this.messages = [];
+      this.handoffOffered = false;
+      this.leadVisible = false;
+      nodes.handoffButton.classList.remove('gw-handoff-offered');
+      nodes.leadRegion.textContent = '';
+      this.clearTranscript();
+      this.hydrateConversation(session.conversation);
+      this.clearNotice();
+    } catch (_error) {
+      this.appendMessage({
+        id: randomID(),
+        role: 'assistant',
+        content: 'We could not start a new conversation just now. Please try again.'
+      });
+    } finally {
+      nodes.restart.disabled = false;
+      this.updateHandoffVisibility();
+    }
+  };
+
+  // The consent region and the history notice are permanent fixtures of the
+  // transcript element, so the rows are removed individually rather than by
+  // emptying their parent.
+  GarudaWidget.prototype.clearTranscript = function clearTranscript() {
+    var messages = this.nodes.messages;
+    var rows = messages.querySelectorAll('.gw-message-row');
+    for (var index = 0; index < rows.length; index += 1) {
+      rows[index].remove();
+    }
+    this.nodes.historyStatus.textContent = '';
+    this.nodes.historyStatus.hidden = true;
+  };
+
   GarudaWidget.prototype.updateContactVisibility = function updateContactVisibility() {
     if (!this.nodes.contactButton) return;
     var hasUserMessage = this.messages.some(function (message) {
@@ -1896,6 +2112,7 @@
       lastMessage.role !== 'assistant' ||
       this.sending ||
       this.leadVisible;
+    this.updateHandoffVisibility();
   };
 
   // ---- the lead form the customer built ----
@@ -2244,7 +2461,7 @@
       '.gw-launcher{position:relative;min-width:60px;height:60px;border:0;border-radius:20px;padding:0 7px;background:var(--garuda-accent);color:var(--garuda-accent-text);display:flex;align-items:center;gap:0;box-shadow:0 14px 35px rgba(30,41,59,.22),0 4px 12px rgba(30,41,59,.12);cursor:pointer;transition:transform .2s ease,box-shadow .2s ease,min-width .25s ease;border:1px solid rgba(255,255,255,.18);}',
       '.gw-launcher:hover{transform:translateY(-2px);box-shadow:0 18px 42px rgba(30,41,59,.27),0 5px 14px rgba(30,41,59,.13);}',
       '.gw-launcher:active{transform:translateY(0) scale(.98);}',
-      '.gw-launcher:focus-visible,.gw-icon-button:focus-visible,.gw-send:focus-visible,.gw-suggestion:focus-visible,.gw-primary-button:focus-visible,.gw-secondary-button:focus-visible,.gw-contact-button:focus-visible,.gw-lead-dismiss:focus-visible,.gw-notice-action:focus-visible,a:focus-visible{outline:3px solid color-mix(in srgb,var(--garuda-accent) 36%,white);outline-offset:3px;}',
+      '.gw-launcher:focus-visible,.gw-icon-button:focus-visible,.gw-send:focus-visible,.gw-suggestion:focus-visible,.gw-primary-button:focus-visible,.gw-secondary-button:focus-visible,.gw-contact-button:focus-visible,.gw-handoff-button:focus-visible,.gw-lead-dismiss:focus-visible,.gw-notice-action:focus-visible,a:focus-visible{outline:3px solid color-mix(in srgb,var(--garuda-accent) 36%,white);outline-offset:3px;}',
       '.gw-launcher-icon{width:46px;height:46px;border-radius:15px;display:grid;place-items:center;flex:none;background:rgba(255,255,255,.13);}',
       '.gw-launcher-icon svg{width:25px;height:25px;}',
       '.gw-launcher-label{max-width:0;overflow:hidden;white-space:nowrap;font-size:14px;font-weight:720;letter-spacing:-.01em;opacity:0;transition:max-width .25s ease,opacity .18s ease,padding .25s ease;}',
@@ -2300,6 +2517,16 @@
       '.gw-contact-row{padding:4px 15px 3px;background:var(--garuda-background);}',
       '.gw-contact-button{min-height:35px;border:0;background:transparent;color:#5B6475;display:flex;align-items:center;gap:6px;padding:5px 3px;font-size:11px;font-weight:680;cursor:pointer;}',
       '.gw-contact-button:hover{color:var(--garuda-accent);}',
+      '.gw-handoff-button{min-height:35px;border:0;background:transparent;color:#128C7E;display:flex;align-items:center;gap:6px;padding:5px 3px;font-size:11px;font-weight:680;cursor:pointer;border-radius:9px;}',
+      '.gw-handoff-button:hover{background:rgba(18,140,126,.09);}',
+      '.gw-handoff-button:disabled{opacity:.6;cursor:progress;}',
+      '.gw-handoff-button svg{width:15px;height:15px;}',
+      // The offer is a nudge, not an alarm: one short pulse, and nothing at all
+      // for a visitor who has asked their system not to animate.
+      '.gw-handoff-offered{background:rgba(18,140,126,.12);animation:gw-handoff-pulse 1.1s ease-out 2;}',
+      '@keyframes gw-handoff-pulse{0%{box-shadow:0 0 0 0 rgba(18,140,126,.35);}70%{box-shadow:0 0 0 7px rgba(18,140,126,0);}100%{box-shadow:0 0 0 0 rgba(18,140,126,0);}}',
+      '@media (prefers-reduced-motion: reduce){.gw-handoff-offered{animation:none;}}',
+      '.gw-handoff-hint{margin:0 0 2px 3px;font-size:10px;color:#7A8496;}',
       '.gw-contact-button svg{width:15px;height:15px;}',
       '.gw-composer{display:flex;align-items:flex-end;gap:8px;padding:9px 12px 11px;background:var(--garuda-background);border-top:1px solid var(--garuda-line);}',
       '.gw-input-wrap{position:relative;flex:1;min-width:0;}',

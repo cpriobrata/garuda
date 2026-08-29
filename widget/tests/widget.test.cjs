@@ -1138,3 +1138,219 @@ test('every control that starts network work says so and refuses the second clic
     rendered.restore();
   }
 });
+
+// ---- human handoff over WhatsApp ----
+
+test('the bootstrap tells the widget a handoff exists without ever carrying the number', () => {
+  const agent = widget.normalizeAgentPayload({
+    display_name: 'Northstar',
+    handoff: {
+      enabled: true,
+      channel: 'whatsapp',
+      label: 'Chat with Priya',
+      availability: 'Mon-Fri, 9am-6pm IST',
+      trigger_phrases: ['Human', 'real person'],
+      auto_offer_after: 3
+    }
+  });
+
+  assert.equal(agent.handoff.enabled, true);
+  assert.equal(agent.handoff.label, 'Chat with Priya');
+  assert.equal(agent.handoff.availability, 'Mon-Fri, 9am-6pm IST');
+  assert.deepEqual(agent.handoff.triggerPhrases, ['human', 'real person'], 'phrases are lowercased once, here, not per keystroke');
+  assert.equal(agent.handoff.autoOfferAfter, 3);
+  assert.equal('whatsAppNumber' in agent.handoff, false, 'the widget must have no field the number could arrive in');
+});
+
+test('an agent with no handoff configured behaves exactly as it did before the feature', () => {
+  const agent = widget.normalizeAgentPayload({ display_name: 'Northstar' });
+  assert.equal(agent.handoff.enabled, false);
+  assert.deepEqual(agent.handoff.triggerPhrases, []);
+  assert.equal(agent.handoff.autoOfferAfter, 0);
+});
+
+test('the handoff button appears only when the agent offers one, and carries the availability note', () => {
+  const withHandoff = renderWidget({
+    display_name: 'Northstar',
+    handoff: { enabled: true, label: 'Talk to Priya', availability: 'Weekdays, 9-6 IST' }
+  });
+  try {
+    withHandoff.instance.appendMessage({ id: 'm1', role: 'user', content: 'hello' });
+    assert.equal(withHandoff.nodes.handoffButton.hidden, false);
+    assert.equal(withHandoff.nodes.handoffLabel.textContent, 'Talk to Priya');
+    assert.equal(withHandoff.nodes.handoffHint.hidden, false);
+    assert.equal(withHandoff.nodes.handoffHint.textContent, 'Weekdays, 9-6 IST');
+  } finally {
+    withHandoff.restore();
+  }
+
+  const without = renderWidget({ display_name: 'Northstar' });
+  try {
+    without.instance.appendMessage({ id: 'm1', role: 'user', content: 'hello' });
+    assert.equal(without.nodes.handoffButton.hidden, true, 'a site that never configured a handoff shows no button');
+    assert.equal(without.nodes.handoffHint.hidden, true);
+  } finally {
+    without.restore();
+  }
+});
+
+test('asking for a human pulls the offer forward instead of waiting to be found', () => {
+  const rendered = renderWidget({
+    display_name: 'Northstar',
+    handoff: { enabled: true, label: 'Talk to a person', trigger_phrases: ['real person'] }
+  });
+  try {
+    rendered.instance.maybeOfferHandoff('can I speak to a REAL PERSON please');
+    assert.equal(rendered.nodes.handoffButton.classList.contains('gw-handoff-offered'), true);
+  } finally {
+    rendered.restore();
+  }
+
+  const quiet = renderWidget({
+    display_name: 'Northstar',
+    handoff: { enabled: true, trigger_phrases: ['real person'] }
+  });
+  try {
+    quiet.instance.maybeOfferHandoff('what are your opening hours');
+    assert.equal(quiet.nodes.handoffButton.classList.contains('gw-handoff-offered'), false);
+  } finally {
+    quiet.restore();
+  }
+});
+
+test('the handoff fetches its link with the session token and opens it in a new tab', async () => {
+  const calls = [];
+  const rendered = renderWidget(
+    { display_name: 'Northstar', handoff: { enabled: true, label: 'Talk to a person' } },
+    {
+      fetch: async (url, settings) => {
+        calls.push({ url, settings });
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({ data: { channel: 'whatsapp', url: 'https://wa.me/919876543210?text=hi', label: 'Talk to a person' } })
+        };
+      }
+    }
+  );
+  const savedOpen = global.open;
+  const opened = [];
+  global.open = (url, target, features) => { opened.push({ url, target, features }); return {}; };
+  try {
+    await rendered.instance.requestHandoff();
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'https://api.garuda.example/widget/v1/sessions/session-1/handoff');
+    assert.equal(calls[0].settings.method, 'POST');
+    assert.equal(calls[0].settings.headers['X-Garuda-Session-Token'], 'short-lived-token', 'the link is only obtainable with a live session');
+    assert.equal(opened.length, 1);
+    assert.equal(opened[0].url, 'https://wa.me/919876543210?text=hi');
+    assert.equal(opened[0].features, 'noopener,noreferrer');
+    assert.equal(rendered.nodes.handoffButton.disabled, false, 'the button comes back after the link opens');
+    assert.equal(rendered.nodes.handoffLabel.textContent, 'Talk to a person', 'the busy label does not stick');
+  } finally {
+    global.open = savedOpen;
+    rendered.restore();
+  }
+});
+
+test('a blocked popup still gets the visitor to WhatsApp', async () => {
+  const rendered = renderWidget(
+    { display_name: 'Northstar', handoff: { enabled: true } },
+    {
+      fetch: async () => ({
+        ok: true,
+        status: 200,
+        headers: { get: () => 'application/json' },
+        json: async () => ({ data: { url: 'https://wa.me/919876543210?text=hi' } })
+      })
+    }
+  );
+  const savedOpen = global.open;
+  global.open = () => null;
+  try {
+    await rendered.instance.requestHandoff();
+    assert.equal(global.location.href, 'https://wa.me/919876543210?text=hi', 'the tab the visitor already trusted is navigated instead');
+  } finally {
+    global.open = savedOpen;
+    rendered.restore();
+  }
+});
+
+test('a handoff that cannot be reached says so in the transcript rather than looking broken', async () => {
+  const rendered = renderWidget(
+    { display_name: 'Northstar', handoff: { enabled: true } },
+    { fetch: async () => { throw new Error('offline'); } }
+  );
+  const savedOpen = global.open;
+  global.open = () => ({});
+  try {
+    await rendered.instance.requestHandoff();
+    const last = rendered.instance.messages[rendered.instance.messages.length - 1];
+    assert.match(last.content, /could not open WhatsApp/i);
+    assert.equal(rendered.nodes.handoffButton.disabled, false);
+  } finally {
+    global.open = savedOpen;
+    rendered.restore();
+  }
+});
+
+// ---- starting the conversation over ----
+
+test('restarting swaps in a new session and clears the transcript', async () => {
+  const rendered = renderWidget(
+    { display_name: 'Northstar', welcome_message: 'Hi there!' },
+    {
+      fetch: async () => ({
+        ok: true,
+        status: 201,
+        headers: { get: () => 'application/json' },
+        json: async () => ({
+          data: {
+            session_id: 'session-2',
+            session_token: 'a-brand-new-token',
+            conversation: { id: 'session-2', resumed: false, messages: [] }
+          }
+        })
+      })
+    }
+  );
+  try {
+    rendered.instance.appendMessage({ id: 'm1', role: 'user', content: 'the earlier conversation' });
+    assert.equal(rendered.nodes.restart.hidden, false, 'the control appears once there is something to restart');
+
+    await rendered.instance.restartConversation();
+
+    assert.equal(rendered.instance.session.sessionID, 'session-2');
+    assert.equal(rendered.instance.session.sessionToken, 'a-brand-new-token', 'the old token must not survive a reset');
+    assert.equal(rendered.instance.messages.length, 1, 'only the fresh welcome remains');
+    assert.equal(rendered.instance.messages[0].content, 'Hi there!');
+    assert.equal(
+      rendered.nodes.messages.querySelectorAll('.gw-message-row').length,
+      1,
+      'the old rows are removed from the DOM, not just from the array'
+    );
+    assert.equal(rendered.nodes.restart.disabled, false);
+  } finally {
+    rendered.restore();
+  }
+});
+
+test('a failed restart keeps the visitor where they were', async () => {
+  const rendered = renderWidget(
+    { display_name: 'Northstar' },
+    { fetch: async () => { throw new Error('offline'); } }
+  );
+  try {
+    rendered.instance.appendMessage({ id: 'm1', role: 'user', content: 'still here' });
+    await rendered.instance.restartConversation();
+
+    assert.equal(rendered.instance.session.sessionID, 'session-1', 'the working session is not thrown away');
+    assert.equal(rendered.instance.messages[0].content, 'still here');
+    assert.match(rendered.instance.messages[rendered.instance.messages.length - 1].content, /could not start a new conversation/i);
+    assert.equal(rendered.nodes.restart.disabled, false);
+  } finally {
+    rendered.restore();
+  }
+});

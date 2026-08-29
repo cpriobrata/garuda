@@ -1,13 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertCircle, Check, Clipboard, Code2, Copy, Globe2, Loader2, Palette, ShieldCheck, Sparkles } from "lucide-react";
+import { AlertCircle, Check, Code2, Globe2, Loader2, Palette, ShieldCheck } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { garudaApi } from "@/lib/api";
 import { AsyncButton } from "@/components/widget/widget-studio-controls";
+import { PlatformGuides, ShareInstallPanel, SnippetBlock } from "@/components/widget/widget-install-guides";
 import { WidgetStudio } from "@/components/widget/widget-studio";
 
 const defaultSnippet = `<script
@@ -17,10 +17,11 @@ const defaultSnippet = `<script
 
 export function WidgetSettings() {
   const connected = Boolean(process.env.NEXT_PUBLIC_API_URL);
-  const [copied, setCopied] = useState(false);
   const [embedCode, setEmbedCode] = useState(connected ? "Retrieving the published embed code…" : defaultSnippet);
   const [published, setPublished] = useState(!connected);
   const [domains, setDomains] = useState<string[]>(connected ? [] : ["northstarlabs.com"]);
+  const [welcomeMessage, setWelcomeMessage] = useState("");
+  const [leadCapture, setLeadCapture] = useState(false);
   const [agentId, setAgentId] = useState("");
   const [loadFailed, setLoadFailed] = useState(false);
   const [loadingEmbed, setLoadingEmbed] = useState(true);
@@ -47,6 +48,12 @@ export function WidgetSettings() {
       setPublished(embed.published);
       setEmbedCode(embed.published ? embed.embed_code : "Publish this agent to generate its secure embed code.");
       setDomains(record.branding?.allowed_domains || []);
+      setWelcomeMessage(record.welcome_message || "");
+      // The agent detail endpoint returns lead_capture, which the shared
+      // AgentRecord type does not name yet. Read it narrowly here rather than
+      // widen a type this screen does not own; an absent key reads as off,
+      // which is what the checklist should then show.
+      setLeadCapture(Boolean((record as { lead_capture?: { enabled?: boolean } }).lead_capture?.enabled));
     } catch {
       if (!mounted.current || !connected) return;
       setPublished(false);
@@ -59,12 +66,6 @@ export function WidgetSettings() {
 
   useEffect(() => { loadEmbed(); }, [loadEmbed]);
 
-  async function copyCode() {
-    await navigator.clipboard?.writeText(embedCode);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1400);
-  }
-
   return (
     <Tabs defaultValue="install" className="space-y-6">
       <TabsList className="h-10 bg-slate-100"><TabsTrigger value="install"><Code2 className="mr-1.5 h-3.5 w-3.5" /> Install</TabsTrigger><TabsTrigger value="customize"><Palette className="mr-1.5 h-3.5 w-3.5" /> Customize</TabsTrigger></TabsList>
@@ -73,12 +74,7 @@ export function WidgetSettings() {
           <div className="space-y-6">
             <section className="rounded-xl border bg-white p-5 shadow-sm sm:p-6">
               <div className="flex items-start gap-3"><span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-indigo-50 text-indigo-600"><Code2 className="h-5 w-5" /></span><div><h2 className="text-sm font-semibold text-slate-900">Add Garuda to your website</h2><p className="mt-1 text-xs leading-5 text-slate-500">Paste this snippet before the closing <code className="rounded bg-slate-100 px-1 py-0.5 text-[10px] text-slate-700">&lt;/body&gt;</code> tag. It loads asynchronously, so it won’t block your page.</p></div></div>
-              <div className="relative mt-5 overflow-hidden rounded-xl bg-slate-950 p-4">
-                <pre className="overflow-x-auto whitespace-pre-wrap font-mono text-[11px] leading-6 text-slate-300"><code>{embedCode}</code></pre>
-                <AsyncButton size="sm" variant="secondary" className="absolute right-3 top-3 h-7 bg-white/10 text-[10px] text-white hover:bg-white/20" onClick={copyCode} disabled={!published} pendingLabel="Copying…" icon={copied ? <Check className="mr-1.5 h-3.5 w-3.5" /> : <Copy className="mr-1.5 h-3.5 w-3.5" />}>
-                  {copied ? "Copied" : published ? "Copy" : "Publish first"}
-                </AsyncButton>
-              </div>
+              <div className="mt-5"><SnippetBlock code={embedCode} blocked={!published} blockedLabel="Publish first" /></div>
               {loadingEmbed ? <p className="mt-3 flex items-center gap-1.5 text-[10px] text-slate-500"><Loader2 className="h-3 w-3 animate-spin" /> Checking this workspace for a published agent…</p> : null}
               {loadFailed ? (
                 <div className="mt-3 flex items-center gap-2 rounded-lg bg-red-50 p-3 text-[10px] text-red-700">
@@ -96,14 +92,14 @@ export function WidgetSettings() {
             </section>
 
             <section className="rounded-xl border bg-white p-5 shadow-sm sm:p-6">
-              <h2 className="text-sm font-semibold text-slate-900">Platform guides</h2><p className="mt-1 text-xs text-slate-500">Step-by-step instructions for popular website builders</p>
-              <div className="mt-4 grid gap-3 sm:grid-cols-2">{["Webflow", "WordPress", "Shopify", "Framer"].map((platform) => <button key={platform} disabled className="flex cursor-not-allowed items-center rounded-xl border p-3 text-left opacity-70"><span className="grid h-8 w-8 place-items-center rounded-lg bg-slate-100 text-[10px] font-bold text-slate-700">{platform[0]}</span><span className="ml-3 text-xs font-semibold text-slate-700">{platform}</span><span className="ml-auto text-[9px] text-slate-400">Coming soon</span></button>)}</div>
+              <h2 className="text-sm font-semibold text-slate-900">Platform guides</h2><p className="mt-1 text-xs text-slate-500">Where the snippet goes on the popular builders, with your own code ready to copy</p>
+              <PlatformGuides embedCode={embedCode} published={published} domains={domains} />
             </section>
           </div>
 
           <aside className="space-y-6">
-            <div className="rounded-xl border border-indigo-200 bg-gradient-to-br from-indigo-50 to-violet-50 p-5"><div className="flex items-start gap-3"><span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-indigo-600 text-white"><Sparkles className="h-4 w-4" /></span><div><p className="text-xs font-semibold text-indigo-950">Need a teammate to install it?</p><p className="mt-1 text-[10px] leading-5 text-indigo-700">Copy the secure snippet above and share it with your developer. Email sharing is coming soon.</p><Button size="sm" variant="outline" className="mt-3 border-indigo-200 bg-white text-indigo-700" disabled><Clipboard className="mr-1.5 h-3.5 w-3.5" /> Email sharing · coming soon</Button></div></div></div>
-            <div className="rounded-xl border bg-white p-5 shadow-sm"><p className="text-xs font-semibold text-slate-900">Before you publish</p><div className="mt-4 space-y-3">{["Test your opening conversation", "Confirm mobile placement", "Add your allowed domains", "Set human handoff hours"].map((item, index) => <div key={item} className="flex items-center gap-2.5"><span className={cn("grid h-5 w-5 place-items-center rounded-full", index < 2 ? "bg-emerald-50 text-emerald-600" : "border text-slate-300")}>{index < 2 && <Check className="h-3 w-3" />}</span><span className="text-[11px] text-slate-600">{item}</span></div>)}</div></div>
+            <ShareInstallPanel embedCode={embedCode} published={published} domains={domains} />
+            <PublishChecklist loading={loadingEmbed} failed={loadFailed} published={published} domains={domains} welcomeMessage={welcomeMessage} leadCapture={leadCapture} />
           </aside>
         </div>
       </TabsContent>
@@ -119,6 +115,39 @@ export function WidgetSettings() {
         )}
       </TabsContent>
     </Tabs>
+  );
+}
+
+// Every row is read off the agent this screen already loaded. A step whose state
+// is not on that record is not listed at all, because a tick nobody computed is
+// worse than a shorter list.
+function PublishChecklist({ loading, failed, published, domains, welcomeMessage, leadCapture }: { loading: boolean; failed: boolean; published: boolean; domains: string[]; welcomeMessage: string; leadCapture: boolean }) {
+  const greeting = welcomeMessage.trim();
+  const items = [
+    { label: "Welcome message written", detail: greeting ? `“${greeting.length > 88 ? `${greeting.slice(0, 88)}…` : greeting}”` : "The widget opens with nothing to say until you write one", done: greeting.length > 0 },
+    { label: "Allowed domain added", detail: domains.length ? domains.join(", ") : "Without one the widget refuses to load on any site", done: domains.length > 0 },
+    { label: "Lead capture turned on", detail: leadCapture ? "Visitors are asked for contact details" : "Nobody is asked for contact details in the conversation", done: leadCapture },
+    { label: "Agent published", detail: published ? "The embed snippet serves a live widget" : "An unpublished agent has no widget to serve", done: published },
+  ];
+  const ready = items.filter((item) => item.done).length;
+  return (
+    <div className="rounded-xl border bg-white p-5 shadow-sm">
+      <div className="flex items-center justify-between"><p className="text-xs font-semibold text-slate-900">Before you publish</p>{!loading && !failed ? <span className="text-[10px] font-medium text-slate-400">{ready} of {items.length} ready</span> : null}</div>
+      {loading ? (
+        <p role="status" className="mt-4 flex items-center gap-1.5 text-[10px] text-slate-500"><Loader2 className="h-3 w-3 animate-spin" /> Reading this agent&rsquo;s settings…</p>
+      ) : failed ? (
+        <p className="mt-4 text-[10px] leading-5 text-slate-500">This agent&rsquo;s settings could not be read, so none of these can be checked honestly. Retry the embed code above.</p>
+      ) : (
+        <ul className="mt-4 space-y-3">
+          {items.map((item) => (
+            <li key={item.label} className="flex items-start gap-2.5">
+              <span className={cn("mt-px grid h-5 w-5 shrink-0 place-items-center rounded-full", item.done ? "bg-emerald-50 text-emerald-600" : "border text-slate-300")}>{item.done ? <Check className="h-3 w-3" aria-hidden="true" /> : null}</span>
+              <span className="min-w-0"><span className="block text-[11px] text-slate-600">{item.label}<span className="sr-only">: {item.done ? "done" : "not done yet"}</span></span><span className="mt-0.5 block break-words text-[9px] leading-4 text-slate-400">{item.detail}</span></span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 

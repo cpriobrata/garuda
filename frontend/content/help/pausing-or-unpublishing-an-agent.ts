@@ -157,12 +157,12 @@ export const article: HelpArticle = {
       ],
     },
     {
-      problem: "The widget is still answering after you paused it",
+      problem: "The launcher is still on your site after you paused it",
       body: [
         {
           kind: "p",
           text: [
-            "A conversation already open in somebody's browser holds a session for a few minutes. Reload the page and the widget will report the assistant as unavailable.",
+            "That is the snippet, which is still in your pages and still runs. What stops is the answering: the agent status is checked on every widget request, including each message, so a conversation already open cannot send another one. If you want nothing at all to appear, take the snippet out of your pages as well.",
           ],
         },
       ],

@@ -30,3 +30,10 @@ backend/internal/api/zz_*_test.go
 
 # Vercel CLI link metadata
 frontend/.vercel/
+
+# QA and local run scratch: token dumps, throwaway payloads, and the outbound
+# webhook queue a local server writes beside the binary.
+backend/qa-*
+backend/.qa-*
+backend/outbound.json
+widget/src/*.tmp.*
