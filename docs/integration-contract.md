@@ -465,6 +465,29 @@ the same millisecond are indistinguishable by time, and a cursor that cannot
 separate them either repeats one or drops one. An unknown cursor returns the
 tail, not the whole transcript.
 
+`POST /widget/v1/sessions/{sessionId}/voice` — a visitor speaking instead of
+typing. Raw audio body, `Content-Type: audio/webm` or similar, at most 1MB.
+
+```json
+{ "text": "how much does a survey cost", "language": "en" }
+```
+
+**It transcribes and does not send.** The visitor sees what was heard and presses
+send, and the message then travels the ordinary chat path with its own rate
+limit, quota and lead-capture rules. Speech recognition is wrong sometimes, and a
+misheard sentence sent to somebody's business is worse than an extra tap.
+
+Errors a client must handle: `402 subscription_required` and
+`503 voice_unavailable` both mean voice is not available here and the visitor
+should type — neither is their fault and neither should be shown as an error
+about them. Also `413 audio_too_large`, `422 audio_too_short`,
+`422 no_speech_detected`, `429 voice_quota_exceeded`,
+`503 transcription_unavailable`.
+
+The audio is **not stored**. It is a recording of somebody speaking on a
+stranger's website, it is not needed once it is words, and keeping it would mean
+holding a voice sample nobody agreed to give us.
+
 `GET /widget/v1/sessions/{sessionId}/slots` — free times from the customer's own
 connected Google Calendar.
 
@@ -509,6 +532,75 @@ agent starts answering from it.
 `422 url_not_allowed` covers every refused address — non-https, private,
 loopback, link-local, credentials in the URL, or a redirect into any of those.
 The message must not describe what is or is not reachable from the server.
+
+### Appointments
+
+`GET /v1/appointments?scope=upcoming|past|all&agent_id=`
+
+```json
+{ "appointments": [{
+    "id": "lead_…", "lead_id": "lead_…", "agent_id": "agt_…", "agent_name": "Priya",
+    "session_id": "cvs_…", "starts_at": "2026-09-03T09:00:00Z", "minutes": 30,
+    "timezone": "Asia/Kolkata", "calendar": "googlecalendar",
+    "calendar_label": "Google Calendar", "name": "…", "email": "…", "phone": "…",
+    "notes": "…", "status": "new", "booked_at": "…" }],
+  "upcoming_count": 3, "past_count": 11,
+  "reflects_changes_made_in_the_calendar": false }
+```
+
+This is what **Garuda booked**, not a mirror of the customer's calendar. It reads
+from the lead recorded against each booking rather than from the providers: one
+read instead of an API call per connected calendar, no per-provider failure mode,
+and it still answers after a calendar is disconnected.
+
+`reflects_changes_made_in_the_calendar` is always false and is in the payload
+deliberately — an appointment moved or cancelled inside the customer's own
+calendar is not reflected here, because nothing tells us, and any consumer should
+inherit that caveat rather than take it from our UI.
+
+`calendar` is recorded on the booking, not looked up from the agent, so switching
+provider does not relabel last week's appointments.
+
+### What an integration is for
+
+`GET /v1/integrations/roles`
+
+```json
+{ "roles": [{ "toolkit": "slack", "capability": "notify", "label": "Slack",
+              "use_case": "Your team gets a message the moment a lead is captured…",
+              "setting_label": "Channel", "setting_hint": "…",
+              "partial": false }],
+  "calendars": [{ "toolkit": "cal", "label": "Cal.com",
+                  "setting_label": "Event type ID", "books_in_chat": true }] }
+```
+
+Capability is one of `calendar`, `leads`, `notify` — the only three things this
+product sends elsewhere. **An app absent from `roles` can still be connected and
+nothing is wired to it**; the screen must say so and point at the outbound
+webhook, which reaches everything else without per-provider code. Showing the
+catalogue as though all of it receives leads is the failure this endpoint exists
+to prevent.
+
+`partial` marks a job the provider only half supports, with `partial_note`
+explaining it — Calendly completing its booking on its own page, for instance.
+
+### Choosing a calendar
+
+`model.BookingConfig` carries `calendar` (a toolkit slug) and `calendar_setting`.
+
+- **One calendar per agent.** An agent stands for one job, and "when are you
+  free" has to have a single answer.
+- An empty `calendar` means `googlecalendar`, which is what it meant when the
+  field did not exist.
+- `calendar_setting` is the single value a provider needs beyond the connection —
+  a Cal.com event type id, a Calendly event URL. Saving an enabled booking whose
+  calendar is missing it is refused with detail key `booking.calendar_setting`.
+- Free/busy providers (Google, Outlook) are inverted against the owner's working
+  day by us. Scheduling providers (Cal.com, Calendly) are asked what is bookable
+  and their answer is taken, because they already own availability rules the
+  customer configured there.
+
+---
 
 ## 6. Public widget contract
 

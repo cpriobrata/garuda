@@ -229,6 +229,78 @@ extracted text for review, then the existing sources endpoint saves it.
 
 ---
 
+## 6i. What an integration is FOR — built 2026-08-30
+
+`internal/composio/capability.go` is the single place that answers "what will
+connecting this app do". Three jobs, because there are only three things this
+product sends elsewhere:
+
+| Job | Apps |
+|---|---|
+| `calendar` | Google Calendar, Outlook, Cal.com, Calendly |
+| `leads` | HubSpot, Google Sheets |
+| `notify` | Slack, Gmail |
+
+`GET /v1/integrations/roles` serves the table. An app NOT in it can still be
+connected and the screen must say plainly that nothing is wired to it yet — the
+outbound webhook already reaches everything else through Zapier/Make/n8n. A test
+fails if any listed app has no use case, or if an advertised calendar cannot
+actually be driven.
+
+## 6j. Calendars — built 2026-08-30
+
+`internal/composio/calendars.go`. **One calendar per agent**, deliberately: an
+agent stands for one job and "when are you free" needs a single answer.
+
+Two shapes, and the difference is load-bearing:
+
+- **Free/busy** (Google, Outlook) answer "when am I busy". We invert against the
+  owner's working day ourselves. Our rule.
+- **Scheduling** (Cal.com, Calendly) already own an event type with its own
+  availability, buffers and limits. We ask THEM what is bookable and take it —
+  re-deriving would fight rules the customer set there.
+- **Calendly cannot be booked through an API at all**; it finishes on its own
+  page. `booking.completes_elsewhere` tells the widget BEFORE a visitor picks a
+  time.
+
+`BookingConfig.Calendar` empty means `googlecalendar` — that is what it meant
+when it was written, and stored blanks must keep meaning it. A provider missing
+its one setting (Cal.com event type, Calendly URL) is refused at save time.
+
+## 6k. Appointments — built 2026-08-30
+
+`GET /v1/appointments` reads from the LEADS Garuda records per booking, not from
+the calendars. One read instead of one API call per connected calendar, no
+per-provider failure mode, and it still answers after a calendar is
+disconnected. **The honest limit:** an appointment moved or cancelled inside the
+customer's own calendar is not reflected, because nothing tells us. The payload
+says so in `reflects_changes_made_in_the_calendar`, not just the UI.
+
+## 6l. Widget voice messages — built 2026-08-30
+
+`POST /widget/v1/sessions/{id}/voice` transcribes via Deepgram and **hands the
+words back without sending them**. The visitor sees what was heard and presses
+send. Speech recognition is wrong sometimes and a misheard sentence sent to
+somebody's business is worse than an extra tap; and one chat path means one
+place where quota, consent and storage are decided.
+
+Billed to the CUSTOMER whose site it is, through the same hourly budget the
+portal's voice onboarding uses. Entitlement is checked before a byte is read —
+this route needs no login. **The audio is never stored.** A failed transcription
+does not refund the reservation: refunding would open a free unmetered channel.
+
+## 6m. Reply length — changed 2026-08-30
+
+`chatStyleRule` in `agents.go` is appended to every chat prompt, NOT written into
+the customer's instructions — they would delete it by accident and nobody would
+notice until the bill. Measured live: 340 chars and 89 completion tokens became
+203 and 55, and the shorter answer was better.
+
+`chatMaxTokens` is 1,200 and is a CEILING, not a target. This is a reasoning
+model and spends ~300 tokens thinking before it writes; a budget tight enough to
+force brevity would truncate mid-sentence. The instruction is the right lever.
+---
+
 ## 7. Providers
 
 | | State |
