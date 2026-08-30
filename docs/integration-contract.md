@@ -368,6 +368,148 @@ Source status is `queued | processing | ready | failed | deleting`. A failure co
 
 Lead status is `new | qualified | contacted | converted | disqualified`. Lead profile fields supplied by visitors are changed through a separate audited operation if later required; the generic patch must not allow `organization_id`, `agent_id`, consent, or source attribution changes.
 
+
+### Team replies
+
+`POST /v1/conversations/{conversationId}/messages` accepts `{ "content": "..." }`,
+1 to 4,000 **characters** (counted in runes, not bytes — a byte cap is roughly a
+third of that in most non-Latin scripts). The reply is stored with role
+`assistant` and `metadata.author = "operator"`, so the widget renders it without
+change and the model reads it as its own prior turn rather than contradicting
+what a person just said.
+
+`404 conversation_not_found` covers both a missing conversation and one in
+another workspace, as everywhere else.
+
+### Visitor journey
+
+Every conversation summary and detail may carry a `journey` object. It is absent
+for a session recorded before tracking existed, and for a visitor whose browser
+did not report — both mean "we do not know", never "they did nothing".
+
+```json
+{
+  "source": {
+    "channel": "direct|organic|paid|social|email|referral|campaign",
+    "referrer_domain": "google.com",
+    "landing_path": "/pricing",
+    "utm_source": "google", "utm_medium": "cpc", "utm_campaign": "launch",
+    "click_id_kind": "google|meta"
+  },
+  "device": { "form": "mobile|tablet|desktop", "language": "en-GB",
+              "timezone": "Asia/Kolkata", "region": "India" },
+  "region_is_approximate": true,
+  "pages": [{ "path": "/pricing", "title": "Pricing",
+              "arrived_at": "2026-08-30T00:05:45Z", "seconds": 95 }],
+  "page_count": 7, "pages_truncated": false, "engaged_seconds": 310,
+  "first_seen_at": "...", "last_seen_at": "..."
+}
+```
+
+`channel` may be an empty string when a batch of pages arrived before any source
+batch; render that as unrecorded rather than inventing a channel.
+
+`region` is derived from the browser's own IANA time zone, **not** an IP lookup,
+so it is approximate by construction. `region_is_approximate` travels in the
+payload rather than living only in the UI, so any consumer inherits the caveat.
+
+`pages_truncated` means older entries were dropped past the per-session cap;
+`page_count` still counts every page seen, so the total stays honest.
+
+---
+
+## 6b. Widget journey, handoff, replies and booking
+
+All four require a live session token in `X-Garuda-Session-Token`. None of them
+is reachable with only an `agent_key`.
+
+`POST /widget/v1/sessions/{sessionId}/activity` — one batch of journey
+observations. `204 No Content`.
+
+```json
+{
+  "source": { "referrer": "...", "landing_path": "/pricing",
+              "utm_source": "...", "utm_medium": "...", "utm_campaign": "...",
+              "utm_term": "...", "utm_content": "...",
+              "google_click": true, "meta_click": false },
+  "device": { "viewport_width": 390, "language": "en-GB", "timezone": "Asia/Kolkata" },
+  "pages": [{ "path": "/pricing", "title": "Pricing", "seconds": 42 }]
+}
+```
+
+`source` and `device` are sent once, on the first batch of a visit; a later batch
+omits them and the stored values are left alone, so an internal navigation cannot
+overwrite the referrer that brought the visitor to the site. At most 20 pages per
+batch and 50 kept per session, oldest dropped. The server strips query strings
+from paths, keeps only the host of a referrer, and stores a click id as a boolean
+rather than a value. **`google_click` and `meta_click` are booleans, never ids.**
+
+Re-reporting the page a visitor is still on, with a larger `seconds`, updates it
+in place. Reporting a page after visiting others is a new entry, because the
+order is the story.
+
+`POST /widget/v1/sessions/{sessionId}/handoff` — hands the visitor a WhatsApp
+link to the site owner. `200` with `{ channel, url, label, availability }`.
+`404 handoff_unavailable` when the agent does not offer one.
+
+**The owner's number never appears in the widget bootstrap.** The bootstrap is a
+public document served to every allowed origin; it carries only
+`handoff: { enabled, channel, label, availability, trigger_phrases,
+auto_offer_after }`. The number becomes a `wa.me` link only inside this endpoint,
+which first proves the caller holds a live session.
+
+`GET /widget/v1/sessions/{sessionId}/messages?after={messageId}` — anything the
+visitor's transcript does not already hold, so a team reply reaches an open
+panel. The cursor is a **message id, not a timestamp**: two messages written in
+the same millisecond are indistinguishable by time, and a cursor that cannot
+separate them either repeats one or drops one. An unknown cursor returns the
+tail, not the whole transcript.
+
+`GET /widget/v1/sessions/{sessionId}/slots` — free times from the customer's own
+connected Google Calendar.
+
+```json
+{ "slots": [{ "start": "2026-09-03T09:00:00Z", "end": "2026-09-03T09:30:00Z",
+              "label": "Thu 3 Sep, 14:30", "day": "Thu 3 Sep",
+              "time": "14:30", "minutes": 30 }],
+  "timezone": "Asia/Kolkata", "duration_minutes": 30 }
+```
+
+`start` and `end` are RFC3339 UTC; `label`, `day` and `time` are already rendered
+in the **owner's** time zone. Clients must display the rendered strings and not
+reformat, or a visitor in another country is shown a time the owner never
+offered.
+
+`POST /widget/v1/sessions/{sessionId}/booking` accepts
+`{ "start", "name", "email", "notes" }` where `start` is a slot's `start`
+verbatim. `201` with `{ booked, start, minutes, timezone }`.
+
+- `409 slot_taken` — the owner took that time between it being offered and
+  chosen. The slot is re-checked against the calendar at booking time rather than
+  trusted, because double-booking a real person is the one outcome this must not
+  produce.
+- `503 calendar_not_connected` — the customer has not connected a calendar. This
+  is the owner's problem, not the visitor's; clients must not present it as the
+  visitor's mistake.
+- `502 calendar_unavailable` — the provider could not be reached.
+
+A booking also creates a lead with source `appointment`, so an owner does not
+read two lists to find out somebody booked.
+
+### Website import
+
+`POST /v1/agents/{agentId}/sources/fetch` accepts `{ "url": "..." }` and returns
+`{ url, title, text, truncated, characters }` **for review**. It does not save.
+The existing `POST /v1/agents/{agentId}/sources` saves the reviewed text.
+
+Two steps on purpose: a page whose text came out as a cookie banner and a
+navigation menu is something the customer should be able to reject before their
+agent starts answering from it.
+
+`422 url_not_allowed` covers every refused address — non-https, private,
+loopback, link-local, credentials in the URL, or a redirect into any of those.
+The message must not describe what is or is not reachable from the server.
+
 ## 6. Public widget contract
 
 An `agent_key` is a publishable identifier, not a secret. It can identify a published agent and load public presentation settings; it can never authorize portal data.
