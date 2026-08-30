@@ -172,6 +172,63 @@ When the model runs out, the visitor is handed to the site owner on WhatsApp.
 
 ---
 
+## 6e. Visitor journey tracking — built 2026-08-30
+
+Where a lead came from, which pages they read, how long they spent. The
+differentiator; treat its bounds as load-bearing.
+
+- `POST /widget/v1/sessions/{id}/activity`, batched every 15s by the widget and
+  flushed on pagehide. `model.VisitorJourney` hangs off the Session.
+- **Every field is capped.** Page views are the highest-volume thing a visitor
+  can make this service store, and the store is one file read back at boot
+  through a size limit. 50 pages per session, 20 per batch, oldest dropped.
+- Engaged time is tab-visible-AND-focused only. A tab open overnight adds zero.
+- **No IP geolocation.** Region comes from the browser time zone, is
+  approximate, and `region_is_approximate` says so in the payload, not just the
+  UI. Referrer is host-only. Click ids are booleans, never stored. Paths have
+  their query strings stripped.
+- sendBeacon is NOT usable: it sets no headers and the session token is one.
+  The widget uses a keepalive fetch. Do not fix this with a public route.
+
+## 6f. Retention and growth caps — built 2026-08-30
+
+Read this before changing anything that writes to the store.
+
+- The boot read limit is 1GiB (was 64MiB, which measured as unbootable at ~97k
+  messages). Crossing it is now an operator-readable error, not a crash loop.
+- Hourly sweep: conversations older than 90 days and their messages, jobs older
+  than 7 days. **Leads are never deleted.**
+- `maxSessionsPerVisitor = 12`. Without it one IP could write 94MB/day through
+  the public session route and brick every tenant in ~17 hours.
+- `persistLocked` writes compact and buffered. Do not reinstate `SetIndent`:
+  measured 4x the time and 5x the allocation for a file no human reads.
+- **`store.Update` rollback decodes into a FRESH State.** encoding/json MERGES
+  into an existing value, so the old restore left every omitempty field the
+  rejected callback had written -- a 422 on a published agent changed what the
+  widget served to visitors.
+
+## 6g. Website import — built 2026-08-30
+
+`internal/fetcher` is mostly SSRF guards and that is the point: https only,
+every resolved IP checked at DIAL time (not by hostname -- a public name
+resolving to 169.254.169.254 is trivial), every redirect hop re-checked, no
+credentials, size cap, deadline. Verified against real addresses.
+
+Two endpoints on purpose: `POST /v1/agents/{id}/sources/fetch` returns the
+extracted text for review, then the existing sources endpoint saves it.
+
+## 6h. Prompt and token budget — changed 2026-08-30
+
+- Knowledge block capped at 16k chars, checked BEFORE each append. The old 40k
+  guard was checked after, overshooting by a quarter.
+- **Retrieval REPLACES the knowledge dump.** It used to be added on top, paying
+  twice for the same facts.
+- History is 12 turns, not 30.
+- `max_tokens` and `reasoning_effort` are now explicit. Verified live: one
+  exchange cost 236 total tokens at medium against 185 at low.
+
+---
+
 ## 7. Providers
 
 | | State |
@@ -220,7 +277,11 @@ on Linux instead.
 - The Composio API key has no IP restriction
 - Designed but unbuilt: Postgres repository, jobs worker, file upload with vision,
   visitor memory, admin panel, widget design system
-- Alerting and Meta conversion tracking are built but have no credentials yet
+- Alerting, Meta conversion tracking and the Meta pixel are built but have no
+  credentials yet -- see the morning list
+- The frontend now exposes three NEXT_PUBLIC_* variables, not two:
+  NEXT_PUBLIC_API_URL, NEXT_PUBLIC_GOOGLE_CLIENT_ID, NEXT_PUBLIC_SITE_URL, plus
+  NEXT_PUBLIC_META_PIXEL_ID once the pixel is configured
 
 ---
 
