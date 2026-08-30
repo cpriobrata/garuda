@@ -62,6 +62,32 @@ func (s *Server) sweepRetention(now time.Time) (removedSessions, removedMessages
 	conversationCutoff := now.Add(-conversationRetention)
 	jobCutoff := now.Add(-jobRetention)
 
+	// Look FIRST, write only if there is something to remove. Every store.Update
+	// rewrites and fsyncs the whole file, so an hourly sweep that removed nothing
+	// was an hourly full-database write bought for no reason -- and on a quiet
+	// deployment that is every hour of every day.
+	needed := false
+	_ = s.store.View(func(state *model.State) error {
+		for index := range state.Sessions {
+			session := &state.Sessions[index]
+			if session.LastSeenAt.Before(conversationCutoff) ||
+				(session.StartedAt == nil && session.ExpiresAt.Before(now)) {
+				needed = true
+				return nil
+			}
+		}
+		for index := range state.Jobs {
+			if state.Jobs[index].CreatedAt.Before(jobCutoff) {
+				needed = true
+				return nil
+			}
+		}
+		return nil
+	})
+	if !needed {
+		return 0, 0, 0
+	}
+
 	_ = s.store.Update(func(state *model.State) error {
 		// Which sessions go is decided first so the message pass is a single
 		// lookup per message rather than a scan per message.
@@ -87,6 +113,36 @@ func (s *Server) sweepRetention(now time.Time) (removedSessions, removedMessages
 				keptMessages = append(keptMessages, state.Messages[index])
 			}
 			removedMessages = len(state.Messages) - len(keptMessages)
+			state.Messages = keptMessages
+		}
+
+		// Sessions that were created and never spoke. An anonymous visitor gets a
+		// fresh ephemeral id on every request, so the per-visitor budget below
+		// cannot match them and never bounded the one route that is public: a
+		// flood of session creations wrote permanent rows forever. These expire
+		// after fifteen minutes and, having no StartedAt, carry no conversation
+		// anybody could want, so once expired there is nothing to keep.
+		keptStarted := state.Sessions[:0]
+		for index := range state.Sessions {
+			session := &state.Sessions[index]
+			if session.StartedAt == nil && session.ExpiresAt.Before(now) {
+				expired[session.ID] = true
+				continue
+			}
+			keptStarted = append(keptStarted, *session)
+		}
+		abandoned := len(state.Sessions) - len(keptStarted)
+		removedSessions += abandoned
+		state.Sessions = keptStarted
+		if abandoned > 0 {
+			keptMessages := state.Messages[:0]
+			for index := range state.Messages {
+				if expired[state.Messages[index].SessionID] {
+					continue
+				}
+				keptMessages = append(keptMessages, state.Messages[index])
+			}
+			removedMessages += len(state.Messages) - len(keptMessages)
 			state.Messages = keptMessages
 		}
 

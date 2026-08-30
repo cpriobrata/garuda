@@ -225,10 +225,55 @@ func publicIP(ip net.IP) bool {
 		}
 		return true
 	}
-	// IPv6 unique-local, fc00::/7. The metadata service is reachable over v6 on
-	// some providers, so this is not theoretical.
-	if len(ip) == net.IPv6len && (ip[0]&0xfe) == 0xfc {
+	// From here on the address is IPv6, and the v6 space has several ways to
+	// spell a v4 address. Each of them is a way to reach 127.0.0.1 or the
+	// metadata service past a check that only looked at the v4 form, so each is
+	// unwrapped and re-checked rather than pattern-matched.
+	if len(ip) != net.IPv6len {
 		return false
+	}
+	switch {
+	// fc00::/7, unique-local. The metadata service is reachable over v6 on some
+	// providers, so this is not theoretical.
+	case (ip[0] & 0xfe) == 0xfc:
+		return false
+	// ::ffff:0:0/96, IPv4-mapped. net.IP.To4 already unwraps these, so reaching
+	// here means the prefix was present without To4 recognising it.
+	case ipHasPrefix(ip, []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff}):
+		return publicIP(ip[12:])
+	// 64:ff9b::/96 and 64:ff9b:1::/48, NAT64. A translator will happily carry
+	// ::ffff:a9fe:a9fe-shaped traffic to 169.254.169.254.
+	case ipHasPrefix(ip, []byte{0x00, 0x64, 0xff, 0x9b}):
+		return publicIP(ip[len(ip)-4:])
+	// 2002::/16, 6to4, embeds the v4 address in the next four bytes.
+	case ip[0] == 0x20 && ip[1] == 0x02:
+		return publicIP(ip[2:6])
+	// ::/96 IPv4-compatible, deprecated but still routed by some stacks, and
+	// ::1 is already caught by IsLoopback above.
+	case ipHasPrefix(ip, make([]byte, 12)):
+		return publicIP(ip[12:])
+	// 100::/64, discard-only. 2001:db8::/32, documentation. 3fff::/20,
+	// documentation. 5f00::/16, SRv6. None is a place to fetch a web page from.
+	case ipHasPrefix(ip, []byte{0x01, 0x00, 0, 0, 0, 0, 0, 0}):
+		return false
+	case ip[0] == 0x20 && ip[1] == 0x01 && ip[2] == 0x0d && ip[3] == 0xb8:
+		return false
+	case ip[0] == 0x3f && (ip[1]&0xf0) == 0xf0:
+		return false
+	case ip[0] == 0x5f:
+		return false
+	}
+	return true
+}
+
+func ipHasPrefix(ip net.IP, prefix []byte) bool {
+	if len(ip) < len(prefix) {
+		return false
+	}
+	for index := range prefix {
+		if ip[index] != prefix[index] {
+			return false
+		}
 	}
 	return true
 }

@@ -3,6 +3,7 @@ package api
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"garuda/backend/internal/model"
 	"garuda/backend/internal/rag"
@@ -110,5 +111,43 @@ func TestKnowledgeIsTruncatedOnCharacterBoundaries(t *testing.T) {
 	// JSON as U+FFFD.
 	if strings.ContainsRune(prompt, '�') {
 		t.Fatal("the knowledge block was cut mid-character")
+	}
+}
+
+// The budget mixed units: Builder.Len() is bytes and the truncation was runes.
+// A knowledge base in Hindi or Chinese therefore consumed it two or three times
+// faster than it appeared to, and every source after the first was silently
+// dropped -- the customer watching their agent answer from a fraction of what
+// they uploaded, with nothing saying so.
+func TestNonLatinKnowledgeGetsTheSameBudgetAsEnglish(t *testing.T) {
+	english := []model.KnowledgeItem{
+		{ID: "kn_1", Title: "One", Content: strings.Repeat("x", 3_000), Status: "ready"},
+		{ID: "kn_2", Title: "Two", Content: strings.Repeat("y", 3_000), Status: "ready"},
+		{ID: "kn_3", Title: "Three", Content: "the opening hours are nine to five", Status: "ready"},
+	}
+	// The same lengths in characters, three bytes each in UTF-8.
+	hindi := []model.KnowledgeItem{
+		{ID: "kn_1", Title: "One", Content: strings.Repeat("न", 3_000), Status: "ready"},
+		{ID: "kn_2", Title: "Two", Content: strings.Repeat("म", 3_000), Status: "ready"},
+		{ID: "kn_3", Title: "Three", Content: "the opening hours are nine to five", Status: "ready"},
+	}
+
+	englishBlock := knowledgeBlock(english, maxKnowledgeBlockChars)
+	hindiBlock := knowledgeBlock(hindi, maxKnowledgeBlockChars)
+
+	if !strings.Contains(englishBlock, "nine to five") {
+		t.Fatal("the third English source was dropped, so the fixture is wrong")
+	}
+	if !strings.Contains(hindiBlock, "nine to five") {
+		t.Fatal("the third source was dropped from the Hindi knowledge base but not the English one")
+	}
+	if strings.Count(hindiBlock, "---") != strings.Count(englishBlock, "---") {
+		t.Fatalf("%d sources survived in Hindi against %d in English",
+			strings.Count(hindiBlock, "---"), strings.Count(englishBlock, "---"))
+	}
+
+	// And the cap still holds, in characters.
+	if utf8.RuneCountInString(hindiBlock) > maxKnowledgeBlockChars+200 {
+		t.Fatalf("the Hindi block is %d characters, past the budget", utf8.RuneCountInString(hindiBlock))
 	}
 }

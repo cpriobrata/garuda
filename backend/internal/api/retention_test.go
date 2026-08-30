@@ -1,6 +1,7 @@
 package api
 
 import (
+	"os"
 	"testing"
 	"time"
 
@@ -191,5 +192,121 @@ func TestTheSessionBudgetIsPerVisitor(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("view: %v", err)
+	}
+}
+
+// The per-visitor budget cannot bind an anonymous visitor: without memory
+// consent every request mints a fresh ephemeral visitor id, so nothing ever
+// matches. That left the one public, unauthenticated route -- session creation
+// -- writing permanent rows with no bound at all.
+//
+// An abandoned session has no StartedAt, which means nobody ever spoke in it, so
+// once its fifteen-minute token has expired there is nothing in it anyone could
+// want.
+func TestSessionsThatWereCreatedAndNeverSpokenInAreSweptOnceExpired(t *testing.T) {
+	server, dataStore := newTestServer(t)
+	now := time.Now().UTC()
+	started := now.Add(-time.Hour)
+
+	if err := dataStore.Update(func(state *model.State) error {
+		state.Accounts = append(state.Accounts, model.Account{ID: "org_1", BillingStatus: "active"})
+		// A flood: created, never spoke, tokens long expired.
+		for index := 0; index < 40; index++ {
+			id := "cvs_flood_" + string(rune('a'+index%26)) + string(rune('a'+index/26))
+			state.Sessions = append(state.Sessions, model.Session{
+				ID: id, AccountID: "org_1", AgentID: "agt_1",
+				VisitorID: "vst_ephemeral_" + id,
+				ExpiresAt: now.Add(-time.Minute), CreatedAt: now.Add(-time.Hour),
+				UpdatedAt: now.Add(-time.Hour), LastSeenAt: now.Add(-time.Hour),
+			})
+			state.Messages = append(state.Messages, model.Message{
+				ID: id + "_welcome", AccountID: "org_1", AgentID: "agt_1", SessionID: id,
+				Role: "assistant", Content: "welcome", CreatedAt: now.Add(-time.Hour),
+			})
+		}
+		// A real conversation, expired token and all, must survive: the token
+		// expiring is not the conversation ending.
+		state.Sessions = append(state.Sessions, model.Session{
+			ID: "cvs_real", AccountID: "org_1", AgentID: "agt_1", VisitorID: "vst_real",
+			StartedAt: &started, ExpiresAt: now.Add(-time.Minute),
+			CreatedAt: started, UpdatedAt: started, LastSeenAt: now.Add(-time.Minute),
+		})
+		// And a fresh unstarted session, still inside its token life, must not be
+		// swept out from under a visitor who is about to type.
+		state.Sessions = append(state.Sessions, model.Session{
+			ID: "cvs_fresh", AccountID: "org_1", AgentID: "agt_1", VisitorID: "vst_fresh",
+			ExpiresAt: now.Add(10 * time.Minute), CreatedAt: now, UpdatedAt: now, LastSeenAt: now,
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	server.sweepRetention(now)
+
+	if err := dataStore.View(func(state *model.State) error {
+		surviving := map[string]bool{}
+		for _, session := range state.Sessions {
+			surviving[session.ID] = true
+		}
+		if len(state.Sessions) != 2 {
+			t.Fatalf("expected the real and the fresh session to survive, got %d: %v", len(state.Sessions), surviving)
+		}
+		if !surviving["cvs_real"] {
+			t.Error("a real conversation was swept because its token had expired")
+		}
+		if !surviving["cvs_fresh"] {
+			t.Error("a session still inside its token life was swept from under a visitor")
+		}
+		for _, message := range state.Messages {
+			if !surviving[message.SessionID] {
+				t.Fatalf("an abandoned session left its messages behind: %+v", message)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("view: %v", err)
+	}
+}
+
+// Every store.Update rewrites and fsyncs the whole file. An hourly sweep that
+// removes nothing was buying that for no reason -- and on a quiet deployment
+// that is every hour of every day, forever.
+func TestASweepWithNothingToRemoveDoesNotWrite(t *testing.T) {
+	server, dataStore := newTestServer(t)
+	now := time.Now().UTC()
+
+	if err := dataStore.Update(func(state *model.State) error {
+		started := now.Add(-time.Hour)
+		state.Accounts = append(state.Accounts, model.Account{ID: "org_1", BillingStatus: "active"})
+		state.Sessions = append(state.Sessions, model.Session{
+			ID: "cvs_recent", AccountID: "org_1", AgentID: "agt_1", VisitorID: "vst_1",
+			StartedAt: &started, ExpiresAt: now.Add(time.Hour),
+			CreatedAt: started, UpdatedAt: started, LastSeenAt: now,
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// The file's modification time is the observable proof that no write
+	// happened, which is the property that matters rather than the return value.
+	before, err := os.Stat(dataStore.Path())
+	if err != nil {
+		t.Skipf("the store does not expose its path here: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+
+	sessions, messages, jobs := server.sweepRetention(now)
+	if sessions != 0 || messages != 0 || jobs != 0 {
+		t.Fatalf("a sweep with nothing to do removed %d/%d/%d", sessions, messages, jobs)
+	}
+
+	after, err := os.Stat(dataStore.Path())
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Fatal("a sweep with nothing to remove still rewrote the whole data file")
 	}
 }

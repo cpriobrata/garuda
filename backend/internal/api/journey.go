@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -29,6 +30,10 @@ import (
 // part; the id of the individual click is not. No page query strings beyond the
 // campaign parameters, because a customer's own URLs can carry anything.
 
+// errNoJourneyChange is not a failure. It is how the merge tells store.Update
+// that the batch moved nothing, so the whole-database write can be skipped.
+var errNoJourneyChange = errors.New("journey unchanged")
+
 const (
 	// maxJourneyPages is what one session keeps. Fifty pages is a long visit;
 	// past that the OLDEST are dropped, because the pages someone read just
@@ -38,8 +43,14 @@ const (
 	// seconds and on page hide, so a legitimate batch is one or two entries.
 	maxJourneyBatch = 20
 
-	maxPathLength     = 512
-	maxTitleLength    = 200
+	// A journey is fifty entries, so these two multiply. At 512 and 200 one
+	// session could hold a hundred thousand characters -- and in a language that
+	// is three bytes a character, three hundred kilobytes in a store that is
+	// rewritten in full on every write. A path longer than 256 characters is a
+	// tracking parameter somebody forgot to strip, not a page name.
+	maxPathLength     = 256
+	maxTitleLength    = 120
+	maxVisitIDLength  = 40
 	maxCampaignLength = 120
 	maxReferrerHost   = 253
 	maxTimezoneLength = 64
@@ -81,6 +92,11 @@ type journeyDevice struct {
 }
 
 type journeyPage struct {
+	// Visit identifies one visit to one page, so two open tabs reporting the
+	// same path stay separate and a reload -- which restarts the timer at zero --
+	// is a new visit rather than a report that went backwards. A batch from an
+	// older widget carries none, and falls back to the positional guess below.
+	Visit   string `json:"visit,omitempty"`
 	Path    string `json:"path"`
 	Title   string `json:"title,omitempty"`
 	Seconds int    `json:"seconds,omitempty"`
@@ -106,7 +122,18 @@ func (s *Server) recordVisitorJourney(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Nothing to record means nothing to write. EVERY store.Update rewrites the
+	// entire state file, so an empty batch was costing a full database write --
+	// and this route carries the highest write rate limit in the service, which
+	// made it the cheapest way to hold the exclusive lock. Measured at a 40MB
+	// store, one caller could occupy most of every minute doing nothing.
+	if input.Source == nil && input.Device == nil && len(input.Pages) == 0 {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	now := time.Now().UTC()
+	changed := false
 	err := s.store.Update(func(state *model.State) error {
 		for index := range state.Sessions {
 			if state.Sessions[index].ID != session.ID {
@@ -115,15 +142,30 @@ func (s *Server) recordVisitorJourney(w http.ResponseWriter, r *http.Request) {
 			stored := &state.Sessions[index]
 			if stored.Journey == nil {
 				stored.Journey = &model.VisitorJourney{FirstSeenAt: now}
+				changed = true
 			}
+			before := stored.Journey.PageCount
+			beforeEngaged := stored.Journey.EngagedSeconds
 			applyJourneyBatch(stored.Journey, input, now)
+			// A batch that changed nothing real -- the same page re-reported with
+			// no additional engaged time -- must not cost a write either. The
+			// widget reports every fifteen seconds whether or not anything moved.
+			if stored.Journey.PageCount != before || stored.Journey.EngagedSeconds != beforeEngaged {
+				changed = true
+			}
+			if !changed {
+				return errNoJourneyChange
+			}
 			stored.LastSeenAt = now
 			stored.UpdatedAt = now
 			break
 		}
 		return nil
 	})
-	if err != nil {
+	// errNoJourneyChange is how the callback declines the write. store.Update
+	// rolls the state back and returns it, which is exactly the intent: nothing
+	// was worth persisting.
+	if err != nil && !errors.Is(err, errNoJourneyChange) {
 		s.storageFailure(w, r, err)
 		return
 	}
@@ -164,20 +206,26 @@ func applyJourneyBatch(journey *model.VisitorJourney, input journeyRequest, now 
 		// A batch usually re-reports the page the visitor is still on, with a
 		// larger number. Updating in place is what makes engaged time climb
 		// during a visit instead of the same page appearing every fifteen
-		// seconds. Only the LAST entry is a candidate: returning to a page after
-		// visiting others is a separate visit and the order is the story.
-		if last := len(journey.Pages) - 1; last >= 0 && journey.Pages[last].Path == path {
-			if seconds > journey.Pages[last].Seconds {
-				journey.EngagedSeconds += seconds - journey.Pages[last].Seconds
-				journey.Pages[last].Seconds = seconds
+		// seconds.
+		//
+		// The match is on the VISIT id, not the path and not the position. Two
+		// open tabs interleave their reports, so "is this the last page I stored"
+		// was wrong exactly when a visitor was engaged enough to have two tabs
+		// open: the continuing visit stopped being last, got appended again, and
+		// its engaged time was counted twice.
+		if existing := findPageVisit(journey, page.Visit, path); existing >= 0 {
+			if seconds > journey.Pages[existing].Seconds {
+				journey.EngagedSeconds += seconds - journey.Pages[existing].Seconds
+				journey.Pages[existing].Seconds = seconds
 			}
-			if journey.Pages[last].Title == "" {
-				journey.Pages[last].Title = truncateRunes(page.Title, maxTitleLength)
+			if journey.Pages[existing].Title == "" {
+				journey.Pages[existing].Title = truncateRunes(page.Title, maxTitleLength)
 			}
 			continue
 		}
 
 		journey.Pages = append(journey.Pages, model.PageVisit{
+			Visit:     truncateRunes(page.Visit, maxVisitIDLength),
 			Path:      path,
 			Title:     truncateRunes(page.Title, maxTitleLength),
 			ArrivedAt: now,
@@ -192,6 +240,28 @@ func applyJourneyBatch(journey *model.VisitorJourney, input journeyRequest, now 
 	if len(journey.Pages) > maxJourneyPages {
 		journey.Pages = journey.Pages[len(journey.Pages)-maxJourneyPages:]
 	}
+}
+
+// findPageVisit locates the entry a report belongs to.
+//
+// By visit id where the widget sent one. Falling back to the last entry with the
+// same path keeps a batch from an older widget -- one cached on a customer's
+// site before this shipped -- working exactly as it did.
+func findPageVisit(journey *model.VisitorJourney, visit, path string) int {
+	if visit != "" {
+		for index := range journey.Pages {
+			if journey.Pages[index].Visit == visit {
+				return index
+			}
+		}
+		// A visit id that is genuinely new must not fall through to the path
+		// match, or a reload would merge into the visit it replaced.
+		return -1
+	}
+	if last := len(journey.Pages) - 1; last >= 0 && journey.Pages[last].Path == path {
+		return last
+	}
+	return -1
 }
 
 // resolveTrafficSource turns what the browser saw into what a customer wants to

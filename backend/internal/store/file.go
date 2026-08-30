@@ -131,6 +131,10 @@ func migrateState(state *model.State) {
 	}
 }
 
+// Path is where the state lives. It exists so an operator, and a test, can look
+// at the file without hard-coding the layout the store chose.
+func (s *FileStore) Path() string { return s.path }
+
 func (s *FileStore) View(fn func(*model.State) error) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

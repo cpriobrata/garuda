@@ -35,6 +35,20 @@ const (
 	// overnight comes back to the tail of the conversation, not to a payload
 	// proportional to how long they were away.
 	widgetPollLimit = 20
+
+	// pollGraceWindow is how far BEHIND the cursor a poll also looks, and it
+	// exists because a cursor cannot express what the widget actually holds.
+	//
+	// An operator types a reply while the model is generating. The reply is
+	// stored first; the model's answer is stored second with a later timestamp;
+	// the widget, which appended that answer itself, polls with it as the cursor.
+	// Anything strictly after that position skips the operator's reply forever --
+	// losing the one message a person actually typed.
+	//
+	// Two minutes comfortably covers a generation, and the cost is a handful of
+	// messages the widget already discards by id. Correctness here is worth more
+	// than the bytes.
+	pollGraceWindow = 2 * time.Minute
 )
 
 type teamReplyRequest struct {
@@ -128,13 +142,32 @@ func (s *Server) pollWidgetMessages(w http.ResponseWriter, r *http.Request) {
 	})
 	sortMessagesByTime(transcript)
 
+	// Everything from the cursor's moment onward, NOT everything after its
+	// position.
+	//
+	// The difference is a message that goes missing forever. An operator types a
+	// reply while the model is still generating; the reply is stored first, the
+	// model's answer is stored second with a later timestamp, and the widget --
+	// which appended the model's answer itself -- polls with that as its cursor.
+	// Position-based slicing then starts AFTER the model's answer, and the
+	// operator's reply, which sorts before it, is never sent. The one message a
+	// person actually typed is the one that is lost.
+	//
+	// Re-sending from the cursor's timestamp costs a few duplicates, and the
+	// widget already discards those by id.
 	fresh := transcript
 	if after != "" {
-		for index, message := range transcript {
-			if message.ID == after {
-				fresh = transcript[index+1:]
-				break
+		for index := range transcript {
+			if transcript[index].ID != after {
+				continue
 			}
+			from := transcript[index].CreatedAt.Add(-pollGraceWindow)
+			start := index
+			for start > 0 && !transcript[start-1].CreatedAt.Before(from) {
+				start--
+			}
+			fresh = transcript[start:]
+			break
 		}
 	}
 	if len(fresh) > widgetPollLimit {

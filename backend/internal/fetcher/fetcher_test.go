@@ -171,3 +171,39 @@ func TestTitleIsFoundEvenWithAttributesOnTheTag(t *testing.T) {
 		t.Fatalf("title = %q", title)
 	}
 }
+
+// The v6 space has several ways to spell a v4 address, and each is a route to
+// 127.0.0.1 or the metadata service past a check that only looked at the v4
+// form. Every one of these must resolve to the address it actually reaches.
+func TestIPv6SpellingsOfPrivateIPv4AddressesAreBlocked(t *testing.T) {
+	blocked := map[string]string{
+		"IPv4-mapped loopback":       "::ffff:127.0.0.1",
+		"IPv4-mapped metadata":       "::ffff:169.254.169.254",
+		"IPv4-mapped private":        "::ffff:10.0.0.1",
+		"IPv4-compatible loopback":   "::127.0.0.1",
+		"IPv4-compatible private":    "::192.168.1.1",
+		"NAT64 metadata":             "64:ff9b::169.254.169.254",
+		"NAT64 loopback":             "64:ff9b::127.0.0.1",
+		"6to4 wrapping a private v4": "2002:c0a8:0101::",
+		"discard-only":               "100::1",
+		"documentation":              "2001:db8::1",
+		"SRv6":                       "5f00::1",
+	}
+	for name, address := range blocked {
+		ip := net.ParseIP(address)
+		if ip == nil {
+			t.Fatalf("%s: %q is not parseable, so the test is wrong", name, address)
+		}
+		if publicIP(ip) {
+			t.Errorf("%s (%s) was treated as a public address", name, address)
+		}
+	}
+
+	// And an ordinary v6 address, including one that merely starts with 0x20,
+	// must still be reachable.
+	for _, address := range []string{"2606:4700:4700::1111", "2a00:1450:4009::200e", "::ffff:8.8.8.8"} {
+		if !publicIP(net.ParseIP(address)) {
+			t.Errorf("%s was blocked but is a public address", address)
+		}
+	}
+}

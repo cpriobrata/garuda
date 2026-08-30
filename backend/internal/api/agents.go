@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"garuda/backend/internal/config"
 	"garuda/backend/internal/llm"
@@ -679,28 +680,38 @@ func promptForAgent(agent model.Agent) string {
 }
 
 // knowledgeBlock renders as much approved knowledge as the budget allows, in
-// order, cutting on a character boundary rather than a byte one -- half a
-// character is not something to send a model in any language.
+// order, cutting on a character boundary rather than a byte one.
+//
+// EVERYTHING HERE IS COUNTED IN CHARACTERS, and mixing the two units was a real
+// defect rather than a tidiness point. strings.Builder.Len() is BYTES, and the
+// per-item truncation was in runes, so a knowledge base written in Hindi or
+// Chinese consumed the budget two or three times faster than it appeared to:
+// the first source alone could exhaust it and every source after it was silently
+// dropped. A customer would have watched their agent answer from a third of what
+// they uploaded, with nothing anywhere saying so.
 func knowledgeBlock(items []model.KnowledgeItem, budget int) string {
 	var builder strings.Builder
+	used := 0
 	for _, item := range items {
 		if item.Status == "failed" || item.Status == "deleting" {
 			continue
 		}
-		remaining := budget - builder.Len()
+		remaining := budget - used
 		if remaining <= 0 {
 			break
 		}
 		header := "\n---\n" + item.Title + "\n"
-		if len(header) >= remaining {
+		headerChars := utf8.RuneCountInString(header)
+		if headerChars >= remaining {
 			break
 		}
 		content := truncateRunes(item.Content, maxKnowledgeItemChars)
-		if space := remaining - len(header); len(content) > space {
+		if space := remaining - headerChars; utf8.RuneCountInString(content) > space {
 			content = truncateRunes(content, space)
 		}
 		builder.WriteString(header)
 		builder.WriteString(content)
+		used += headerChars + utf8.RuneCountInString(content)
 	}
 	return builder.String()
 }

@@ -266,3 +266,91 @@ func TestJourneyCloneDoesNotShareItsPages(t *testing.T) {
 		t.Fatal("Clone shares the pages slice with live state")
 	}
 }
+
+// Every store.Update rewrites the entire state file. This route carried the
+// highest write rate limit in the service on the strength of a comment saying
+// the handler was cheap -- the merge is cheap, the write is O(the whole
+// database), and an EMPTY batch was paying it.
+func TestABatchThatChangesNothingCostsNoWrite(t *testing.T) {
+	journey := &model.VisitorJourney{}
+	now := time.Now().UTC()
+
+	applyJourneyBatch(journey, journeyRequest{Pages: []journeyPage{{Path: "/pricing", Seconds: 30}}}, now)
+	pagesAfterFirst, engagedAfterFirst := journey.PageCount, journey.EngagedSeconds
+
+	// The widget re-reports the page a visitor is still on every fifteen seconds
+	// whether or not anything moved. A report with no new engaged time must be
+	// detectable as a no-op by the caller, or the quiet case costs a full write.
+	applyJourneyBatch(journey, journeyRequest{Pages: []journeyPage{{Path: "/pricing", Seconds: 30}}}, now.Add(15*time.Second))
+	if journey.PageCount != pagesAfterFirst || journey.EngagedSeconds != engagedAfterFirst {
+		t.Fatalf("an unchanged re-report moved the journey: pages %d->%d, engaged %d->%d",
+			pagesAfterFirst, journey.PageCount, engagedAfterFirst, journey.EngagedSeconds)
+	}
+
+	// And a report that DID move must still be detectable as a change.
+	applyJourneyBatch(journey, journeyRequest{Pages: []journeyPage{{Path: "/pricing", Seconds: 75}}}, now.Add(30*time.Second))
+	if journey.EngagedSeconds == engagedAfterFirst {
+		t.Fatal("real additional engaged time was not recorded")
+	}
+}
+
+// Two open tabs interleave their reports, so "is this the last page I stored"
+// was wrong exactly when a visitor was engaged enough to have two tabs open: the
+// continuing visit stopped being last, was appended again, and its engaged time
+// was counted twice.
+func TestTwoTabsDoNotDoubleCountEngagedTime(t *testing.T) {
+	journey := &model.VisitorJourney{}
+	now := time.Now().UTC()
+
+	applyJourneyBatch(journey, journeyRequest{Pages: []journeyPage{{Visit: "v1", Path: "/pricing", Seconds: 30}}}, now)
+	applyJourneyBatch(journey, journeyRequest{Pages: []journeyPage{{Visit: "v2", Path: "/features", Seconds: 20}}}, now.Add(15*time.Second))
+	// The first tab reports again. It is no longer the last entry.
+	applyJourneyBatch(journey, journeyRequest{Pages: []journeyPage{{Visit: "v1", Path: "/pricing", Seconds: 45}}}, now.Add(30*time.Second))
+
+	if len(journey.Pages) != 2 {
+		t.Fatalf("expected two page visits, got %d: %+v", len(journey.Pages), journey.Pages)
+	}
+	if journey.EngagedSeconds != 65 {
+		t.Fatalf("engaged time = %d, want 65 -- the first tab's thirty seconds were counted twice", journey.EngagedSeconds)
+	}
+	if journey.PageCount != 2 {
+		t.Errorf("page count = %d, want 2", journey.PageCount)
+	}
+}
+
+// A reload restarts the timer at zero. Without a visit id that read as a report
+// going backwards and was discarded, so every reload lost the engagement that
+// followed it.
+func TestAReloadIsANewVisitRatherThanADiscardedReport(t *testing.T) {
+	journey := &model.VisitorJourney{}
+	now := time.Now().UTC()
+
+	applyJourneyBatch(journey, journeyRequest{Pages: []journeyPage{{Visit: "v1", Path: "/pricing", Seconds: 90}}}, now)
+	// Reload: same path, a new visit, and the clock starts again.
+	applyJourneyBatch(journey, journeyRequest{Pages: []journeyPage{{Visit: "v2", Path: "/pricing", Seconds: 5}}}, now.Add(time.Minute))
+	applyJourneyBatch(journey, journeyRequest{Pages: []journeyPage{{Visit: "v2", Path: "/pricing", Seconds: 40}}}, now.Add(2*time.Minute))
+
+	if len(journey.Pages) != 2 {
+		t.Fatalf("the reload was merged into the visit it replaced: %+v", journey.Pages)
+	}
+	if journey.EngagedSeconds != 130 {
+		t.Fatalf("engaged time = %d, want 130 -- the time after the reload was discarded", journey.EngagedSeconds)
+	}
+}
+
+// A widget cached on a customer's site before visit ids shipped sends none, and
+// has to keep working exactly as it did.
+func TestABatchWithNoVisitIdStillMergesInPlace(t *testing.T) {
+	journey := &model.VisitorJourney{}
+	now := time.Now().UTC()
+
+	applyJourneyBatch(journey, journeyRequest{Pages: []journeyPage{{Path: "/pricing", Seconds: 10}}}, now)
+	applyJourneyBatch(journey, journeyRequest{Pages: []journeyPage{{Path: "/pricing", Seconds: 25}}}, now.Add(15*time.Second))
+
+	if len(journey.Pages) != 1 {
+		t.Fatalf("an older widget's batch stopped merging: %+v", journey.Pages)
+	}
+	if journey.EngagedSeconds != 25 {
+		t.Fatalf("engaged time = %d, want 25", journey.EngagedSeconds)
+	}
+}

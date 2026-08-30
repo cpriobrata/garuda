@@ -98,21 +98,34 @@ func TestTeamReplyReachesTheVisitorsNextPoll(t *testing.T) {
 	if err := json.Unmarshal(polled.Body.Bytes(), &envelope); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(envelope.Data.Messages) != 1 {
-		t.Fatalf("expected exactly the one new message, got %d: %s", len(envelope.Data.Messages), polled.Body.String())
+	// The poll re-sends a bounded grace window, so the cursor message itself may
+	// come back with it -- the widget discards by id. What matters is that the
+	// reply is in there.
+	var reply *struct {
+		ID      string `json:"id"`
+		Role    string `json:"role"`
+		Content string `json:"content"`
 	}
-	if envelope.Data.Messages[0].Content != "Yes -- Priya here, how can I help?" {
-		t.Errorf("wrong content: %q", envelope.Data.Messages[0].Content)
+	for index := range envelope.Data.Messages {
+		if envelope.Data.Messages[index].Content == "Yes -- Priya here, how can I help?" {
+			reply = &envelope.Data.Messages[index]
+		}
+	}
+	if reply == nil {
+		t.Fatalf("the reply was not delivered: %s", polled.Body.String())
 	}
 	// The widget renders assistant turns and the model reads them as its own
 	// prior context. A third role would need every consumer taught about it.
-	if envelope.Data.Messages[0].Role != "assistant" {
-		t.Errorf("role = %q, want assistant", envelope.Data.Messages[0].Role)
+	if reply.Role != "assistant" {
+		t.Errorf("role = %q, want assistant", reply.Role)
 	}
 }
 
-// A cursor the visitor already holds must not hand them the same message twice.
-func TestPollReturnsNothingWhenTheVisitorIsUpToDate(t *testing.T) {
+// A cursor cannot express what the widget actually holds, so the poll re-sends a
+// bounded grace window and the widget discards duplicates by id. What must hold
+// is that a caught-up visitor gets a small, bounded answer rather than the
+// conversation again -- and, above all, that nothing is ever missed.
+func TestACaughtUpVisitorGetsABoundedAnswer(t *testing.T) {
 	server, dataStore := newTestServer(t)
 	sessionID, sessionToken := seedReplyFixture(t, dataStore)
 
@@ -129,21 +142,33 @@ func TestPollReturnsNothingWhenTheVisitorIsUpToDate(t *testing.T) {
 	if err := json.Unmarshal(first.Body.Bytes(), &envelope); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(envelope.Data.Messages) != 1 {
-		t.Fatalf("setup: expected one message, got %d", len(envelope.Data.Messages))
+	if len(envelope.Data.Messages) == 0 {
+		t.Fatal("the reply was not delivered at all")
 	}
+	newest := envelope.Data.Messages[len(envelope.Data.Messages)-1].ID
 
-	second := pollMessages(t, server, sessionID, sessionToken, envelope.Data.Messages[0].ID)
+	// Polling again with the newest id must not grow without bound, and must not
+	// return anything the visitor could not already have.
+	second := pollMessages(t, server, sessionID, sessionToken, newest)
 	var repeat struct {
 		Data struct {
-			Messages []json.RawMessage `json:"messages"`
+			Messages []struct {
+				ID string `json:"id"`
+			} `json:"messages"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(second.Body.Bytes(), &repeat); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(repeat.Data.Messages) != 0 {
-		t.Fatalf("the same reply was delivered twice: %s", second.Body.String())
+	if len(repeat.Data.Messages) > widgetPollLimit {
+		t.Fatalf("a caught-up poll returned %d messages, past the cap", len(repeat.Data.Messages))
+	}
+	for _, message := range repeat.Data.Messages {
+		if message.ID != newest && message.ID != "msg_first" {
+			// Anything else would be a message created after the cursor, which is
+			// exactly what a poll is for -- but there is none in this fixture.
+			t.Errorf("an unexpected message was returned: %s", message.ID)
+		}
 	}
 }
 
@@ -280,5 +305,59 @@ func TestMessageLimitsAreCountedInCharactersNotBytes(t *testing.T) {
 	}
 	if code := postReply(t, server, sessionID, "org_reply", string(tooLong)).Code; code != http.StatusUnprocessableEntity {
 		t.Fatalf("an over-length reply was accepted with %d", code)
+	}
+}
+
+// The failure this guards against loses the one message a person actually
+// typed. An operator replies while the model is still generating: the reply is
+// stored first, the model's answer second with a later timestamp, and the widget
+// -- which appended the model's answer itself -- polls with that as its cursor.
+// Slicing by POSITION starts after the model's answer, and the operator's reply,
+// which sorts before it, is never delivered.
+func TestAnOperatorReplyRacingTheModelIsStillDelivered(t *testing.T) {
+	server, dataStore := newTestServer(t)
+	sessionID, sessionToken := seedReplyFixture(t, dataStore)
+
+	now := time.Now().UTC()
+	if err := dataStore.Update(func(state *model.State) error {
+		// The operator's reply lands first.
+		state.Messages = append(state.Messages, model.Message{
+			ID: "msg_operator", AccountID: "org_reply", AgentID: "agt_reply", SessionID: sessionID,
+			VisitorID: "vst_reply", Role: "assistant", Content: "Priya here, one moment",
+			Metadata: map[string]any{"author": "operator"}, CreatedAt: now.Add(time.Second),
+		})
+		// The model's answer finishes afterwards, and the widget shows it, so the
+		// widget's newest held message is this one.
+		state.Messages = append(state.Messages, model.Message{
+			ID: "msg_model", AccountID: "org_reply", AgentID: "agt_reply", SessionID: sessionID,
+			VisitorID: "vst_reply", Role: "assistant", Content: "Here is what I found",
+			CreatedAt: now.Add(2 * time.Second),
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	response := pollMessages(t, server, sessionID, sessionToken, "msg_model")
+	var envelope struct {
+		Data struct {
+			Messages []struct {
+				ID      string `json:"id"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	delivered := false
+	for _, message := range envelope.Data.Messages {
+		if message.ID == "msg_operator" {
+			delivered = true
+		}
+	}
+	if !delivered {
+		t.Fatalf("the operator's reply was never delivered: %s", response.Body.String())
 	}
 }

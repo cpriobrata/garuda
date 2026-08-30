@@ -165,10 +165,16 @@ func (s *Server) Handler() http.Handler {
 	// the visitor. Cheap and bounded: it returns only what comes after the id the
 	// widget already holds.
 	mux.Handle("GET /widget/v1/sessions/{sessionID}/messages", s.rateLimit("widget.poll", 240, time.Minute, http.HandlerFunc(s.pollWidgetMessages)))
-	// Journey batches. Higher limit than the other widget routes because the
-	// widget reports every fifteen seconds while a page is open, and lower cost
-	// per call than any of them: the handler does one bounded merge.
-	mux.Handle("POST /widget/v1/sessions/{sessionID}/activity", s.rateLimit("widget.activity", 240, time.Minute, http.HandlerFunc(s.recordVisitorJourney)))
+	// Journey batches. The widget reports every fifteen seconds per open panel,
+	// which is four calls a minute; thirty leaves room for several tabs and a
+	// flush on page hide.
+	//
+	// It used to be 240, justified by a comment claiming the handler was cheap.
+	// The merge is cheap and the WRITE is not: every store.Update rewrites the
+	// entire state file, so this was the cheapest route in the service for holding
+	// the exclusive lock. The handler now declines to write when a batch changes
+	// nothing, and the limit matches what the widget actually needs.
+	mux.Handle("POST /widget/v1/sessions/{sessionID}/activity", s.rateLimit("widget.activity", 30, time.Minute, http.HandlerFunc(s.recordVisitorJourney)))
 	// Appointment booking. Both calls reach the customer's own calendar through
 	// Composio, so they are capped far tighter than the routes that only touch
 	// state we own -- and the booking call writes to a real person's diary.

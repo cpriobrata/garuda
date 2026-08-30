@@ -587,6 +587,27 @@
     return 'demo_' + randomID() + randomID();
   }
 
+  // openExternal leaves the host page alone. An anchor click is used rather
+  // than window.open because window.open with noopener returns null whether it
+  // worked or not, so its result cannot be tested -- and because a popup blocker
+  // silently ignoring an anchor is a far better failure on somebody else's
+  // website than navigating their visitor away.
+  function openExternal(url) {
+    try {
+      var link = global.document.createElement('a');
+      link.setAttribute('href', url);
+      link.setAttribute('target', '_blank');
+      link.setAttribute('rel', 'noopener noreferrer');
+      link.style.display = 'none';
+      global.document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (_error) {
+      // A blocked or failed open costs nothing: the visitor still has the link
+      // in the transcript.
+    }
+  }
+
   function contrastText(hex) {
     var red = parseInt(hex.slice(1, 3), 16);
     var green = parseInt(hex.slice(3, 5), 16);
@@ -1477,6 +1498,12 @@
       apiOrigin: apiOrigin,
       memorySetting: memorySetting,
       analytics: script.getAttribute('data-analytics-consent') === 'true',
+      // An EXPLICIT no, kept separate from the affirmative above. Absence is not
+      // a refusal -- most customers never set the attribute at all -- but a
+      // customer who wires their cookie banner to it and gets a decline has said
+      // something specific, and journey tracking has to hear it. It ignored this
+      // attribute entirely, which made the attribute a lie about what it did.
+      analyticsRefused: script.getAttribute('data-analytics-consent') === 'false',
       launcherLabel: asText(script.getAttribute('data-launcher-label'), '', 50),
       startOpen: script.getAttribute('data-open') === 'true',
       zIndex: zIndex
@@ -2096,7 +2123,14 @@
     this.polling = true;
     try {
       var last = this.messages[this.messages.length - 1];
-      var fresh = await this.api.pollMessages(this.session, last ? last.id : '');
+      var self = this;
+      // Through withFreshSession, so a poll that outlives the fifteen-minute
+      // token renews it instead of failing quietly for the rest of the visit.
+      // Without this an operator reply typed sixteen minutes in was never
+      // delivered, and nothing anywhere said why.
+      var fresh = await this.withFreshSession(function () {
+        return self.api.pollMessages(self.session, last ? last.id : '');
+      });
       var known = {};
       this.messages.forEach(function (message) { known[message.id] = true; });
       for (var index = 0; index < fresh.length; index += 1) {
@@ -2135,6 +2169,9 @@
     // The demo has nobody to report to, and a second tracker on the same page
     // would double every number on it.
     if (this.journey || this.config.mode === 'demo') return;
+    // A customer whose visitor declined analytics gets no journey. The
+    // conversation still works: nothing here is needed to answer a question.
+    if (this.config.analyticsRefused) return;
     try {
       var doc = global.document;
       var state = {
@@ -2225,6 +2262,11 @@
     var state = this.journey;
     if (!state) return;
     state.pages.push({
+      // A stable id for THIS visit to this page. The server merges on it, so two
+      // tabs reporting the same path do not merge into one another and a reload
+      // -- which restarts the timer at zero -- is recognised as a new visit
+      // rather than a report to be discarded for going backwards.
+      id: randomID(),
       path: path,
       title: asText(title, '', MAX_JOURNEY_TITLE),
       millis: 0,
@@ -2385,7 +2427,7 @@
       var page = state.pages[index];
       var seconds = Math.min(Math.floor(page.millis / 1000), MAX_PAGE_SECONDS);
       if (page.reportedSeconds === seconds && page.reportedTitle === page.title) continue;
-      var entry = { path: page.path };
+      var entry = { visit: page.id, path: page.path };
       if (page.title) entry.title = page.title;
       if (seconds > 0) entry.seconds = seconds;
       pages.push(entry);
@@ -2433,10 +2475,24 @@
         item.page.reportedSeconds = item.seconds;
         item.page.reportedTitle = item.title;
       });
-    }, function () {
+    }, function (error) {
       // A failed report is silent, and a visitor never sees an error because
       // analytics did not land. Nothing was marked as delivered, so the next
       // batch carries it again -- but only so many times.
+      //
+      // An EXPIRED SESSION is not that kind of failure. The token lives fifteen
+      // minutes and a visit routinely outlasts it, so counting 401s towards the
+      // give-up threshold meant journey tracking died a quarter of an hour into
+      // every long visit -- exactly the visits worth measuring. Renew instead.
+      var expired = error instanceof WidgetError &&
+        (error.status === 401 || error.code === 'session_expired' || error.code === 'invalid_session');
+      if (expired) {
+        self.ensureSession(true).catch(function () {
+          // If the session cannot be renewed the next batch fails again and the
+          // ordinary failure count is what eventually stops it.
+        });
+        return;
+      }
       state.failures += 1;
       if (state.failures >= MAX_JOURNEY_FAILURES) self.stopJourney();
     }).then(function () {
@@ -2609,6 +2665,19 @@
     var bubble = element('div', 'gw-bubble');
     var copy = element('p', '', normalized.content);
     bubble.appendChild(copy);
+    // A real anchor, so a visitor whose browser refused the automatic open still
+    // has one tap to WhatsApp. href is validated the same way every other URL
+    // reaching this file is.
+    if (options.action && safeHttpUrl(options.action.url)) {
+      var action = element('a', 'gw-bubble-action', options.action.label);
+      // setAttribute rather than the properties: they are equivalent in a
+      // browser, and only the attribute is observable to anything inspecting
+      // the shadow tree.
+      action.setAttribute('href', safeHttpUrl(options.action.url));
+      action.setAttribute('target', '_blank');
+      action.setAttribute('rel', 'noopener noreferrer');
+      bubble.appendChild(action);
+    }
     if (normalized.role === 'assistant') {
       var miniAvatar = element('span', 'gw-mini-avatar', this.agent.displayName.charAt(0).toUpperCase() || 'G');
       miniAvatar.setAttribute('aria-hidden', 'true');
@@ -2829,16 +2898,17 @@
     nodes.handoffLabel.textContent = 'Opening WhatsApp…';
     try {
       var result = await this.api.startHandoff(this.session);
-      // A blocked popup is the expected failure here, not an exception. The
-      // fallback navigates the tab the visitor already trusted rather than
-      // leaving a button that looks broken.
-      var opened = global.open(result.url, '_blank', 'noopener,noreferrer');
-      if (!opened) global.location.href = result.url;
+      openExternal(result.url);
+      // The transcript carries a real link as well as the attempted open.
+      // Nothing can detect a blocked popup -- window.open returns null on
+      // SUCCESS when noopener is set, which is what made the old fallback
+      // navigate the customer's own page away on every single handoff -- so the
+      // visitor is given something to tap rather than the widget guessing.
       this.appendMessage({
         id: randomID(),
         role: 'assistant',
         content: 'Opening WhatsApp so you can speak with the team directly. This chat stays here if you would rather keep typing.'
-      });
+      }, { action: { label: result.label || 'Open WhatsApp', url: result.url } });
     } catch (error) {
       this.appendMessage({
         id: randomID(),
@@ -3694,6 +3764,8 @@
       '@keyframes gw-handoff-pulse{0%{box-shadow:0 0 0 0 rgba(18,140,126,.35);}70%{box-shadow:0 0 0 7px rgba(18,140,126,0);}100%{box-shadow:0 0 0 0 rgba(18,140,126,0);}}',
       '@media (prefers-reduced-motion: reduce){.gw-handoff-offered{animation:none;}}',
       '.gw-handoff-hint{margin:0 0 2px 3px;font-size:10px;color:#7A8496;}',
+      '.gw-bubble-action{display:inline-flex;align-items:center;margin-top:8px;padding:6px 11px;border-radius:8px;background:#128C7E;color:#fff;font-size:11px;font-weight:700;text-decoration:none;}',
+      '.gw-bubble-action:hover{background:#0F7568;}',
       '.gw-contact-button svg{width:15px;height:15px;}',
       '.gw-booking-button{min-height:35px;border:0;background:transparent;color:var(--garuda-accent);display:flex;align-items:center;gap:6px;padding:5px 3px;font-size:11px;font-weight:680;cursor:pointer;border-radius:9px;}',
       '.gw-booking-button:hover{background:color-mix(in srgb,var(--garuda-accent) 8%,transparent);}',

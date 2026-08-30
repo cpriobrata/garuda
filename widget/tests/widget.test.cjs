@@ -423,6 +423,7 @@ function createNode(tagName, namespace) {
     parentNode: null,
     attributes: new Map(),
     handlers: new Map(),
+    clicks: 0,
     hidden: false,
     disabled: false,
     required: false,
@@ -505,6 +506,7 @@ function createNode(tagName, namespace) {
     node.shadowRoot = createNode('#shadow');
     return node.shadowRoot;
   };
+  node.click = () => { node.clicks += 1; };
   node.querySelector = (selector) => queryAll(node, selector)[0] || null;
   node.querySelectorAll = (selector) => queryAll(node, selector);
   return node;
@@ -1296,7 +1298,7 @@ test('asking for a human pulls the offer forward instead of waiting to be found'
   }
 });
 
-test('the handoff fetches its link with the session token and opens it in a new tab', async () => {
+test('the handoff fetches its link with the session token and never navigates the host page', async () => {
   const calls = [];
   const rendered = renderWidget(
     { display_name: 'Northstar', handoff: { enabled: true, label: 'Talk to a person' } },
@@ -1312,9 +1314,7 @@ test('the handoff fetches its link with the session token and opens it in a new 
       }
     }
   );
-  const savedOpen = global.open;
-  const opened = [];
-  global.open = (url, target, features) => { opened.push({ url, target, features }); return {}; };
+  const startingHref = global.location.href;
   try {
     await rendered.instance.requestHandoff();
 
@@ -1322,18 +1322,27 @@ test('the handoff fetches its link with the session token and opens it in a new 
     assert.equal(calls[0].url, 'https://api.garuda.example/widget/v1/sessions/session-1/handoff');
     assert.equal(calls[0].settings.method, 'POST');
     assert.equal(calls[0].settings.headers['X-Garuda-Session-Token'], 'short-lived-token', 'the link is only obtainable with a live session');
-    assert.equal(opened.length, 1);
-    assert.equal(opened[0].url, 'https://wa.me/919876543210?text=hi');
-    assert.equal(opened[0].features, 'noopener,noreferrer');
+
+    // This is the whole point. window.open with noopener returns null whether it
+    // worked or not, so the old code treated every SUCCESS as a blocked popup
+    // and navigated the customer's own page to WhatsApp -- taking their visitor
+    // off their website on every handoff.
+    assert.equal(global.location.href, startingHref, 'the customer\'s page must never be navigated away');
+
+    const anchors = rendered.nodes.messages.querySelectorAll('a');
+    const link = anchors.find((node) => node.getAttribute('href') === 'https://wa.me/919876543210?text=hi');
+    assert.ok(link, 'the transcript carries a real link the visitor can tap');
+    assert.equal(link.getAttribute('target'), '_blank');
+    assert.equal(link.getAttribute('rel'), 'noopener noreferrer', 'an external link from somebody else\'s page must not hand over window.opener');
+
     assert.equal(rendered.nodes.handoffButton.disabled, false, 'the button comes back after the link opens');
     assert.equal(rendered.nodes.handoffLabel.textContent, 'Talk to a person', 'the busy label does not stick');
   } finally {
-    global.open = savedOpen;
     rendered.restore();
   }
 });
 
-test('a blocked popup still gets the visitor to WhatsApp', async () => {
+test('a browser that refuses the automatic open still leaves the visitor a way through', async () => {
   const rendered = renderWidget(
     { display_name: 'Northstar', handoff: { enabled: true } },
     {
@@ -1345,13 +1354,17 @@ test('a blocked popup still gets the visitor to WhatsApp', async () => {
       })
     }
   );
-  const savedOpen = global.open;
-  global.open = () => null;
+  const startingHref = global.location.href;
   try {
     await rendered.instance.requestHandoff();
-    assert.equal(global.location.href, 'https://wa.me/919876543210?text=hi', 'the tab the visitor already trusted is navigated instead');
+
+    // Nothing can detect a blocked popup, so the widget does not try. The link
+    // in the transcript is what makes a blocked open survivable.
+    const anchors = rendered.nodes.messages.querySelectorAll('a');
+    assert.ok(anchors.some((node) => node.getAttribute('href') === 'https://wa.me/919876543210?text=hi'),
+      'a blocked open must still leave a tappable link');
+    assert.equal(global.location.href, startingHref, 'and still must not navigate the host page');
   } finally {
-    global.open = savedOpen;
     rendered.restore();
   }
 });
@@ -1993,7 +2006,13 @@ test('the first batch reports the source and the device once, with the session t
     assert.equal(first.device.language, 'en-GB');
     assert.equal(typeof first.device.timezone, 'string');
     assert.ok(first.device.timezone.length > 0, 'the time zone stands in for a region');
-    assert.deepEqual(first.pages, [{ path: '/pricing', title: 'Customer page' }]);
+    // Each entry carries a visit id, so two open tabs on the same path stay
+    // separate on the server and a reload is a new visit rather than a report
+    // that appears to go backwards.
+    assert.equal(first.pages.length, 1);
+    assert.equal(first.pages[0].path, '/pricing');
+    assert.equal(first.pages[0].title, 'Customer page');
+    assert.ok(first.pages[0].visit, 'a page report identifies which visit it belongs to');
 
     // Nothing changed, so nothing is sent: the endpoint fires every fifteen
     // seconds per open page and an empty batch would be pure cost.
@@ -2229,6 +2248,90 @@ test('a failed report is silent, retried, and eventually gives up rather than be
     }
     assert.equal(rendered.instance.journey, null, 'tracking stops rather than retrying forever on a broken network');
     assert.equal(attempts.length, 7, 'and it stops making requests once it has stopped');
+  } finally {
+    rendered.restore();
+  }
+});
+
+// A customer who wires their cookie banner to data-analytics-consent and gets a
+// decline has said something specific. The journey tracker ignored the attribute
+// entirely, which made it a lie about what it did.
+test('an explicit analytics refusal stops journey tracking', () => {
+  const browser = installFakeBrowser();
+  try {
+    const refused = new widget.GarudaWidget({
+      agentKey: 'pub_live_refused', mode: 'live', apiOrigin: 'https://api.garuda.example',
+      memorySetting: 'false', analytics: false, analyticsRefused: true,
+      launcherLabel: '', startOpen: false, zIndex: 2147482000,
+    });
+    refused.createUI();
+    refused.startJourney();
+    assert.equal(refused.journey, null, 'a declined visitor must not be tracked');
+
+    // And absence of the attribute is not a refusal: most customers never set
+    // it, and turning the feature off for all of them would be its own defect.
+    const ordinary = new widget.GarudaWidget({
+      agentKey: 'pub_live_ordinary', mode: 'live', apiOrigin: 'https://api.garuda.example',
+      memorySetting: 'false', analytics: false,
+      launcherLabel: '', startOpen: false, zIndex: 2147482000,
+    });
+    ordinary.createUI();
+    ordinary.startJourney();
+    assert.ok(ordinary.journey, 'a visitor who was never asked is still tracked');
+    ordinary.stopJourney ? ordinary.stopJourney() : null;
+    ordinary.stopPolling();
+  } finally {
+    browser.restore();
+  }
+});
+
+// The session token lives fifteen minutes; a visit routinely outlasts it. Both
+// the reply poll and the journey reporter run for the whole visit, and both used
+// to die silently a quarter of an hour in -- on exactly the long visits worth
+// measuring, and for exactly the operator replies typed after a real delay.
+test('a poll that outlives the session token renews it instead of dying', async () => {
+  let attempts = 0;
+  const rendered = renderWidget(
+    { display_name: 'Northstar' },
+    {
+      fetch: async (url) => {
+        if (String(url).includes('/messages')) {
+          attempts += 1;
+          if (attempts === 1) {
+            return {
+              ok: false, status: 401,
+              headers: { get: () => 'application/json' },
+              json: async () => ({ error: { code: 'invalid_session', message: 'expired' } }),
+            };
+          }
+          return {
+            ok: true, status: 200,
+            headers: { get: () => 'application/json' },
+            json: async () => ({ data: { messages: [{ id: 'msg_operator', role: 'assistant', content: 'Priya here' }] } }),
+          };
+        }
+        // The renewal.
+        return {
+          ok: true, status: 201,
+          headers: { get: () => 'application/json' },
+          json: async () => ({
+            data: {
+              session_id: 'session-2', session_token: 'a-renewed-token',
+              conversation: { id: 'session-2', resumed: true, messages: [] },
+            },
+          }),
+        };
+      },
+    }
+  );
+  try {
+    rendered.instance.appendMessage({ id: 'm1', role: 'user', content: 'hello' });
+    await rendered.instance.pollForTeamReplies();
+
+    assert.ok(attempts >= 2, 'the poll must retry after renewing, not give up');
+    assert.equal(rendered.instance.session.sessionToken, 'a-renewed-token', 'the session was renewed');
+    const delivered = rendered.instance.messages.some((message) => message.content === 'Priya here');
+    assert.ok(delivered, 'the reply written after the token expired must still arrive');
   } finally {
     rendered.restore();
   }

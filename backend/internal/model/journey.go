@@ -93,6 +93,9 @@ type DeviceProfile struct {
 // PageVisit is one page, once. A visitor who returns to a page appears twice,
 // because the order is the story.
 type PageVisit struct {
+	// Visit identifies this visit to this page, so two tabs on the same path stay
+	// separate and a reload is a new visit rather than a contradictory report.
+	Visit string `json:"visit,omitempty"`
 	Path  string `json:"path"`
 	Title string `json:"title,omitempty"`
 

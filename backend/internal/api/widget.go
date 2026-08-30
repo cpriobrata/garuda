@@ -798,6 +798,12 @@ func (s *Server) resetWidgetSession(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		state.Sessions = append(state.Sessions, fresh)
+		// The restart button creates a session exactly as the public route does,
+		// so it has to be bounded exactly as the public route is. Without this a
+		// visitor could hold the button down and accumulate conversations forever,
+		// which is the same flood the budget was written to stop, through a door
+		// nobody had checked.
+		enforceVisitorSessionBudget(state, agent.ID, fresh.VisitorID)
 		if welcome := strings.TrimSpace(agent.WelcomeMessage); welcome != "" {
 			state.Messages = append(state.Messages, model.Message{
 				ID: newID("msg_"), AccountID: agent.AccountID, AgentID: agent.ID, SessionID: fresh.ID,
