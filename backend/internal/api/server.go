@@ -265,6 +265,8 @@ func (s *Server) Handler() http.Handler {
 	protected("GET /v1/leads", s.listLeads)
 	protected("GET /v1/leads/{leadID}", s.getLead)
 	protected("PATCH /v1/leads/{leadID}", s.updateLead)
+	// Everything Garuda has booked, whichever calendar it landed in.
+	protected("GET /v1/appointments", s.listAppointments)
 	protected("GET /v1/conversations", s.listConversations)
 	protected("GET /v1/conversations/{sessionID}", s.getConversation)
 	protectedLimited("POST /v1/conversations/{sessionID}/messages", "conversations.reply", 120, time.Minute, s.postTeamReply)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -367,8 +368,17 @@ func (s *Server) createBooking(w http.ResponseWriter, r *http.Request) {
 		ID: newID("lead_"), AccountID: session.AccountID, AgentID: session.AgentID,
 		SessionID: session.ID, VisitorID: session.VisitorID,
 		Name: name, Email: email, Status: "new", Source: "appointment",
-		Notes:     notes,
-		Metadata:  map[string]string{"appointment_start": start.UTC().Format(time.RFC3339), "appointment_event_id": eventID},
+		Notes: notes,
+		// The calendar is recorded ON the booking rather than looked up from the
+		// agent later: an owner who switches provider must not have last week's
+		// appointments relabelled as though they were booked in the new place.
+		Metadata: map[string]string{
+			"appointment_start":    start.UTC().Format(time.RFC3339),
+			"appointment_event_id": eventID,
+			"appointment_calendar": bookingCalendar(booking),
+			"appointment_timezone": booking.Timezone,
+			"appointment_minutes":  strconv.Itoa(appointmentMinutes(booking)),
+		},
 		CreatedAt: now, UpdatedAt: now,
 	}
 	err = s.store.Update(func(state *model.State) error {
