@@ -155,6 +155,11 @@ func slotsFromBusy(data map[string]any, from, to time.Time, duration time.Durati
 	busy := busyPeriods(data)
 	sort.Slice(busy, func(i, j int) bool { return busy[i].Start.Before(busy[j].Start) })
 
+	// A last-resort guard only. normalizeBooking resolves the working day at save
+	// time, so a stored configuration reaching here with no window means it was
+	// built by a caller that skipped normalization -- a test, or a future path.
+	// Offering nothing would look like a fully booked calendar, which is a worse
+	// lie than a sensible default.
 	if day.EndHour <= day.StartHour {
 		day.StartHour, day.EndHour = 9, 18
 	}

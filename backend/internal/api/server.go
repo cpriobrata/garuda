@@ -1073,3 +1073,27 @@ func weakDigest(content []byte) string {
 	sum := sha256.Sum256(content)
 	return `W/"` + hex.EncodeToString(sum[:8]) + `"`
 }
+
+// LivenessProbe is what the systemd watchdog asks before this process is allowed
+// to say it is alive.
+//
+// The check is deliberately the same one /readyz makes -- can the store's read
+// lock be taken -- because a wedged store is the failure the watchdog exists to
+// catch, and it is the one a port-open check cannot see. It runs on the caller's
+// context, so a probe that cannot acquire the lock within the watchdog's budget
+// returns an error rather than blocking the goroutine that would have pinged.
+func (s *Server) LivenessProbe(ctx context.Context) error {
+	done := make(chan error, 1)
+	go func() {
+		done <- s.store.View(func(_ *model.State) error { return nil })
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		// The goroutine is left to finish on its own. It is blocked on a mutex
+		// that will either be released, in which case it exits, or never will,
+		// in which case this process is about to be restarted anyway.
+		return ctx.Err()
+	}
+}

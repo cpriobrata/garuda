@@ -95,6 +95,18 @@ func normalizeBooking(booking *model.BookingConfig) {
 	if booking.NoticeHours < 0 {
 		booking.NoticeHours = 0
 	}
+	// An UNSET working day gets the default here, so that what is stored is what
+	// is used. The slot search used to fall back to 9-18 on its own, deep in the
+	// availability arithmetic, which meant the saved configuration and the
+	// effective one disagreed: the builder showed "0 to 0" while visitors were
+	// offered nine to six.
+	//
+	// Only the unset case. A day that ENDS BEFORE IT STARTS is a typo, and
+	// silently turning it into nine-to-six would hide the mistake from the person
+	// who made it -- so that one is left for validation to reject.
+	if booking.StartHour == 0 && booking.EndHour == 0 {
+		booking.StartHour, booking.EndHour = 9, 18
+	}
 	// Deduplicate and bound the weekday set, so a caller sending [1,1,1,...]
 	// cannot make the slot search do more work than there are days in a week.
 	seen := map[int]bool{}

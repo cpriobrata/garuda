@@ -15,6 +15,7 @@ import (
 	"garuda/backend/internal/config"
 	"garuda/backend/internal/meta"
 	"garuda/backend/internal/store"
+	"garuda/backend/internal/watchdog"
 )
 
 func main() {
@@ -83,8 +84,17 @@ func main() {
 		}
 	}()
 
+	// READY=1 goes out only after the listener is bound, and every ping after it
+	// only after the store has actually been read. systemd can already restart a
+	// process that exits; what it cannot see is one that is alive and wedged, and
+	// this is what makes that visible. Absent NOTIFY_SOCKET -- every environment
+	// but the systemd unit -- New returns nil and this does nothing.
+	liveness := watchdog.New(service.LivenessProbe, logger)
+	liveness.Start()
+
 	<-shutdownContext.Done()
 	logger.Info("shutting down")
+	liveness.Stop()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := server.Shutdown(ctx); err != nil {

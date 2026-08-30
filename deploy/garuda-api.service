@@ -11,7 +11,14 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+# notify, not simple, so systemd can tell the difference between a process that
+# is running and one that can actually serve. The binary sends READY=1 once the
+# listener is bound, then WATCHDOG=1 only after it has genuinely read the store.
+# A deadlock -- alive, port open, every request hanging -- looks healthy under
+# Type=simple and is caught within WatchdogSec here.
+Type=notify
+NotifyAccess=main
+WatchdogSec=60
 User=garuda
 Group=garuda
 WorkingDirectory=/opt/garuda
@@ -37,7 +44,10 @@ ProtectHome=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
-RestrictAddressFamilies=AF_INET AF_INET6
+# AF_UNIX is required for the systemd notification socket. Without it the
+# watchdog pings are silently dropped and the service is killed a minute after
+# it starts, which is a far worse failure than the one the watchdog prevents.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes

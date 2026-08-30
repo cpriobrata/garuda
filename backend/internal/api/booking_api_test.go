@@ -142,3 +142,42 @@ func TestAnAgentThatPredatesBookingHasItSwitchedOff(t *testing.T) {
 		t.Fatal("an agent with no booking configuration offers appointments")
 	}
 }
+
+// An unset working day gets the default so that what is stored is what is used.
+// A day that ends before it starts is a typo, and silently turning it into
+// nine-to-six would hide the mistake from the person who made it.
+func TestAnUnsetWorkingDayIsDefaultedButAReversedOneIsRejected(t *testing.T) {
+	unset := model.BookingConfig{Enabled: true, Timezone: "UTC"}
+	normalizeBooking(&unset)
+	if unset.StartHour != 9 || unset.EndHour != 18 {
+		t.Fatalf("an unset working day resolved to %d-%d, want the 9-18 default", unset.StartHour, unset.EndHour)
+	}
+	details := map[string]string{}
+	validateBooking(unset, details)
+	if len(details) != 0 {
+		t.Fatalf("the defaulted day was rejected: %v", details)
+	}
+
+	reversed := model.BookingConfig{Enabled: true, Timezone: "UTC", StartHour: 17, EndHour: 9}
+	normalizeBooking(&reversed)
+	if reversed.StartHour != 17 || reversed.EndHour != 9 {
+		t.Fatalf("a reversed day was silently corrected to %d-%d, hiding the typo", reversed.StartHour, reversed.EndHour)
+	}
+	details = map[string]string{}
+	validateBooking(reversed, details)
+	if details["booking.hours"] == "" {
+		t.Fatal("a day that ends before it starts was accepted")
+	}
+
+	// And a deliberate all-day window survives both.
+	allDay := model.BookingConfig{Enabled: true, Timezone: "UTC", StartHour: 0, EndHour: 24}
+	normalizeBooking(&allDay)
+	if allDay.EndHour != 24 {
+		t.Fatalf("an all-day window was rewritten to %d-%d", allDay.StartHour, allDay.EndHour)
+	}
+	details = map[string]string{}
+	validateBooking(allDay, details)
+	if len(details) != 0 {
+		t.Fatalf("an all-day window was rejected: %v", details)
+	}
+}
