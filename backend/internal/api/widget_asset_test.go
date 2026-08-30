@@ -38,7 +38,7 @@ func TestTheWidgetIsRevalidatableRatherThanRedownloaded(t *testing.T) {
 	if tag == "" {
 		t.Fatal("the widget was served with no ETag, so every visitor re-downloads it")
 	}
-	if !strings.HasPrefix(tag, `"`) || !strings.HasSuffix(tag, `"`) {
+	if !strings.HasSuffix(tag, `"`) || !strings.Contains(tag, `"`) {
 		t.Errorf("the ETag is not in the quoted form the header requires: %s", tag)
 	}
 
@@ -51,10 +51,13 @@ func TestTheWidgetIsRevalidatableRatherThanRedownloaded(t *testing.T) {
 	}
 }
 
-// The tag identifies the bytes, and the gzipped bytes are different bytes. A
-// shared tag lets a cache serve a gzipped body to a client that asked for
-// identity, which arrives as line noise.
-func TestTheCompressedAndUncompressedVariantsHaveDifferentTags(t *testing.T) {
+// One WEAK tag covers both variants. A strong tag identifies bytes, so the two
+// codings would need different ones -- and that breaks through any proxy that
+// decompresses, which our own does: it asks upstream for gzip whichever encoding
+// the client wanted, decompresses when the client did not, and forwards the
+// header it was given. A weak tag asserts semantic equivalence, which is exactly
+// the relationship between two codings of one file.
+func TestOneWeakTagCoversBothEncodings(t *testing.T) {
 	server, _ := newTestServer(t)
 
 	compressed := fetchWidget(t, server, "gzip", "")
@@ -66,17 +69,23 @@ func TestTheCompressedAndUncompressedVariantsHaveDifferentTags(t *testing.T) {
 	if plain.Header().Get("Content-Encoding") != "" {
 		t.Fatal("a client that did not ask for gzip was sent gzip")
 	}
-	if compressed.Header().Get("ETag") == plain.Header().Get("ETag") {
-		t.Fatal("the two variants share one strong validator")
+	tag := compressed.Header().Get("ETag")
+	if tag != plain.Header().Get("ETag") {
+		t.Fatalf("the two codings carry different tags: %q and %q", tag, plain.Header().Get("ETag"))
+	}
+	if !strings.HasPrefix(tag, "W/") {
+		t.Fatalf("a tag shared between codings must be weak, got %q", tag)
 	}
 	if compressed.Header().Get("Vary") != "Accept-Encoding" {
 		t.Error("Vary is missing, so a shared cache can serve the wrong variant")
 	}
 
-	// And a tag from the wrong variant must not produce a 304.
-	crossed := fetchWidget(t, server, "gzip", plain.Header().Get("ETag"))
-	if crossed.Code == http.StatusNotModified {
-		t.Fatal("the identity tag matched the gzipped variant")
+	// And it revalidates from either side.
+	if code := fetchWidget(t, server, "gzip", tag).Code; code != http.StatusNotModified {
+		t.Errorf("gzip revalidation returned %d", code)
+	}
+	if code := fetchWidget(t, server, "", tag).Code; code != http.StatusNotModified {
+		t.Errorf("identity revalidation returned %d", code)
 	}
 }
 
@@ -87,9 +96,9 @@ func TestConditionalRequestsAreMatchedTheWayCachesSendThem(t *testing.T) {
 	tag := fetchWidget(t, server, "gzip", "").Header().Get("ETag")
 
 	for name, header := range map[string]string{
-		"exact":            tag,
-		"in a list":        `"something-else", ` + tag,
-		"weak prefix":      "W/" + tag,
+		"exact":     tag,
+		"in a list": `"something-else", ` + tag,
+		"without the weak prefix a cache stripped": strings.TrimPrefix(tag, "W/"),
 		"the wildcard":     "*",
 		"spaces around it": "  " + tag + "  ",
 	} {

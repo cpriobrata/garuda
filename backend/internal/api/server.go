@@ -285,12 +285,11 @@ func (s *Server) ready(w http.ResponseWriter, _ *http.Request) {
 // immutable for the life of the process, so compressing once at first request
 // costs nothing per request afterwards.
 var widgetAsset struct {
-	once     sync.Once
-	raw      []byte
-	gzipped  []byte
-	etag     string
-	gzipETag string
-	readErr  error
+	once    sync.Once
+	raw     []byte
+	gzipped []byte
+	etag    string
+	readErr error
 }
 
 func loadWidgetAsset() ([]byte, []byte, error) {
@@ -315,8 +314,7 @@ func loadWidgetAsset() ([]byte, []byte, error) {
 		widgetAsset.gzipped = buffer.Bytes()
 		// Computed once, from the bytes themselves, so the tag changes exactly when
 		// the widget does and never when it does not.
-		widgetAsset.etag = quotedDigest(content)
-		widgetAsset.gzipETag = quotedDigest(widgetAsset.gzipped)
+		widgetAsset.etag = weakDigest(content)
 	})
 	return widgetAsset.raw, widgetAsset.gzipped, widgetAsset.readErr
 }
@@ -337,22 +335,24 @@ func (s *Server) widgetScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("ETag", widgetAsset.etag)
 	w.Header().Set("Vary", "Accept-Encoding")
 
-	// The tag identifies the bytes, and the gzipped bytes are different bytes, so
-	// the two variants must not share one strong validator. A shared tag lets a
-	// cache serve a gzipped body to a client that asked for identity, which
-	// arrives as line noise.
-	tag := widgetAsset.etag
+	// A WEAK validator, shared by both variants, and deliberately so.
+	//
+	// A strong tag identifies bytes, so the gzipped and identity forms would need
+	// different ones -- and that breaks the moment anything between here and the
+	// browser decompresses. Our own proxy does exactly that: Go's transport asks
+	// upstream for gzip whichever encoding the client wanted, decompresses when
+	// the client did not, and forwards the header it was given, so an identity
+	// body arrives labelled with the gzipped bytes' tag.
+	//
+	// A weak tag asserts semantic equivalence rather than byte equality, which is
+	// exactly the relationship between two content codings of one file, and is
+	// what the spec has weak validators for. One tag, correct through any proxy.
 	useGzip := len(gzipped) > 0 && acceptsGzip(r.Header.Get("Accept-Encoding"))
-	if useGzip {
-		tag = widgetAsset.gzipETag
-		w.Header().Set("ETag", tag)
-	}
 
-	if matchesETag(r.Header.Get("If-None-Match"), tag) {
+	if matchesETag(r.Header.Get("If-None-Match"), widgetAsset.etag) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-
 	if useGzip {
 		w.Header().Set("Content-Encoding", "gzip")
 		w.WriteHeader(http.StatusOK)
@@ -1064,12 +1064,12 @@ func looksLikeIdentifier(segment string) bool {
 	return digits > 0 && digits == len(segment)
 }
 
-// quotedDigest is an ETag from the content itself: a short SHA-256 prefix in the
-// quoted form the header requires. Sixteen hex characters is 64 bits, which is
+// weakDigest is an ETag from the content itself: a short SHA-256 prefix, marked
+// weak because it identifies the widget rather than one encoding of it. Sixteen hex characters is 64 bits, which is
 // far more than enough to distinguish the handful of widget builds a cache will
 // ever hold, and short enough to keep the header small on a request every
 // visitor makes.
-func quotedDigest(content []byte) string {
+func weakDigest(content []byte) string {
 	sum := sha256.Sum256(content)
-	return `"` + hex.EncodeToString(sum[:8]) + `"`
+	return `W/"` + hex.EncodeToString(sum[:8]) + `"`
 }

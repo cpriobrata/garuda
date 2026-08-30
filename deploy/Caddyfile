@@ -1,7 +1,13 @@
 # Caddy terminates TLS and proxies to the Go API on loopback.
 # Requires an A record: api.garuda.ravan.ai -> this server's public IP.
 api.garuda.ravan.ai {
-	encode gzip zstd
+	# Everything EXCEPT the widget. The API already serves /widget.js
+	# pre-compressed at maximum level, cached once at startup, with a separate
+	# ETag per variant. Letting Caddy encode it too means Caddy asks upstream for
+	# identity, throws that cached work away, and re-compresses 145KB on every
+	# request -- and collapses the two variants onto one ETag while it is at it.
+	@compressible not path /widget.js
+	encode @compressible gzip zstd
 
 	# The API sets its own CORS, security and cache headers. Do not duplicate them
 	# here -- two sources of Access-Control-Allow-Origin is how origins get
