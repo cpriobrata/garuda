@@ -33,7 +33,7 @@ export type Lead = {
   phone: string;
   company: string;
   score: number;
-  status: "New" | "Qualified" | "Contacted" | "Meeting booked" | "Customer";
+  status: "New" | "Qualified" | "Contacted" | "Meeting booked" | "Customer" | "Disqualified";
   source: string;
   captured: string;
   // The conversation this lead came out of, when there is one. Absent for a lead

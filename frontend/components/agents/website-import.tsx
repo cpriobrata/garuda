@@ -167,6 +167,10 @@ export function WebsiteImport({
           // A bare domain is what a person types. The server adds the scheme, so
           // sending it as typed is deliberate rather than lax.
           body: JSON.stringify({ url: url.trim() }),
+          // Longer than the server's own fetch budget. At the default eight
+          // seconds the client gave up first on any slow-but-valid page, and
+          // then told the customer their address was the problem.
+          timeoutMs: 30_000,
         });
         setPage(imported);
       } catch (reason) {

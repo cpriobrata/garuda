@@ -13,7 +13,10 @@ import { useBusyAction } from "@/lib/busy-action";
 import { conversations as demoConversations, type Conversation } from "@/lib/demo-data";
 import { cn } from "@/lib/utils";
 
-type DisplayMessage = { id?: string; from: "visitor" | "agent" | "team"; text: string; time: string };
+// "event" is bookkeeping the SERVICE wrote -- a handoff, a booking -- and is
+// deliberately its own kind, because rendering it as a team message told the
+// owner a colleague had said something nobody said.
+type DisplayMessage = { id?: string; from: "visitor" | "agent" | "team" | "event"; text: string; time: string };
 
 // A persisted turn carries `metadata` on the wire -- that is where the API records
 // who wrote an assistant message -- but ConversationDetail in lib/api.ts does not
@@ -34,7 +37,11 @@ function toDisplayMessage(message: PersistedMessage): DisplayMessage {
   const operator = message.metadata?.author === "operator";
   return {
     id: message.id,
-    from: message.role === "user" ? "visitor" : message.role === "assistant" && !operator ? "agent" : "team",
+    // A system row is bookkeeping the SERVICE wrote -- "the visitor asked to
+    // continue on WhatsApp", "the visitor booked an appointment" -- not
+    // something a teammate typed. Rendering it as a team message told the owner
+    // a colleague had said something nobody said.
+    from: message.role === "user" ? "visitor" : message.role === "system" ? "event" : operator ? "team" : "agent",
     text: message.content,
     time: new Date(message.created_at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }),
   };
@@ -105,8 +112,13 @@ export function ConversationInbox() {
   // The API measures the trimmed reply in bytes -- Go's len() over a UTF-8 string --
   // so the counter does too. A JS character count would wave an emoji-heavy or CJK
   // reply past the button and let the server reject it as too long.
-  const replyBytes = useMemo(() => new TextEncoder().encode(reply.trim()).length, [reply]);
-  const overReplyLimit = replyBytes > maxReplyLength;
+  // CHARACTERS, matching the server. It counted UTF-8 bytes, which is the same
+  // number in English and roughly a third of it in Hindi or Chinese -- so a
+  // perfectly ordinary reply in those languages could not be sent at all, and
+  // the counter gave no hint why. [...str] splits on code points rather than
+  // UTF-16 units, so an emoji counts once here and once on the server too.
+  const replyLength = useMemo(() => [...reply.trim()].length, [reply]);
+  const overReplyLimit = replyLength > maxReplyLength;
   const canSendReply = Boolean(reply.trim()) && !overReplyLimit;
 
   useEffect(() => {
@@ -208,7 +220,7 @@ export function ConversationInbox() {
                 {!connected && active.status === "Needs you" && <div className="my-6 rounded-xl border border-amber-200 bg-amber-50 p-3"><div className="flex items-start gap-3"><Sparkles className="mt-1 h-4 w-4 text-amber-700" /><div><p className="text-xs font-semibold text-amber-900">Demo recommendation</p><p className="mt-1 text-[10px] leading-4 text-amber-700">Confirm the requested calendar time to keep momentum.</p></div></div></div>}
               </div>
             </div>
-            {connected ? <form onSubmit={(event) => { event.preventDefault(); void sendTeamReply(); }} className="shrink-0 border-t bg-white p-3 sm:p-4"><div className="mx-auto max-w-2xl">{replyError && <p role="alert" className="mb-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[10px] leading-4 text-red-700">{replyError} Your reply is still in the box — send it again when you are ready.</p>}<div className="rounded-xl border bg-white shadow-sm focus-within:border-indigo-300"><label htmlFor="team-reply" className="sr-only">Reply to {active.visitor}</label><textarea id="team-reply" value={reply} onChange={(event) => setReply(event.target.value)} onKeyDown={replyKeyDown} aria-describedby="team-reply-hint team-reply-counter" aria-invalid={overReplyLimit || undefined} className="min-h-[68px] w-full resize-none rounded-t-xl bg-transparent px-3.5 py-3 text-xs outline-none" placeholder="Write a reply…" /><div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t bg-slate-50/50 px-3 py-2"><span id="team-reply-hint" className="text-[9px] leading-4 text-slate-400"><span className="hidden sm:inline">Enter to send · Shift+Enter for a new line · </span>The visitor sees this in their widget</span><span id="team-reply-counter" className={cn("text-[9px] tabular-nums", replyBytes < counterThreshold ? "sr-only" : overReplyLimit ? "font-semibold text-red-600" : "text-amber-600")}>{replyBytes.toLocaleString()}/4,000<span className="sr-only"> used of the 4,000 allowed</span></span><Button type="submit" size="sm" className="ml-auto h-7" disabled={!canSendReply} loading={sendReply.busy} loadingLabel="Sending your reply"><ArrowUp className="mr-1.5 h-3.5 w-3.5" /> Send</Button></div></div></div></form> : <form onSubmit={send} className="shrink-0 border-t bg-white p-3 sm:p-4"><div className="mx-auto max-w-2xl rounded-xl border bg-white shadow-sm"><textarea value={reply} onChange={(event) => setReply(event.target.value)} className="min-h-[68px] w-full resize-none rounded-t-xl px-3.5 py-3 text-xs outline-none" placeholder="Add a demo reply…" /><div className="flex items-center border-t bg-slate-50/50 px-2 py-2"><span className="text-[9px] text-slate-400">Demo-only reply</span><Button type="submit" size="icon" className="ml-auto h-7 w-7"><ArrowUp className="h-3.5 w-3.5" /></Button></div></div></form>}
+            {connected ? <form onSubmit={(event) => { event.preventDefault(); void sendTeamReply(); }} className="shrink-0 border-t bg-white p-3 sm:p-4"><div className="mx-auto max-w-2xl">{replyError && <p role="alert" className="mb-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[10px] leading-4 text-red-700">{replyError} Your reply is still in the box — send it again when you are ready.</p>}<div className="rounded-xl border bg-white shadow-sm focus-within:border-indigo-300"><label htmlFor="team-reply" className="sr-only">Reply to {active.visitor}</label><textarea id="team-reply" value={reply} onChange={(event) => setReply(event.target.value)} onKeyDown={replyKeyDown} aria-describedby="team-reply-hint team-reply-counter" aria-invalid={overReplyLimit || undefined} className="min-h-[68px] w-full resize-none rounded-t-xl bg-transparent px-3.5 py-3 text-xs outline-none" placeholder="Write a reply…" /><div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t bg-slate-50/50 px-3 py-2"><span id="team-reply-hint" className="text-[9px] leading-4 text-slate-400"><span className="hidden sm:inline">Enter to send · Shift+Enter for a new line · </span>The visitor sees this in their widget</span><span id="team-reply-counter" className={cn("text-[9px] tabular-nums", replyLength < counterThreshold ? "sr-only" : overReplyLimit ? "font-semibold text-red-600" : "text-amber-600")}>{replyLength.toLocaleString()}/4,000<span className="sr-only"> used of the 4,000 allowed</span></span><Button type="submit" size="sm" className="ml-auto h-7" disabled={!canSendReply} loading={sendReply.busy} loadingLabel="Sending your reply"><ArrowUp className="mr-1.5 h-3.5 w-3.5" /> Send</Button></div></div></div></form> : <form onSubmit={send} className="shrink-0 border-t bg-white p-3 sm:p-4"><div className="mx-auto max-w-2xl rounded-xl border bg-white shadow-sm"><textarea value={reply} onChange={(event) => setReply(event.target.value)} className="min-h-[68px] w-full resize-none rounded-t-xl px-3.5 py-3 text-xs outline-none" placeholder="Add a demo reply…" /><div className="flex items-center border-t bg-slate-50/50 px-2 py-2"><span className="text-[9px] text-slate-400">Demo-only reply</span><Button type="submit" size="icon" className="ml-auto h-7 w-7"><ArrowUp className="h-3.5 w-3.5" /></Button></div></div></form>}
           </>}
         </section>
 

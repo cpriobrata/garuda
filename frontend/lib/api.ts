@@ -520,7 +520,10 @@ export const garudaApi = {
     const items = await apiRequest<Array<Record<string, unknown>>>("/leads?page_size=100", { mock: () => demoLeads as unknown as Array<Record<string, unknown>> });
     return items.map((item, index) => {
       if (typeof item.score === "number") return item as unknown as Lead;
-      const statusMap: Record<string, Lead["status"]> = { new: "New", qualified: "Qualified", contacted: "Contacted", converted: "Customer" };
+      // disqualified was missing, so a lead the owner had explicitly ruled out
+      // fell through the || below and came back as New -- returning to the top of
+      // their list every time they looked at it.
+      const statusMap: Record<string, Lead["status"]> = { new: "New", qualified: "Qualified", contacted: "Contacted", converted: "Customer", disqualified: "Disqualified" };
       const metadata = (item.metadata || {}) as Record<string, string>;
       return {
         id: String(item.id || `lead-${index}`),

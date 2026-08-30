@@ -62,33 +62,141 @@ func TestConnectionsFilterByTheCallersAccount(t *testing.T) {
 	}
 }
 
-// Connect Link, not the retired initiate() path.
-func TestConnectLinkUsesTheLinkEndpointAndCarriesTheAccount(t *testing.T) {
-	var seenPath string
-	var seenBody map[string]any
+// Connect Link, not the retired initiate() path -- and the link endpoint needs an
+// auth config, which the provider will not create implicitly.
+//
+// Sending only the toolkit is a 400, which is what made every Connect button in
+// the product answer "this integration could not be started" with no way past it.
+func TestConnectLinkCreatesAnAuthConfigThenLinksAgainstIt(t *testing.T) {
+	var paths []string
+	var linkBody map[string]any
+	var authBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seenPath = r.URL.Path
-		_ = json.NewDecoder(r.Body).Decode(&seenBody)
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": "conn_new", "status": "INITIATED", "redirect_url": "https://provider.example/authorize"})
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/auth_configs") && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
+		case strings.HasSuffix(r.URL.Path, "/auth_configs"):
+			_ = json.NewDecoder(r.Body).Decode(&authBody)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"auth_config": map[string]any{"id": "ac_created", "is_composio_managed": true},
+			})
+		default:
+			_ = json.NewDecoder(r.Body).Decode(&linkBody)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"connected_account_id": "ca_new",
+				"redirect_url":         "https://provider.example/authorize",
+			})
+		}
 	}))
 	defer server.Close()
 
-	client := New(server.URL, "ck_test")
+	client := New(server.URL, "ak_test")
 	connection, err := client.ConnectLink(context.Background(), "org_abc", "HighLevel", "https://garuda.ravan.ai/app/integrations")
 	if err != nil {
 		t.Fatalf("ConnectLink: %v", err)
 	}
-	if !strings.HasSuffix(seenPath, "/connected_accounts/link") {
-		t.Errorf("expected the link endpoint, got %q", seenPath)
+
+	if !strings.HasSuffix(paths[len(paths)-1], "/connected_accounts/link") {
+		t.Errorf("the last call must be the link, got %v", paths)
 	}
-	if seenBody["user_id"] != "org_abc" {
-		t.Errorf("the account must be sent as user_id, got %v", seenBody["user_id"])
+	if linkBody["auth_config_id"] != "ac_created" {
+		t.Errorf("the link must reference the auth config, got %v", linkBody["auth_config_id"])
 	}
-	if seenBody["toolkit"] != "highlevel" {
-		t.Errorf("toolkit should be normalised to lower case, got %v", seenBody["toolkit"])
+	if linkBody["user_id"] != "org_abc" {
+		t.Errorf("the account must be sent as user_id, got %v", linkBody["user_id"])
 	}
+	// Composio's managed auth is the whole reason this product uses a broker: it
+	// means Garuda needs no OAuth app of its own for the toolkits it covers.
+	config, _ := authBody["auth_config"].(map[string]any)
+	if config == nil || config["type"] != "use_composio_managed_auth" {
+		t.Errorf("the auth config must use the provider's managed auth, got %v", authBody["auth_config"])
+	}
+	toolkit, _ := authBody["toolkit"].(map[string]any)
+	if toolkit == nil || toolkit["slug"] != "highlevel" {
+		t.Errorf("toolkit should be normalised to lower case, got %v", authBody["toolkit"])
+	}
+
 	if connection.RedirectURL != "https://provider.example/authorize" {
 		t.Errorf("redirect url not returned: %+v", connection)
+	}
+	if connection.ID != "ca_new" {
+		t.Errorf("the connected account id was not read: %+v", connection)
+	}
+	if connection.Status != "INITIATED" {
+		t.Errorf("a link that has not been walked through is INITIATED, got %q", connection.Status)
+	}
+
+	// A second connection to the same toolkit must not re-discover the config.
+	before := len(paths)
+	if _, err := client.ConnectLink(context.Background(), "org_other", "highlevel", ""); err != nil {
+		t.Fatalf("second ConnectLink: %v", err)
+	}
+	if calls := len(paths) - before; calls != 1 {
+		t.Errorf("a repeat connection cost %d calls, want just the link", calls)
+	}
+}
+
+// An auth config that already exists -- from an earlier run, or made by hand in
+// the provider's dashboard -- must be reused rather than duplicated.
+func TestAnExistingAuthConfigIsReused(t *testing.T) {
+	created := 0
+	var linkBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/auth_configs") && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{
+				map[string]any{"id": "ac_existing", "toolkit": map[string]any{"slug": "googlecalendar"}},
+			}})
+		case strings.HasSuffix(r.URL.Path, "/auth_configs"):
+			created++
+			_ = json.NewEncoder(w).Encode(map[string]any{"auth_config": map[string]any{"id": "ac_new"}})
+		default:
+			_ = json.NewDecoder(r.Body).Decode(&linkBody)
+			_ = json.NewEncoder(w).Encode(map[string]any{"connected_account_id": "ca_1", "redirect_url": "https://provider.example/a"})
+		}
+	}))
+	defer server.Close()
+
+	client := New(server.URL, "ak_test")
+	if _, err := client.ConnectLink(context.Background(), "org_abc", "googlecalendar", ""); err != nil {
+		t.Fatalf("ConnectLink: %v", err)
+	}
+	if created != 0 {
+		t.Errorf("an auth config was created even though one existed")
+	}
+	if linkBody["auth_config_id"] != "ac_existing" {
+		t.Errorf("the existing config was not used, got %v", linkBody["auth_config_id"])
+	}
+}
+
+// The catalogue nests the logo and the description under "meta". Read from the
+// top level they were always empty, and every card fell back to a monogram.
+func TestToolkitReadsTheNestedLogoAndDescription(t *testing.T) {
+	var toolkit Toolkit
+	err := json.Unmarshal([]byte(`{
+		"slug": "gmail",
+		"name": "Gmail",
+		"meta": {
+			"description": "Google's email service",
+			"logo": "https://logos.composio.dev/api/gmail",
+			"categories": [{"id": "email", "name": "email"}]
+		}
+	}`), &toolkit)
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if toolkit.LogoURL != "https://logos.composio.dev/api/gmail" {
+		t.Errorf("logo = %q", toolkit.LogoURL)
+	}
+	if toolkit.Description != "Google's email service" {
+		t.Errorf("description = %q", toolkit.Description)
+	}
+	if len(toolkit.Categories) != 1 || toolkit.Categories[0] != "email" {
+		t.Errorf("categories = %v", toolkit.Categories)
+	}
+	if toolkit.Slug != "gmail" || toolkit.Name != "Gmail" {
+		t.Errorf("the flat fields were lost: %+v", toolkit)
 	}
 }
 

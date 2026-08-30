@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -33,15 +34,61 @@ type Client struct {
 	baseURL    string
 	apiKey     string
 	httpClient *http.Client
+
+	// One auth config per toolkit, shared by every customer, created the first
+	// time that toolkit is connected. Remembered so a second customer connecting
+	// the same product does not pay a round trip to discover it again.
+	authConfigMutex sync.Mutex
+	authConfigs     map[string]string
 }
 
 // Toolkit is one connectable product, such as Google Calendar or HighLevel.
 type Toolkit struct {
-	Slug        string   `json:"slug"`
-	Name        string   `json:"name"`
+	Slug string `json:"slug"`
+	Name string `json:"name"`
+
+	// The provider nests these under "meta", which is why they are decoded there
+	// and flattened in UnmarshalJSON rather than read from the top level. Read
+	// from the top level they were always empty, and every card in the catalogue
+	// fell back to a monogram with no description.
 	Description string   `json:"description,omitempty"`
 	LogoURL     string   `json:"logo,omitempty"`
 	Categories  []string `json:"categories,omitempty"`
+}
+
+// UnmarshalJSON flattens the provider's shape into ours, so nothing above this
+// package has to know where it chose to nest things.
+func (t *Toolkit) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Slug string `json:"slug"`
+		Name string `json:"name"`
+		Meta struct {
+			Description string `json:"description"`
+			Logo        string `json:"logo"`
+			Categories  []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"categories"`
+		} `json:"meta"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	t.Slug = wire.Slug
+	t.Name = wire.Name
+	t.Description = wire.Meta.Description
+	t.LogoURL = wire.Meta.Logo
+	t.Categories = t.Categories[:0]
+	for _, category := range wire.Meta.Categories {
+		name := category.Name
+		if name == "" {
+			name = category.ID
+		}
+		if name != "" {
+			t.Categories = append(t.Categories, name)
+		}
+	}
+	return nil
 }
 
 // Connection is one customer's authorised account for one toolkit.
@@ -166,21 +213,105 @@ func (c *Client) ConnectLink(ctx context.Context, userID, toolkitSlug, callbackU
 	if strings.TrimSpace(userID) == "" || strings.TrimSpace(toolkitSlug) == "" {
 		return Connection{}, errors.New("a user id and toolkit are required")
 	}
-	body := map[string]any{"user_id": userID, "toolkit": strings.ToLower(strings.TrimSpace(toolkitSlug))}
+	slug := strings.ToLower(strings.TrimSpace(toolkitSlug))
+
+	// A link needs an auth config, and one has to exist before it can be
+	// referenced. Sending only the toolkit -- which is what this did -- is a 400
+	// from the provider, and the screen showed every customer "this integration
+	// could not be started" with no way to get past it.
+	authConfigID, err := c.authConfigFor(ctx, slug)
+	if err != nil {
+		return Connection{}, err
+	}
+
+	body := map[string]any{"user_id": userID, "auth_config_id": authConfigID}
 	if callbackURL != "" {
 		body["callback_url"] = callbackURL
 	}
 	var payload struct {
-		ID          string `json:"id"`
-		Status      string `json:"status"`
-		RedirectURL string `json:"redirect_url"`
+		ConnectedAccountID string `json:"connected_account_id"`
+		ID                 string `json:"id"`
+		Status             string `json:"status"`
+		RedirectURL        string `json:"redirect_url"`
 	}
 	// Connect Link, not initiate(): Composio retired initiate() for its managed
 	// OAuth configs during 2026, and link works for every scheme.
 	if err := c.request(ctx, http.MethodPost, "/connected_accounts/link", body, &payload); err != nil {
 		return Connection{}, err
 	}
-	return Connection{ID: payload.ID, Toolkit: toolkitSlug, Status: payload.Status, UserID: userID, RedirectURL: payload.RedirectURL}, nil
+	identifier := payload.ConnectedAccountID
+	if identifier == "" {
+		identifier = payload.ID
+	}
+	status := payload.Status
+	if status == "" {
+		// A link that has been issued but not yet walked through is exactly what
+		// INITIATED means, and the UI already knows not to call that connected.
+		status = "INITIATED"
+	}
+	return Connection{ID: identifier, Toolkit: slug, Status: status, UserID: userID, RedirectURL: payload.RedirectURL}, nil
+}
+
+// authConfigFor returns the auth config to link against, creating one the first
+// time a toolkit is used.
+//
+// Composio's managed auth means Garuda needs no OAuth app of its own for the
+// toolkits it covers -- which is the whole reason this product uses a broker
+// rather than integrating with providers one at a time. The config is per
+// toolkit and shared by every customer, so it is created once and remembered.
+func (c *Client) authConfigFor(ctx context.Context, slug string) (string, error) {
+	c.authConfigMutex.Lock()
+	cached, known := c.authConfigs[slug]
+	c.authConfigMutex.Unlock()
+	if known && cached != "" {
+		return cached, nil
+	}
+
+	// Ask before creating: a config may exist from an earlier run of this
+	// process, or have been made by hand in the provider's dashboard.
+	var listing struct {
+		Items []struct {
+			ID      string `json:"id"`
+			Toolkit struct {
+				Slug string `json:"slug"`
+			} `json:"toolkit"`
+		} `json:"items"`
+	}
+	if err := c.request(ctx, http.MethodGet, "/auth_configs?limit=100", nil, &listing); err == nil {
+		for _, item := range listing.Items {
+			if strings.EqualFold(item.Toolkit.Slug, slug) && item.ID != "" {
+				c.rememberAuthConfig(slug, item.ID)
+				return item.ID, nil
+			}
+		}
+	}
+
+	created := map[string]any{
+		"toolkit":     map[string]any{"slug": slug},
+		"auth_config": map[string]any{"type": "use_composio_managed_auth"},
+	}
+	var response struct {
+		AuthConfig struct {
+			ID string `json:"id"`
+		} `json:"auth_config"`
+	}
+	if err := c.request(ctx, http.MethodPost, "/auth_configs", created, &response); err != nil {
+		return "", err
+	}
+	if response.AuthConfig.ID == "" {
+		return "", errors.New("the integration provider returned no auth configuration")
+	}
+	c.rememberAuthConfig(slug, response.AuthConfig.ID)
+	return response.AuthConfig.ID, nil
+}
+
+func (c *Client) rememberAuthConfig(slug, id string) {
+	c.authConfigMutex.Lock()
+	defer c.authConfigMutex.Unlock()
+	if c.authConfigs == nil {
+		c.authConfigs = map[string]string{}
+	}
+	c.authConfigs[slug] = id
 }
 
 // Connections lists one customer's connected accounts and nothing else. The
