@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -283,10 +285,12 @@ func (s *Server) ready(w http.ResponseWriter, _ *http.Request) {
 // immutable for the life of the process, so compressing once at first request
 // costs nothing per request afterwards.
 var widgetAsset struct {
-	once    sync.Once
-	raw     []byte
-	gzipped []byte
-	readErr error
+	once     sync.Once
+	raw      []byte
+	gzipped  []byte
+	etag     string
+	gzipETag string
+	readErr  error
 }
 
 func loadWidgetAsset() ([]byte, []byte, error) {
@@ -309,6 +313,10 @@ func loadWidgetAsset() ([]byte, []byte, error) {
 			return
 		}
 		widgetAsset.gzipped = buffer.Bytes()
+		// Computed once, from the bytes themselves, so the tag changes exactly when
+		// the widget does and never when it does not.
+		widgetAsset.etag = quotedDigest(content)
+		widgetAsset.gzipETag = quotedDigest(widgetAsset.gzipped)
 	})
 	return widgetAsset.raw, widgetAsset.gzipped, widgetAsset.readErr
 }
@@ -320,20 +328,58 @@ func (s *Server) widgetScript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	// Five minutes, so a widget fix reaches every embedded site quickly. That
+	// short a life only works because of the ETag below: without one, every
+	// visitor re-downloads the whole file every five minutes, and that cost lands
+	// on the customer's page-speed score rather than ours. With one, a
+	// revalidation is a few hundred bytes and a 304.
 	w.Header().Set("Cache-Control", "public, max-age=300")
-	// This script is fetched by every visitor on every customer page. Uncompressed
-	// it is roughly four times larger, and that cost lands on the customer's own
-	// page-speed scores, not ours.
-	if len(gzipped) > 0 && acceptsGzip(r.Header.Get("Accept-Encoding")) {
+	w.Header().Set("ETag", widgetAsset.etag)
+	w.Header().Set("Vary", "Accept-Encoding")
+
+	// The tag identifies the bytes, and the gzipped bytes are different bytes, so
+	// the two variants must not share one strong validator. A shared tag lets a
+	// cache serve a gzipped body to a client that asked for identity, which
+	// arrives as line noise.
+	tag := widgetAsset.etag
+	useGzip := len(gzipped) > 0 && acceptsGzip(r.Header.Get("Accept-Encoding"))
+	if useGzip {
+		tag = widgetAsset.gzipETag
+		w.Header().Set("ETag", tag)
+	}
+
+	if matchesETag(r.Header.Get("If-None-Match"), tag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	if useGzip {
 		w.Header().Set("Content-Encoding", "gzip")
-		w.Header().Set("Vary", "Accept-Encoding")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(gzipped)
 		return
 	}
-	w.Header().Set("Vary", "Accept-Encoding")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(raw)
+}
+
+// matchesETag implements the If-None-Match comparison the spec actually asks
+// for: a comma-separated list, "*" matching anything, and a weak comparison, so
+// a cache that added a W/ prefix still gets its 304.
+func matchesETag(header, tag string) bool {
+	if header == "" || tag == "" {
+		return false
+	}
+	for _, candidate := range strings.Split(header, ",") {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "*" {
+			return true
+		}
+		if strings.TrimPrefix(candidate, "W/") == strings.TrimPrefix(tag, "W/") {
+			return true
+		}
+	}
+	return false
 }
 
 // acceptsGzip reports whether the client advertised gzip without explicitly
@@ -1016,4 +1062,14 @@ func looksLikeIdentifier(segment string) bool {
 		}
 	}
 	return digits > 0 && digits == len(segment)
+}
+
+// quotedDigest is an ETag from the content itself: a short SHA-256 prefix in the
+// quoted form the header requires. Sixteen hex characters is 64 bits, which is
+// far more than enough to distinguish the handful of widget builds a cache will
+// ever hold, and short enough to keep the header small on a request every
+// visitor makes.
+func quotedDigest(content []byte) string {
+	sum := sha256.Sum256(content)
+	return `"` + hex.EncodeToString(sum[:8]) + `"`
 }
