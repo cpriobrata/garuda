@@ -23,6 +23,7 @@ type agentInput struct {
 	LeadCapture      *model.LeadCaptureConfig `json:"lead_capture,omitempty"`
 	Branding         *model.BrandingConfig    `json:"branding,omitempty"`
 	Handoff          *model.HandoffConfig     `json:"handoff,omitempty"`
+	Booking          *model.BookingConfig     `json:"booking,omitempty"`
 }
 
 // knowledgeSummary describes a knowledge source without its body. Source text
@@ -204,6 +205,7 @@ type updateAgentRequest struct {
 	LeadCapture      *model.LeadCaptureConfig `json:"lead_capture,omitempty"`
 	Branding         *brandingPatch           `json:"branding,omitempty"`
 	Handoff          *model.HandoffConfig     `json:"handoff,omitempty"`
+	Booking          *model.BookingConfig     `json:"booking,omitempty"`
 }
 
 // brandingPatch is a sparse patch: a key the caller omits is left as it is
@@ -277,6 +279,9 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
 			// mean a screen that posts one switch silently clears the number.
 			agent.Handoff = input.Handoff.Clone()
 		}
+		if input.Booking != nil {
+			agent.Booking = input.Booking.Clone()
+		}
 		if input.Branding != nil {
 			if input.Branding.DisplayName != nil {
 				agent.Branding.DisplayName = strings.TrimSpace(*input.Branding.DisplayName)
@@ -322,6 +327,7 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
 		}
 		normalizeBranding(&agent.Branding)
 		normalizeHandoff(&agent.Handoff)
+		normalizeBooking(&agent.Booking)
 		normalizeLeadCapture(&agent.LeadCapture)
 		if details := validateAgent(*agent); len(details) > 0 {
 			return validationError{details: details}
@@ -546,8 +552,12 @@ func buildAgent(accountID string, input agentInput, now time.Time) (model.Agent,
 	if input.Handoff != nil {
 		agent.Handoff = input.Handoff.Clone()
 	}
+	if input.Booking != nil {
+		agent.Booking = input.Booking.Clone()
+	}
 	normalizeBranding(&agent.Branding)
 	normalizeHandoff(&agent.Handoff)
+	normalizeBooking(&agent.Booking)
 	normalizeLeadCapture(&agent.LeadCapture)
 	return agent, validateAgent(agent)
 }
@@ -581,6 +591,7 @@ func validateAgent(agent model.Agent) map[string]string {
 	validateBranding(agent.Branding, details)
 	validateLeadCapture(agent.LeadCapture, details)
 	validateHandoff(agent.Handoff, details)
+	validateBooking(agent.Booking, details)
 	if len(agent.Knowledge) > config.StarterKnowledgeSourceLimit {
 		details["knowledge"] = fmt.Sprintf("the starter plan supports up to %d sources", config.StarterKnowledgeSourceLimit)
 	}

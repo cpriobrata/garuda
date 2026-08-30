@@ -109,6 +109,7 @@ func (a Agent) Clone() Agent {
 	cloned.Branding = a.Branding.Clone()
 	cloned.LeadCapture = a.LeadCapture.Clone()
 	cloned.Handoff = a.Handoff.Clone()
+	cloned.Booking = a.Booking.Clone()
 	if a.Knowledge != nil {
 		cloned.Knowledge = append([]KnowledgeItem(nil), a.Knowledge...)
 	}

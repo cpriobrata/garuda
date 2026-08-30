@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { AlertCircle, ArrowLeft, Bot, BrainCircuit, Edit3, Globe2, Loader2, MessageSquareText, Pause, Play, Target, UsersRound } from "lucide-react";
+import { AgentAnalytics } from "@/components/agents/agent-analytics";
 import { AgentTestPanel } from "@/components/agents/agent-test-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -97,7 +98,7 @@ export function AgentDetail({ agentId }: { agentId: string }) {
       <div className="grid gap-6 xl:grid-cols-[1fr_390px]">
         <div className="space-y-6">
           <Card className="border-slate-200/80 shadow-none"><CardHeader><CardTitle className="text-sm">Agent configuration</CardTitle><p className="text-xs text-slate-500">{connected ? "Current values from the API" : "Preview fixture configuration"}</p></CardHeader><CardContent className="space-y-4"><ConfigRow label="Agent ID" value={agentId} /><ConfigRow label="Status" value={status || "unknown"} /><ConfigRow label="Widget domain" value={domain || "Not configured"} />{connected && <ConfigRow label="Knowledge sources" value={String(record?.knowledge?.length || 0)} />}</CardContent></Card>
-          {connected ? <Card className="border-dashed shadow-none"><CardContent className="p-6 text-center"><p className="text-sm font-semibold text-slate-800">Agent analytics are not available yet</p><p className="mx-auto mt-2 max-w-lg text-xs leading-5 text-slate-500">This page does not estimate performance, intent, readiness, or installation counts. Persisted conversations and leads are available in their respective portal views.</p></CardContent></Card> : <Card className="shadow-none"><CardHeader><CardTitle className="text-sm">Demo top intents</CardTitle><p className="text-xs text-slate-500">Illustrative analytics only</p></CardHeader><CardContent className="space-y-3">{["Plan and pricing questions", "Book a product demo", "Integration capabilities"].map((label, index) => <div key={label} className="flex items-center gap-3"><div className="h-1.5 flex-1 rounded-full bg-slate-100"><div className="h-full rounded-full bg-indigo-500" style={{ width: `${82 - index * 20}%` }} /></div><span className="w-36 text-[10px] text-slate-500">{label}</span></div>)}</CardContent></Card>}
+          {connected ? <AgentAnalytics agentId={agentId} status={status} /> : <Card className="shadow-none"><CardHeader><CardTitle className="text-sm">Demo top intents</CardTitle><p className="text-xs text-slate-500">Illustrative analytics only</p></CardHeader><CardContent className="space-y-3">{["Plan and pricing questions", "Book a product demo", "Integration capabilities"].map((label, index) => <div key={label} className="flex items-center gap-3"><div className="h-1.5 flex-1 rounded-full bg-slate-100"><div className="h-full rounded-full bg-indigo-500" style={{ width: `${82 - index * 20}%` }} /></div><span className="w-36 text-[10px] text-slate-500">{label}</span></div>)}</CardContent></Card>}
         </div>
         <div><p className="mb-3 text-xs font-semibold text-slate-700">Conversation playground</p><AgentTestPanel agentId={agentId} agentName={name} welcomeMessage={connected ? record?.welcome_message : undefined} /></div>
       </div>

@@ -167,6 +167,11 @@ func (s *Server) Handler() http.Handler {
 	// widget reports every fifteen seconds while a page is open, and lower cost
 	// per call than any of them: the handler does one bounded merge.
 	mux.Handle("POST /widget/v1/sessions/{sessionID}/activity", s.rateLimit("widget.activity", 240, time.Minute, http.HandlerFunc(s.recordVisitorJourney)))
+	// Appointment booking. Both calls reach the customer's own calendar through
+	// Composio, so they are capped far tighter than the routes that only touch
+	// state we own -- and the booking call writes to a real person's diary.
+	mux.Handle("GET /widget/v1/sessions/{sessionID}/slots", s.rateLimit("widget.slots", 30, time.Minute, http.HandlerFunc(s.listBookingSlots)))
+	mux.Handle("POST /widget/v1/sessions/{sessionID}/booking", s.rateLimit("widget.booking", 10, time.Minute, http.HandlerFunc(s.createBooking)))
 
 	protected := func(pattern string, handler http.HandlerFunc) {
 		mux.Handle(pattern, s.requireAuth(handler))

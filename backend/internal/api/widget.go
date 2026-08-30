@@ -687,6 +687,7 @@ func publicAgent(agent model.Agent) map[string]any {
 		"avatar_url": agent.Branding.AvatarURL, "privacy_url": agent.Branding.PrivacyURL, "memory_enabled": true,
 		"lead_capture_enabled": agent.LeadCapture.Enabled, "lead_capture_fields": agent.LeadCapture.Fields,
 		"handoff": resolveHandoff(agent),
+		"booking": resolveBooking(agent),
 	}
 	for key, value := range widgetBrandingPayload(agent) {
 		payload[key] = value
