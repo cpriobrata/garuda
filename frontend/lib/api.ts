@@ -45,31 +45,151 @@ export type AuthResult = AuthSession & {
 const ACCESS_TOKEN_KEY = "garuda_access_token";
 const REFRESH_TOKEN_KEY = "garuda_refresh_token";
 const EXPIRES_AT_KEY = "garuda_access_expires_at";
+// The session lives in localStorage rather than sessionStorage because an OAuth
+// round trip comes back in a NEW tab, and a per-tab session is simply not there
+// when it lands: the portal gate then read no token and bounced the owner to
+// /auth/sign-in. Closing a tab no longer signs them out either. The cost is
+// real and it is not a security win — the token now outlives the tab on a
+// shared computer until it expires or someone signs out, which is why sign-out
+// has to travel between tabs; see onAuthSessionCleared.
+const memorySession = new Map<string, string>();
+let sessionStore: Storage | null | undefined;
 let authGeneration = 0;
 let refreshInFlight: Promise<string | null> | null = null;
+
+// Safari private mode and "block all cookies" both hand out a localStorage that
+// reads fine and throws on write, so only a real write settles whether it is
+// usable. A tab that fails keeps its session in memory: signed in until the tab
+// closes, which is exactly what every tab did before this change.
+function authStore() {
+  if (sessionStore !== undefined) return sessionStore;
+  if (typeof window === "undefined") return null;
+  try {
+    const probe = "garuda_storage_probe";
+    window.localStorage.setItem(probe, "1");
+    window.localStorage.removeItem(probe);
+    sessionStore = window.localStorage;
+  } catch {
+    sessionStore = null;
+  }
+  return sessionStore;
+}
+
+function readAuthValue(key: string) {
+  const store = authStore();
+  if (store) {
+    try {
+      return store.getItem(key);
+    } catch {
+      sessionStore = null;
+    }
+  }
+  return memorySession.get(key) ?? null;
+}
+
+function writeAuthValue(key: string, value: string | null) {
+  // Never on the server: module state there is shared by every request.
+  if (typeof window === "undefined") return;
+  const store = authStore();
+  if (store) {
+    try {
+      if (value === null) store.removeItem(key);
+      else store.setItem(key, value);
+      return;
+    } catch {
+      // Storage that worked a moment ago and now refuses — a full quota, a
+      // permission withdrawn mid-visit. Finish the session in memory rather
+      // than leave half of it in each.
+      sessionStore = null;
+    }
+  }
+  if (value === null) memorySession.delete(key);
+  else memorySession.set(key, value);
+}
+
+export function hasAuthSession() {
+  return Boolean(readAuthValue(ACCESS_TOKEN_KEY));
+}
+
+// localStorage is shared by every tab on this origin, so a sign-out in one tab
+// has to reach the others or a stale tab keeps a signed-out workspace on screen.
+// The event fires in the OTHER tabs only, and a null key means the whole store
+// was cleared at once.
+export function onAuthSessionCleared(handler: () => void) {
+  if (typeof window === "undefined") return () => undefined;
+  const listener = (event: StorageEvent) => {
+    if (event.key !== null && event.key !== ACCESS_TOKEN_KEY) return;
+    // A refresh in another tab rewrites the same key; only its removal is a
+    // sign-out.
+    if (readAuthValue(ACCESS_TOKEN_KEY)) return;
+    // Retire whatever is already in flight against the token that just went
+    // away, so a refresh started before the sign-out cannot resolve into it.
+    authGeneration += 1;
+    refreshInFlight = null;
+    handler();
+  };
+  window.addEventListener("storage", listener);
+  return () => window.removeEventListener("storage", listener);
+}
 
 export function storeAuthSession(session: AuthSession) {
   if (typeof window === "undefined" || !session.access_token) return;
   authGeneration += 1;
-  window.sessionStorage.setItem(ACCESS_TOKEN_KEY, session.access_token);
-  if (session.refresh_token) window.sessionStorage.setItem(REFRESH_TOKEN_KEY, session.refresh_token);
-  else window.sessionStorage.removeItem(REFRESH_TOKEN_KEY);
-  if (session.expires_in) window.sessionStorage.setItem(EXPIRES_AT_KEY, String(Date.now() + session.expires_in * 1000));
-  else window.sessionStorage.removeItem(EXPIRES_AT_KEY);
+  discardLegacySession();
+  writeAuthValue(ACCESS_TOKEN_KEY, session.access_token);
+  writeAuthValue(REFRESH_TOKEN_KEY, session.refresh_token || null);
+  writeAuthValue(EXPIRES_AT_KEY, session.expires_in ? String(Date.now() + session.expires_in * 1000) : null);
+}
+
+// Sessions used to be kept in sessionStorage. A tab that was open across the
+// deploy which moved them still holds one, and it stays valid until it expires.
+// Every path that establishes or ends a session removes it, so no tab can be
+// carrying somebody else's token behind the one actually in use.
+function discardLegacySession() {
+  forget(window.sessionStorage, "garuda_access_token");
+  forget(window.sessionStorage, "garuda_refresh_token");
+  forget(window.sessionStorage, "garuda_expires_at");
+}
+
+// Removal that cannot be skipped, and cannot be stopped part-way.
+//
+// writeAuthValue is the right way to WRITE, because it degrades to memory when a
+// store starts refusing. It is the wrong way to REMOVE. A store that accepted the
+// token and then began throwing — a quota that filled, a permission withdrawn
+// mid-visit — disqualifies itself inside writeAuthValue, after which every
+// removal goes to the in-memory map and the token is still sitting on disk. That
+// turns Sign out into a no-op that says it worked, on a machine somebody is
+// walking away from. So a sign-out reaches every store directly, and each key is
+// guarded on its own so one throw cannot skip the ones after it.
+function forget(store: Storage | undefined, key: string) {
+  try {
+    store?.removeItem(key);
+  } catch {
+    // Nothing more can be done about this key. The next one still must be tried.
+  }
 }
 
 export function clearAuthSession() {
   if (typeof window === "undefined") return;
   authGeneration += 1;
   refreshInFlight = null;
-  window.sessionStorage.removeItem(ACCESS_TOKEN_KEY);
-  window.sessionStorage.removeItem(REFRESH_TOKEN_KEY);
-  window.sessionStorage.removeItem(EXPIRES_AT_KEY);
-  window.sessionStorage.removeItem("garuda_new_agent_id");
-  window.sessionStorage.removeItem("garuda_new_agent_name");
-  // Remove legacy origin-wide onboarding keys from earlier builds.
-  window.localStorage.removeItem("garuda_new_agent_id");
-  window.localStorage.removeItem("garuda_new_agent_name");
+  memorySession.clear();
+  for (const key of [ACCESS_TOKEN_KEY, REFRESH_TOKEN_KEY, EXPIRES_AT_KEY]) {
+    // Both stores, unconditionally. Which one holds the session depends on when
+    // this tab last succeeded at writing, and a sign-out must not have to guess.
+    forget(window.localStorage, key);
+    forget(window.sessionStorage, key);
+  }
+  discardLegacySession();
+  try {
+    window.sessionStorage.removeItem("garuda_new_agent_id");
+    window.sessionStorage.removeItem("garuda_new_agent_name");
+    // Remove legacy origin-wide onboarding keys from earlier builds.
+    window.localStorage.removeItem("garuda_new_agent_id");
+    window.localStorage.removeItem("garuda_new_agent_name");
+  } catch {
+    // Storage this tab was never able to use has nothing to forget.
+  }
 }
 
 export type AgentRecord = {
@@ -168,9 +288,10 @@ function apiRoot() {
   return configured.endsWith("/v1") ? configured : `${configured}/v1`;
 }
 
-function storedAccessToken() {
-  if (typeof window === "undefined") return undefined;
-  return window.sessionStorage.getItem(ACCESS_TOKEN_KEY) || undefined;
+// Exported so a request that cannot go through apiRequest — a blob download
+// reads no envelope — still does not have to know where the session is kept.
+export function currentAccessToken() {
+  return readAuthValue(ACCESS_TOKEN_KEY) || undefined;
 }
 
 function redirectToExpiredSignIn() {
@@ -183,7 +304,7 @@ function redirectToExpiredSignIn() {
 async function refreshAccessToken(): Promise<string | null> {
   if (typeof window === "undefined") return null;
   if (refreshInFlight) return refreshInFlight;
-  const refreshToken = window.sessionStorage.getItem(REFRESH_TOKEN_KEY);
+  const refreshToken = readAuthValue(REFRESH_TOKEN_KEY);
   if (!refreshToken) return null;
   const refreshGeneration = authGeneration;
 
@@ -198,7 +319,7 @@ async function refreshAccessToken(): Promise<string | null> {
         signal: controller.signal,
       });
       const envelope = (await response.json().catch(() => ({}))) as ApiEnvelope<AuthSession>;
-      if (authGeneration !== refreshGeneration || window.sessionStorage.getItem(REFRESH_TOKEN_KEY) !== refreshToken) {
+      if (authGeneration !== refreshGeneration || readAuthValue(REFRESH_TOKEN_KEY) !== refreshToken) {
         throw new ApiError({ code: "SESSION_CHANGED", message: "Your signed-in account changed. Please retry." });
       }
       if (!response.ok || envelope.error || !envelope.data?.access_token || !envelope.data.refresh_token) return null;
@@ -206,7 +327,7 @@ async function refreshAccessToken(): Promise<string | null> {
       return envelope.data.access_token;
     } catch (reason) {
       if (reason instanceof ApiError && reason.code === "SESSION_CHANGED") throw reason;
-      if (authGeneration !== refreshGeneration || window.sessionStorage.getItem(REFRESH_TOKEN_KEY) !== refreshToken) {
+      if (authGeneration !== refreshGeneration || readAuthValue(REFRESH_TOKEN_KEY) !== refreshToken) {
         throw new ApiError({ code: "SESSION_CHANGED", message: "Your signed-in account changed. Please retry." });
       }
       return null;
@@ -250,9 +371,9 @@ export async function apiRequest<T>(
     }
   }
 
-  let accessToken = auth ? (token || storedAccessToken()) : undefined;
+  let accessToken = auth ? (token || currentAccessToken()) : undefined;
   if (auth && !token && accessToken && typeof window !== "undefined") {
-    const expiresAt = Number(window.sessionStorage.getItem(EXPIRES_AT_KEY) || 0);
+    const expiresAt = Number(readAuthValue(EXPIRES_AT_KEY) || 0);
     if (expiresAt && expiresAt <= Date.now() + 30000) {
       const refreshGeneration = authGeneration;
       const renewed = await refreshAccessToken();

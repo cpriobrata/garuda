@@ -59,4 +59,7 @@
   .hide-scrollbar::-webkit-scrollbar { display: none; }
   .hide-scrollbar { scrollbar-width: none; }
   .dashboard-height { min-height: calc(100vh - 4rem); }
+  @supports (height: 100dvh) {
+    .dashboard-height { min-height: calc(100dvh - 4rem); }
+  }
 }

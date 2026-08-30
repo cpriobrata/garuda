@@ -83,6 +83,35 @@
   // Said in the visitor's own terms rather than as an error: between seeing a
   // time and choosing it, the owner took it.
   var SLOT_TAKEN_MESSAGE = 'That time was taken while you were choosing.';
+  // ---- speaking instead of typing ----
+  // Every number below mirrors backend/internal/api/widget_voice.go, so a
+  // recording is stopped here rather than refused after the visitor has already
+  // waited for the upload.
+  //
+  // maxWidgetVoiceBytes is one megabyte. The recording stops short of it so the
+  // container's own trailer cannot push the finished blob past the cap.
+  var MAX_VOICE_BYTES = 960 * 1024;
+  // minVoiceNoteBytes. Below this there is no speech in any container the
+  // server accepts, and it answers 422 -- which no round trip is needed to
+  // learn.
+  var MIN_VOICE_BYTES = 2 * 1024;
+  // About a minute, which is what a megabyte of browser audio comes to. A chat
+  // message is not a voicemail.
+  var MAX_VOICE_SECONDS = 60;
+  // The last stretch is counted down rather than sprung on the visitor.
+  var VOICE_WARN_SECONDS = 10;
+  // Measured against the clock four times a second, so a throttled tab reports
+  // the length the server is going to measure rather than the ticks it managed.
+  var VOICE_TICK_MS = 250;
+  // Transcription is a round trip through a speech provider. The twenty second
+  // default would abandon recordings that were going to succeed.
+  var VOICE_REQUEST_TIMEOUT_MS = 90000;
+  // Most preferred first. Chrome and Firefox record webm/opus and Safari
+  // records mp4, so the list is walked rather than assumed, and every entry is
+  // one acceptedVoiceMediaTypes already takes.
+  var VOICE_MIME_TYPES = [
+    'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/ogg', 'audio/mp4'
+  ];
 
   function isRecord(value) {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -323,14 +352,24 @@
   // that first checks the session token. See backend/internal/api/booking.go.
   function normalizeBooking(raw) {
     if (!isRecord(raw) || raw.enabled !== true) {
-      return { enabled: false, label: '', durationMinutes: 0, timezone: '' };
+      return { enabled: false, label: '', durationMinutes: 0, timezone: '', completesElsewhere: false, providerLabel: '', schedulingURL: '' };
     }
     var minutes = Number(raw.duration_minutes);
+    // Some calendars -- Calendly and its like -- have no create-booking API at
+    // all: the appointment is made on their own page. The bootstrap says so, and
+    // dropping that here is what put a Confirm button in front of visitors that
+    // could never finish. A link is only accepted if it is an https address, so
+    // a malformed setting produces no button rather than a broken one.
+    var schedulingURL = asText(raw.scheduling_url, '', 400);
+    var elsewhere = raw.completes_elsewhere === true && schedulingURL.toLowerCase().indexOf('https://') === 0;
     return {
       enabled: true,
       label: asText(raw.label, 'Book an appointment', 60),
       durationMinutes: Number.isFinite(minutes) && minutes > 0 ? Math.floor(minutes) : 0,
-      timezone: asText(raw.timezone, '', 64)
+      timezone: asText(raw.timezone, '', 64),
+      completesElsewhere: elsewhere,
+      providerLabel: elsewhere ? asText(raw.provider_label, 'their booking page', 40) : '',
+      schedulingURL: elsewhere ? schedulingURL : ''
     };
   }
 
@@ -749,6 +788,13 @@
           deadline.expired = true;
           if (controller) controller.abort();
         }, milliseconds);
+      },
+      // Not a timeout: the visitor asked for the wait to stop. expired stays
+      // false, so the caller can tell a cancellation from a stall and say
+      // nothing about a request nobody is waiting for any more.
+      abort: function () {
+        deadline.clear();
+        if (controller) controller.abort();
       }
     };
     deadline.extend(timeoutMs || REQUEST_TIMEOUT_MS);
@@ -895,6 +941,153 @@
     return device;
   }
 
+  // ---- what a browser will and will not let a visitor record ----
+  //
+  // Pure functions of the browser's own state, so the rules they encode -- which
+  // browsers can record, what went wrong with the microphone, and what a person
+  // can actually do about it -- are testable without a microphone.
+
+  function recordingEnvironment() {
+    var media = global.navigator ? global.navigator.mediaDevices : null;
+    return {
+      secureContext: global.isSecureContext === true,
+      hasMediaRecorder: typeof global.MediaRecorder === 'function',
+      hasGetUserMedia: Boolean(media) && typeof media.getUserMedia === 'function'
+    };
+  }
+
+  // The insecure origin is checked FIRST and deliberately. Over plain http a
+  // browser does not merely refuse the microphone, it removes
+  // navigator.mediaDevices altogether, so asking about the API first would
+  // conclude that a current browser is too old to record.
+  function recordingSupport(environment) {
+    if (!environment.secureContext) return 'insecure_context';
+    if (!environment.hasMediaRecorder) return 'no_media_recorder';
+    if (!environment.hasGetUserMedia) return 'no_media_devices';
+    return 'supported';
+  }
+
+  // Walks the list rather than assuming, because a browser handed a type it
+  // cannot record throws at construction. An empty answer means "let the
+  // browser choose", which is a working recorder and not a failure: whatever it
+  // produced is read back off the blob and sent as the content type.
+  function chooseVoiceMimeType(isTypeSupported) {
+    if (typeof isTypeSupported !== 'function') return '';
+    for (var index = 0; index < VOICE_MIME_TYPES.length; index += 1) {
+      try {
+        if (isTypeSupported(VOICE_MIME_TYPES[index])) return VOICE_MIME_TYPES[index];
+      } catch (_error) {
+        // A browser that throws on a type it has never heard of has answered.
+      }
+    }
+    return '';
+  }
+
+  // permissionState is what navigator.permissions reports for the microphone on
+  // the browsers that answer that query at all, and it is the whole difference
+  // between a prompt somebody dismissed and a block the browser has remembered.
+  // The two need different advice: once it is remembered no prompt is ever
+  // shown again, so "press Allow" is a loop with no way out of it.
+  function describeMicrophoneFailure(reason, permissionState) {
+    var name = reason && typeof reason.name === 'string' ? reason.name : '';
+    if (name === 'SecurityError' || permissionState === 'denied') {
+      return 'Your browser is blocking the microphone for this site, so it will not ask again. Allow it in the site settings beside the address bar, or type your message instead.';
+    }
+    if (name === 'NotAllowedError' || name === 'PermissionDeniedError' || name === 'PermissionDismissedError') {
+      return 'The microphone was not allowed. Press the microphone button and choose Allow — nothing is recorded until you do.';
+    }
+    if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+      return 'No microphone was found. Connect one and try again, or type your message instead.';
+    }
+    if (name === 'NotReadableError' || name === 'TrackStartError') {
+      return 'Your microphone is in use by another app. Close it and try again, or type your message instead.';
+    }
+    if (name === 'OverconstrainedError' || name === 'ConstraintNotSatisfiedError') {
+      return 'That microphone could not be started. Try another input device, or type your message instead.';
+    }
+    return 'The microphone could not be started. Try again, or type your message instead.';
+  }
+
+  // What the voice endpoint answers with, and what a visitor can do about each
+  // one. `off` means voice is unavailable on this WEBSITE rather than for this
+  // recording: the button is taken away and the keyboard is the whole of the
+  // answer, because pressing it again cannot end differently. None of these
+  // blame the visitor, because none of it is their doing.
+  function voiceFailure(error) {
+    var code = error instanceof WidgetError ? error.code : '';
+    if (code === 'subscription_required' || code === 'voice_unavailable') {
+      return { off: true, message: 'Voice messages are not available on this site. Please type your message instead.' };
+    }
+    if (code === 'unsupported_media_type') {
+      return { off: true, message: 'This browser records in a format we cannot transcribe. Please type your message, or try another browser.' };
+    }
+    if (code === 'transcription_unavailable') {
+      return { off: false, message: 'That recording could not be understood just now. Try again, or type your message.' };
+    }
+    if (code === 'audio_too_large') {
+      return { off: false, message: 'That recording was too long to send. Keep it under a minute.' };
+    }
+    if (code === 'audio_too_short') {
+      return { off: false, message: 'That was too short to hear. Press the microphone and speak for a few seconds.' };
+    }
+    if (code === 'no_speech_detected') {
+      return { off: false, message: 'Nothing could be heard. Try again somewhere quieter, or type your message.' };
+    }
+    if (code === 'voice_quota_exceeded') {
+      return { off: false, message: 'Voice messages are busy right now. Please type your message instead.' };
+    }
+    // Written by the rate limiter in front of the route rather than by the
+    // handler, which is why it is not one of the handler's own codes. It is the
+    // one a visitor who keeps re-recording meets first, so it must not fall
+    // through to "that could not be understood", which blames the recording.
+    if (code === 'rate_limited') {
+      return { off: false, message: 'That is a lot of voice messages. Wait a moment, or type your message instead.' };
+    }
+    if (code === 'network_error') {
+      return { off: false, message: 'The recording could not be sent. Check your connection and try again.' };
+    }
+    return { off: false, message: 'That recording could not be sent just now. Try again, or type your message.' };
+  }
+
+  // Every track, and one track that refuses to stop never prevents the rest
+  // being released. A microphone left live after the visitor has finished is the
+  // worst thing this file could do on somebody else's website.
+  function releaseMicrophoneStream(stream) {
+    if (!stream || typeof stream.getTracks !== 'function') return;
+    var tracks = [];
+    try {
+      tracks = stream.getTracks() || [];
+    } catch (_error) {
+      return;
+    }
+    tracks.forEach(function (track) {
+      try {
+        if (track && typeof track.stop === 'function') track.stop();
+      } catch (_stopError) {
+        // A track that has already ended throws on some browsers, and the ones
+        // after it still have to be stopped.
+      }
+    });
+  }
+
+  function formatElapsed(totalSeconds) {
+    var safe = Number.isFinite(totalSeconds) && totalSeconds > 0 ? Math.floor(totalSeconds) : 0;
+    return Math.floor(safe / 60) + ':' + String(safe % 60).padStart(2, '0');
+  }
+
+  // Firefox has no microphone permission descriptor and throws on the query.
+  // Not knowing costs only the more specific of two messages.
+  async function readMicrophonePermission() {
+    var permissions = global.navigator ? global.navigator.permissions : null;
+    if (!permissions || typeof permissions.query !== 'function') return '';
+    try {
+      var status = await permissions.query({ name: 'microphone' });
+      return status && typeof status.state === 'string' ? status.state : '';
+    } catch (_error) {
+      return '';
+    }
+  }
+
   function LiveAPI(config) {
     this.origin = config.apiOrigin;
     this.agentKey = config.agentKey;
@@ -998,6 +1191,44 @@
     } finally {
       deadline.clear();
     }
+  };
+
+  // What the visitor said, as text. This TRANSCRIBES, and that is all it does:
+  // the endpoint has no way to post a message, and the widget puts the words in
+  // the composer for the visitor to read and send themselves.
+  //
+  // The recording travels as the request body with its own content type. It
+  // could not travel as JSON: decodeJSON refuses unknown fields and caps a body
+  // at a megabyte, and audio is neither. Only Content-Type and the session token
+  // are sent, because those are the two headers the widget CORS policy allows --
+  // anything else fails the preflight rather than the request.
+  LiveAPI.prototype.transcribeVoice = async function transcribeVoice(session, recording, deadline) {
+    var response = await this.request(
+      '/widget/v1/sessions/' + encodeURIComponent(session.sessionID) + '/voice',
+      {
+        method: 'POST',
+        headers: {
+          // Read off the blob rather than assumed: Safari records mp4 where
+          // Chrome records webm, and the provider is given what was recorded.
+          'Content-Type': recording.type || 'audio/webm',
+          'X-Garuda-Session-Token': session.sessionToken
+        },
+        body: recording.blob
+      },
+      VOICE_REQUEST_TIMEOUT_MS,
+      deadline
+    );
+    if (!response.ok) throw await safeErrorFromResponse(response);
+    var json = await response.json();
+    var data = isRecord(json) && isRecord(json.data) ? json.data : json;
+    data = isRecord(data) ? data : {};
+    var text = asText(data.text, '', MAX_MESSAGE_LENGTH);
+    if (!text) {
+      // The server sends 422 no_speech_detected for silence; an empty 200 is
+      // the same thing said less clearly, and is answered the same way.
+      throw new WidgetError('no_speech_detected', 'Nothing could be heard in that recording.', 422);
+    }
+    return { text: text, language: asText(data.language, '', 32) };
   };
 
   // The wa.me link is fetched rather than assembled here, because assembling
@@ -1385,6 +1616,11 @@
     throw new WidgetError('handoff_unavailable', 'Human handoff is not available in the demo.', 404);
   };
 
+  // The demo has no account to bill a transcription to, and this half is left
+  // undefined on purpose rather than defined to refuse: the microphone button
+  // is drawn only where the API can actually transcribe, so the demo shows no
+  // control that asks for a microphone and then apologises.
+
   // The demo has no owner and therefore no calendar. Both halves exist so the
   // widget finds the same methods in either mode, and both refuse the way the
   // live endpoints refuse an agent that does not offer appointments.
@@ -1463,6 +1699,13 @@
     journeyPath: journeyPath,
     journeySource: journeySource,
     journeyDevice: journeyDevice,
+    WidgetError: WidgetError,
+    recordingSupport: recordingSupport,
+    chooseVoiceMimeType: chooseVoiceMimeType,
+    describeMicrophoneFailure: describeMicrophoneFailure,
+    voiceFailure: voiceFailure,
+    releaseMicrophoneStream: releaseMicrophoneStream,
+    formatElapsed: formatElapsed,
     storageKey: storageKey,
     clearVisitorMemory: clearVisitorMemory,
     contrastText: contrastText,
@@ -1587,6 +1830,31 @@
     this.handoffOffered = false;
     this.pollTimer = null;
     this.polling = false;
+    // Everything about the microphone. recorder and stream are non-null only
+    // while it is actually live, which is what makes "is the microphone open"
+    // one question with one answer rather than a guess from the UI.
+    //
+    // generation is how a wait is abandoned. The visitor can cancel, or close
+    // the panel, while the browser's permission prompt is still open or an
+    // upload is still in flight; bumping it means a stream granted afterwards is
+    // handed straight back and a transcript that lands afterwards is dropped.
+    this.voice = {
+      available: true,
+      state: 'idle',
+      note: '',
+      tone: '',
+      generation: 0,
+      recorder: null,
+      stream: null,
+      request: null,
+      chunks: [],
+      bytes: 0,
+      startedAt: 0,
+      seconds: 0,
+      warned: false,
+      leading: '',
+      ticker: null
+    };
     // Tracking is off until mount starts it, and null again the moment anything
     // about it fails. Nothing else in the widget depends on it existing.
     this.journey = null;
@@ -1782,6 +2050,31 @@
     contactRow.appendChild(bookingButton);
     contactRow.appendChild(handoffHint);
 
+    // The microphone is live for as long as this row is on screen, and the row
+    // is on screen for exactly as long as it is live. A control that looks idle
+    // while a microphone is open is a privacy problem rather than a missing
+    // polish, so the state, the elapsed clock and the way out all sit together
+    // directly above the composer where the visitor is already looking.
+    var voiceRow = element('div', 'gw-voice');
+    voiceRow.hidden = true;
+    var voiceDot = element('span', 'gw-voice-dot');
+    voiceDot.setAttribute('aria-hidden', 'true');
+    var voiceStatus = element('span', 'gw-voice-status');
+    // A live region: a visitor who cannot see the red dot is still told that
+    // the microphone opened, and when it closed again.
+    voiceStatus.setAttribute('role', 'status');
+    var voiceTime = element('span', 'gw-voice-time', '0:00');
+    // The clock changes every second and is deliberately not announced. The
+    // line beside it says the same thing in words, once per change of state.
+    voiceTime.setAttribute('aria-hidden', 'true');
+    voiceTime.hidden = true;
+    var voiceAction = element('button', 'gw-voice-action', 'Cancel');
+    voiceAction.type = 'button';
+    voiceRow.appendChild(voiceDot);
+    voiceRow.appendChild(voiceStatus);
+    voiceRow.appendChild(voiceTime);
+    voiceRow.appendChild(voiceAction);
+
     var composer = element('form', 'gw-composer');
     var inputWrap = element('div', 'gw-input-wrap');
     var textarea = element('textarea', 'gw-input');
@@ -1794,12 +2087,27 @@
     counter.hidden = true;
     inputWrap.appendChild(textarea);
     inputWrap.appendChild(counter);
+    // Hidden until the browser has proved it can record. Feature detection runs
+    // in updateVoiceVisibility rather than here, because an insecure origin and
+    // an old browser are different answers and both change nothing until the
+    // composer exists to hide the button in.
+    var mic = element('button', 'gw-mic');
+    mic.type = 'button';
+    mic.hidden = true;
+    mic.setAttribute('aria-label', 'Record a voice message');
+    mic.setAttribute('aria-pressed', 'false');
+    var micIcon = svgIcon('M12 4.4a2.7 2.7 0 0 1 2.7 2.7v4.7a2.7 2.7 0 0 1-5.4 0V7.1A2.7 2.7 0 0 1 12 4.4Zm6 6.9a6 6 0 0 1-12 0m6 6v2.3m-3.2 0h6.4');
+    var micStopIcon = svgIcon('M8.6 8.6h6.8v6.8H8.6z');
+    micStopIcon.hidden = true;
+    mic.appendChild(micIcon);
+    mic.appendChild(micStopIcon);
     var send = element('button', 'gw-send');
     send.type = 'submit';
     send.disabled = true;
     send.setAttribute('aria-label', 'Send message');
     send.appendChild(svgIcon('M4 12 20 4l-5.5 16-3.2-6.8L4 12Zm7.3 1.2L20 4'));
     composer.appendChild(inputWrap);
+    composer.appendChild(mic);
     composer.appendChild(send);
 
     var footer = element('div', 'gw-footer');
@@ -1814,6 +2122,7 @@
     panel.appendChild(body);
     panel.appendChild(typing);
     panel.appendChild(contactRow);
+    panel.appendChild(voiceRow);
     panel.appendChild(composer);
     panel.appendChild(footer);
     shell.appendChild(panel);
@@ -1860,7 +2169,15 @@
       composer: composer,
       textarea: textarea,
       counter: counter,
-      send: send
+      send: send,
+      mic: mic,
+      micIcon: micIcon,
+      micStopIcon: micStopIcon,
+      voiceRow: voiceRow,
+      voiceDot: voiceDot,
+      voiceStatus: voiceStatus,
+      voiceTime: voiceTime,
+      voiceAction: voiceAction
     };
 
     launcher.addEventListener('click', function () { self.setOpen(!self.open); });
@@ -1886,12 +2203,21 @@
         setButtonBusy(retryButton, false, '', 'Try again');
       });
     });
+    mic.addEventListener('click', function () { self.toggleVoiceRecording(); });
+    voiceAction.addEventListener('click', function () { self.cancelVoiceRecording(); });
     contactButton.addEventListener('click', function () {
       self.showLeadForm(normalizeLeadSpec({}, self.agent));
     });
     restart.addEventListener('click', function () { self.restartConversation(); });
     handoffButton.addEventListener('click', function () { self.requestHandoff(); });
-    bookingButton.addEventListener('click', function () { self.showBookingPicker(); });
+    bookingButton.addEventListener('click', function () {
+      var booking = isRecord(self.agent.booking) ? self.agent.booking : null;
+      if (booking && booking.completesElsewhere && booking.schedulingURL) {
+        self.openExternalBooking();
+        return;
+      }
+      self.showBookingPicker();
+    });
     panel.addEventListener('keydown', function (event) { self.handlePanelKeys(event); });
     global.addEventListener('online', function () { self.updateConnectionState(); });
     // A hidden tab must not poll. Browsers throttle background timers rather
@@ -2014,9 +2340,17 @@
     nodes.shell.classList.toggle('gw-glowing', toggles.isGlowing);
     nodes.shell.classList.toggle('gw-transparent', toggles.isTransparent);
     nodes.mutedBadge.hidden = !toggles.agentMute;
-    // This widget is text only. The three switches that describe when audio
-    // should stop are published on the host element for the page and for a
-    // future voice surface to read, rather than being acted out here.
+    // The widget now takes voice IN -- the microphone in the composer -- but it
+    // still has no audio of its own to play, so the three switches that describe
+    // when audio should stop are published on the host element for the page to
+    // read rather than acted out here.
+    //
+    // transcription is published the same way and is deliberately NOT the
+    // microphone's switch. Nothing on the server reads it, the voice endpoint
+    // does not consult it, and it resolves to false for every agent that
+    // predates the settings screen -- so gating the button on it would mean no
+    // visitor anywhere could speak. What the button waits for is a browser that
+    // can record and a server that will transcribe.
     nodes.host.setAttribute('data-transcription', String(toggles.transcription));
     nodes.host.setAttribute('data-agent-mute', String(toggles.agentMute));
     nodes.host.setAttribute('data-mute-on-minimize', String(toggles.muteOnMinimize));
@@ -2083,6 +2417,10 @@
         if (focusTarget) focusTarget.focus({ preventScroll: true });
       }, 80);
     } else {
+      // A panel the visitor has just closed must not leave a microphone open
+      // behind it. The recording is discarded rather than transcribed: they
+      // closed the chat, so nothing they said was meant to be sent anywhere.
+      this.cancelVoiceRecording();
       this.stopPolling();
       this.nodes.launcher.focus({ preventScroll: true });
     }
@@ -2735,7 +3073,10 @@
 
   GarudaWidget.prototype.submitMessage = async function submitMessage() {
     var content = this.nodes.textarea.value.trim();
-    if (!content || this.sending || content.length > MAX_MESSAGE_LENGTH) return;
+    // A message cannot be sent out from under a live microphone: the visitor is
+    // still speaking, and the words they are speaking are meant for this box.
+    if (!content || this.sending || this.voiceBusy() || content.length > MAX_MESSAGE_LENGTH) return;
+    this.clearVoiceNote();
     try {
       await this.ensureSession();
     } catch (_error) {
@@ -2828,7 +3169,7 @@
     this.nodes.textarea.disabled = active || !this.session;
     this.nodes.send.setAttribute('aria-busy', String(Boolean(active)));
     this.nodes.send.classList.toggle('gw-busy', Boolean(active));
-    this.nodes.send.disabled = active || !this.session || !this.nodes.textarea.value.trim();
+    this.nodes.send.disabled = active || this.voiceBusy() || !this.session || !this.nodes.textarea.value.trim();
     this.nodes.messages.setAttribute('aria-busy', String(active));
     this.updateContactVisibility();
     if (active) this.scrollToBottom(true);
@@ -2841,8 +3182,429 @@
     var count = textarea.value.length;
     this.nodes.counter.textContent = count + ' / ' + MAX_MESSAGE_LENGTH;
     this.nodes.counter.hidden = count < 3600;
-    this.nodes.send.disabled = this.sending || !this.session || !textarea.value.trim();
+    this.nodes.send.disabled = this.sending || this.voiceBusy() || !this.session || !textarea.value.trim();
   };
+
+  // ---- speaking instead of typing ----
+  //
+  // The visitor presses record, speaks, presses stop, reads what was heard, and
+  // presses send themselves. The transcript is NEVER sent on their behalf.
+  // Speech recognition is wrong sometimes, and a misheard sentence delivered to
+  // somebody's business is worse than an extra tap -- "cancel my order" is one
+  // vowel away from several other things. The endpoint is built the same way:
+  // it returns text and has no means of posting a message.
+  //
+  // The microphone is asked for when the button is pressed and at no other
+  // moment, and every path out of recording -- stop, cancel, an error, a closed
+  // panel, a failed upload -- passes through releaseVoice, because a tab still
+  // showing a live microphone after the visitor has stopped is a breach of
+  // trust rather than a loose end.
+
+  GarudaWidget.prototype.voiceBusy = function voiceBusy() {
+    return Boolean(this.voice && this.voice.state !== 'idle');
+  };
+
+  GarudaWidget.prototype.voiceOffered = function voiceOffered() {
+    return Boolean(
+      this.voice &&
+      this.voice.available &&
+      this.api &&
+      typeof this.api.transcribeVoice === 'function' &&
+      recordingSupport(recordingEnvironment()) === 'supported'
+    );
+  };
+
+  GarudaWidget.prototype.updateVoiceVisibility = function updateVoiceVisibility() {
+    var nodes = this.nodes;
+    if (!nodes.mic) return;
+    var offered = this.voiceOffered();
+    var state = this.voice.state;
+    nodes.mic.hidden = !offered;
+    // Published on the host element, the way the audio toggles are, so a
+    // customer whose staging site is on plain http can read why their widget
+    // shows no microphone instead of filing it as a missing feature.
+    var reason = 'ready';
+    if (!offered) {
+      reason = this.voice.available && typeof this.api.transcribeVoice === 'function'
+        ? recordingSupport(recordingEnvironment())
+        : 'unavailable';
+    }
+    nodes.host.setAttribute('data-voice', reason);
+    if (!offered) return;
+    var recording = state === 'recording';
+    // Live only in the two states the visitor can act on. While the browser is
+    // asking for permission, or the words are being transcribed, a second press
+    // would start a recording on top of one already being dealt with.
+    nodes.mic.disabled = this.sending || !this.session || (state !== 'idle' && state !== 'recording');
+    nodes.mic.setAttribute('aria-label', recording ? 'Stop recording' : 'Record a voice message');
+    nodes.mic.setAttribute('aria-pressed', String(recording));
+    nodes.mic.setAttribute('data-state', state);
+    nodes.micIcon.hidden = recording;
+    nodes.micStopIcon.hidden = !recording;
+  };
+
+  GarudaWidget.prototype.renderVoice = function renderVoice() {
+    var nodes = this.nodes;
+    var voice = this.voice;
+    if (!nodes.voiceRow) return;
+    var idle = voice.state === 'idle';
+    nodes.voiceRow.hidden = idle && !voice.note;
+    nodes.voiceRow.setAttribute('data-phase', voice.state);
+    nodes.voiceRow.setAttribute('data-state', voice.tone);
+    nodes.voiceStatus.textContent = voice.note;
+    nodes.voiceDot.hidden = idle;
+    nodes.voiceTime.hidden = voice.state !== 'recording' && voice.state !== 'transcribing';
+    nodes.voiceTime.textContent = formatElapsed(voice.seconds);
+    // The same button throughout: while anything is happening it abandons it,
+    // and once nothing is it clears the sentence left behind.
+    nodes.voiceAction.textContent = idle ? 'Dismiss' : 'Cancel';
+    this.updateVoiceVisibility();
+  };
+
+  GarudaWidget.prototype.setVoice = function setVoice(state, note, tone) {
+    this.voice.state = state;
+    this.voice.note = note || '';
+    this.voice.tone = tone || '';
+    this.renderVoice();
+    // The send button is disabled while the microphone is busy and comes back
+    // afterwards, and only resizeInput knows whether there is anything to send.
+    if (this.nodes.textarea) this.resizeInput();
+  };
+
+  GarudaWidget.prototype.clearVoiceNote = function clearVoiceNote() {
+    if (!this.voice || this.voice.state !== 'idle' || !this.voice.note) return;
+    this.setVoice('idle', '', '');
+  };
+
+  GarudaWidget.prototype.stopVoiceTicker = function stopVoiceTicker() {
+    if (!this.voice.ticker) return;
+    if (global.clearInterval) global.clearInterval(this.voice.ticker);
+    this.voice.ticker = null;
+  };
+
+  // The hardware goes back here and nowhere else. It is deliberately separate
+  // from anything about what the screen says, so that every failure path can
+  // release the microphone without first deciding what to tell the visitor.
+  GarudaWidget.prototype.releaseVoice = function releaseVoice() {
+    var voice = this.voice;
+    this.stopVoiceTicker();
+    var recorder = voice.recorder;
+    voice.recorder = null;
+    if (recorder) {
+      // The handlers go too. A recorder that delivers one last chunk after this
+      // has nothing left to append to, and one that reports an error after the
+      // words have already been transcribed would replace them with a warning
+      // about a recording that is over.
+      recorder.ondataavailable = null;
+      recorder.onstop = null;
+      recorder.onerror = null;
+    }
+    releaseMicrophoneStream(voice.stream);
+    voice.stream = null;
+  };
+
+  GarudaWidget.prototype.toggleVoiceRecording = function toggleVoiceRecording() {
+    if (!this.voice) return undefined;
+    if (this.voice.state === 'recording') return this.stopVoiceRecording('');
+    if (this.voice.state === 'idle') return this.startVoiceRecording();
+    return undefined;
+  };
+
+  GarudaWidget.prototype.startVoiceRecording = async function startVoiceRecording() {
+    var self = this;
+    var voice = this.voice;
+    if (voice.state !== 'idle' || !this.voiceOffered()) return;
+    voice.generation += 1;
+    var generation = voice.generation;
+    this.setVoice('starting', 'Waiting for your browser to allow the microphone…', '');
+
+    var known = await readMicrophonePermission();
+    if (known === 'denied') {
+      // getUserMedia here would reject without ever showing a prompt, so the
+      // visitor is told how to unblock it rather than waiting for a prompt that
+      // is never coming.
+      if (voice.generation !== generation) return;
+      this.voiceFailed(describeMicrophoneFailure({ name: 'NotAllowedError' }, 'denied'));
+      return;
+    }
+    if (voice.generation !== generation) return;
+
+    var stream = null;
+    try {
+      stream = await global.navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+      });
+    } catch (error) {
+      var permission = await readMicrophonePermission();
+      if (voice.generation !== generation) return;
+      this.voiceFailed(describeMicrophoneFailure(error, permission));
+      return;
+    }
+    // Cancelled, or the panel closed, while the permission prompt was open. The
+    // stream that has just been granted is handed straight back.
+    if (voice.generation !== generation) {
+      releaseMicrophoneStream(stream);
+      return;
+    }
+
+    var recorder = null;
+    try {
+      recorder = createVoiceRecorder(stream);
+    } catch (error) {
+      releaseMicrophoneStream(stream);
+      this.voiceFailed(describeMicrophoneFailure(error));
+      return;
+    }
+    voice.stream = stream;
+    voice.recorder = recorder;
+    voice.chunks = [];
+    voice.bytes = 0;
+    voice.seconds = 0;
+    voice.warned = false;
+    voice.leading = '';
+    voice.startedAt = Date.now();
+    recorder.ondataavailable = function (event) {
+      var data = event ? event.data : null;
+      if (!data || !data.size) return;
+      voice.chunks.push(data);
+      voice.bytes += data.size;
+      // The server takes a megabyte. Stopping here is the difference between
+      // the visitor hearing about the limit now and hearing about it after an
+      // upload they waited through.
+      if (voice.bytes >= MAX_VOICE_BYTES) {
+        self.stopVoiceRecording('That is as much as one voice message can hold.');
+      }
+    };
+    recorder.onstop = function () { self.voiceRecordingStopped(generation); };
+    // A microphone unplugged mid-sentence fires this and may never fire onstop,
+    // which would otherwise leave the row saying "recording" over a device that
+    // is no longer there.
+    recorder.onerror = function () {
+      self.voiceFailed('The recording stopped unexpectedly. Try again, or type your message.');
+    };
+    try {
+      // A timeslice, so how much has been recorded is known while it is still
+      // being recorded rather than only once it is too late to stop short.
+      recorder.start(1000);
+    } catch (error) {
+      this.releaseVoice();
+      this.voiceFailed(describeMicrophoneFailure(error));
+      return;
+    }
+    this.setVoice('recording', 'Recording — press the microphone again to stop.', '');
+    if (global.setInterval) {
+      voice.ticker = global.setInterval(function () { self.voiceTick(); }, VOICE_TICK_MS);
+    }
+  };
+
+  GarudaWidget.prototype.voiceTick = function voiceTick() {
+    var voice = this.voice;
+    if (voice.state !== 'recording' && voice.state !== 'transcribing') return;
+    // Read off the clock rather than counted, because a throttled background tab
+    // fires this timer late and a counted second would under-report a length the
+    // server is going to measure honestly.
+    var elapsed = Math.floor((Date.now() - voice.startedAt) / 1000);
+    if (elapsed === voice.seconds) return;
+    voice.seconds = elapsed;
+    if (voice.state === 'transcribing') {
+      this.renderVoice();
+      return;
+    }
+    var remaining = MAX_VOICE_SECONDS - elapsed;
+    if (remaining <= 0) {
+      this.stopVoiceRecording('That is as long as one voice message can be.');
+      return;
+    }
+    // Announced once, on the way into the last stretch. Announcing every second
+    // would read the countdown aloud over the visitor still speaking.
+    if (remaining <= VOICE_WARN_SECONDS && !voice.warned) {
+      voice.warned = true;
+      voice.note = remaining + (remaining === 1 ? ' second left.' : ' seconds left.');
+      voice.tone = 'warn';
+    }
+    this.renderVoice();
+  };
+
+  // Stopping is asked of the recorder rather than done to the stream: the tracks
+  // stay live until onstop has handed over the last chunk, because stopping them
+  // first truncates the tail of the recording on some browsers. releaseVoice
+  // runs the moment onstop fires, which is a few milliseconds later.
+  GarudaWidget.prototype.stopVoiceRecording = function stopVoiceRecording(leading) {
+    var voice = this.voice;
+    if (voice.state !== 'recording') return;
+    voice.leading = leading || '';
+    this.stopVoiceTicker();
+    this.setVoice(
+      'stopping',
+      leading ? leading + ' Finishing the recording…' : 'Finishing the recording…',
+      leading ? 'warn' : ''
+    );
+    try {
+      if (voice.recorder && voice.recorder.state !== 'inactive') {
+        voice.recorder.stop();
+        return;
+      }
+    } catch (_error) {
+      // A recorder that will not stop cleanly still has to give the microphone
+      // back, which is what falling through to the line below does.
+    }
+    this.voiceRecordingStopped(voice.generation);
+  };
+
+  GarudaWidget.prototype.voiceRecordingStopped = function voiceRecordingStopped(generation) {
+    var voice = this.voice;
+    // Cancelled while the recorder was stopping. Nothing is uploaded and
+    // nothing is said, because the visitor already said it.
+    if (voice.generation !== generation) return;
+    var chunks = voice.chunks;
+    var recorder = voice.recorder;
+    var recorded = voice.bytes;
+    var seconds = Math.floor((Date.now() - voice.startedAt) / 1000);
+    // Read back off the recorder rather than assumed: the browser may have
+    // ignored the type it was asked for.
+    var type = (recorder && recorder.mimeType) || (chunks[0] && chunks[0].type) || 'audio/webm';
+    voice.chunks = [];
+    voice.bytes = 0;
+    // The hardware goes back before a byte is uploaded. The recording is already
+    // in hand, so there is no reason to hold a microphone open for the seconds a
+    // transcription takes.
+    this.releaseVoice();
+    if (recorded < MIN_VOICE_BYTES) {
+      // minVoiceNoteBytes answers this with a 422, and no round trip is needed
+      // to know that a tap on the button is not a sentence.
+      this.voiceFailed('That was too short to hear. Press the microphone and speak for a few seconds.');
+      return;
+    }
+    var recording = null;
+    try {
+      recording = { blob: new global.Blob(chunks, { type: type }), type: type, seconds: seconds };
+    } catch (_error) {
+      this.voiceFailed('That recording could not be prepared. Try again, or type your message.');
+      return;
+    }
+    this.transcribeVoiceNote(recording, voice.leading);
+  };
+
+  GarudaWidget.prototype.transcribeVoiceNote = async function transcribeVoiceNote(recording, leading) {
+    var self = this;
+    var voice = this.voice;
+    voice.generation += 1;
+    var generation = voice.generation;
+    var spoken = 'Turning ' + formatElapsed(recording.seconds) + ' of audio into text…';
+    // The clock restarts and keeps running, because this is a call to a speech
+    // provider that takes seconds: a number that grows is the difference between
+    // waiting and wondering whether anything is happening at all.
+    voice.startedAt = Date.now();
+    voice.seconds = 0;
+    this.setVoice('transcribing', leading ? leading + ' ' + spoken : spoken, leading ? 'warn' : '');
+    if (global.setInterval) {
+      voice.ticker = global.setInterval(function () { self.voiceTick(); }, VOICE_TICK_MS);
+    }
+    var deadline = createRequestDeadline(VOICE_REQUEST_TIMEOUT_MS);
+    voice.request = deadline;
+    try {
+      await this.ensureSession();
+      // Through withFreshSession: a panel open long enough for the fifteen
+      // minute token to expire must not lose the words somebody just spoke.
+      var result = await this.withFreshSession(function () {
+        return self.api.transcribeVoice(self.session, recording, deadline);
+      }, false);
+      if (voice.generation !== generation) return;
+      this.applyTranscript(result.text);
+    } catch (error) {
+      // A cancelled upload is not a failure to report: the visitor abandoned it
+      // and has already been shown an idle composer.
+      if (voice.generation !== generation) return;
+      var failure = voiceFailure(error);
+      // Voice is off for this website, not off for this recording. The button
+      // goes, because pressing it again cannot end any differently, and the
+      // keyboard is left doing the whole job without a word about whose fault
+      // it is.
+      if (failure.off) voice.available = false;
+      this.stopVoiceTicker();
+      this.setVoice('idle', failure.message, 'error');
+    } finally {
+      deadline.clear();
+      if (voice.request === deadline) voice.request = null;
+      if (voice.generation === generation) this.stopVoiceTicker();
+    }
+  };
+
+  // The whole point of the feature, and the one thing about it that must not be
+  // improved: the words land in the composer and stop there. The visitor reads
+  // what was heard, fixes what was not, and presses send themselves.
+  GarudaWidget.prototype.applyTranscript = function applyTranscript(text) {
+    var textarea = this.nodes.textarea;
+    var existing = typeof textarea.value === 'string' ? textarea.value : '';
+    // Added to what is already there rather than replacing it: somebody who
+    // typed half a sentence and then spoke the rest keeps both halves.
+    var combined = existing.trim() ? existing.replace(/\s+$/, '') + ' ' + text : text;
+    textarea.value = combined.slice(0, MAX_MESSAGE_LENGTH);
+    this.stopVoiceTicker();
+    this.setVoice('idle', 'Here is what we heard. Check it, then press send.', '');
+    textarea.focus({ preventScroll: true });
+    // The caret goes to the end, so the next keystroke edits the transcript
+    // rather than landing in front of it.
+    if (typeof textarea.setSelectionRange === 'function') {
+      try {
+        textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+      } catch (_error) {
+        // A control that refuses a selection is still perfectly typable.
+      }
+    }
+  };
+
+  GarudaWidget.prototype.voiceFailed = function voiceFailed(message) {
+    this.releaseVoice();
+    this.setVoice('idle', message, 'error');
+  };
+
+  // Cancel means the recording goes nowhere. The generation moves on, so a
+  // stream still being granted is handed straight back, an upload already in
+  // flight is dropped along with whatever it answers, and the chunks recorded so
+  // far are thrown away rather than sent.
+  GarudaWidget.prototype.cancelVoiceRecording = function cancelVoiceRecording() {
+    var voice = this.voice;
+    if (!voice) return;
+    if (voice.state !== 'idle') {
+      voice.generation += 1;
+      voice.chunks = [];
+      voice.bytes = 0;
+      if (voice.request) {
+        voice.request.abort();
+        voice.request = null;
+      }
+      try {
+        if (voice.recorder && voice.recorder.state !== 'inactive') voice.recorder.stop();
+      } catch (_error) {
+        // Nothing here depends on the recorder stopping cleanly. The tracks are
+        // released either way, on the line below.
+      }
+      this.releaseVoice();
+    }
+    this.setVoice('idle', '', '');
+  };
+
+  // Some browsers report a type as supported and then refuse it at
+  // construction. Losing the recording to that is unnecessary: the browser's
+  // own default records everywhere its MediaRecorder does, and what it chose is
+  // read back off the blob afterwards.
+  function createVoiceRecorder(stream) {
+    var Recorder = global.MediaRecorder;
+    var mimeType = chooseVoiceMimeType(
+      typeof Recorder.isTypeSupported === 'function'
+        ? function (type) { return Recorder.isTypeSupported(type); }
+        : null
+    );
+    if (mimeType) {
+      try {
+        return new Recorder(stream, { mimeType: mimeType });
+      } catch (_error) {
+        // Fall through to the browser's default rather than failing outright.
+      }
+    }
+    return new Recorder(stream);
+  }
 
   // ---- human handoff, and starting over ----
 
@@ -2983,6 +3745,7 @@
       this.bookingVisible;
     this.updateHandoffVisibility();
     this.updateBookingVisibility();
+    this.updateVoiceVisibility();
   };
 
   // ---- the lead form the customer built ----
@@ -3317,13 +4080,11 @@
 
   GarudaWidget.prototype.bookingAvailable = function bookingAvailable() {
     var booking = isRecord(this.agent.booking) ? this.agent.booking : null;
-    return Boolean(
-      booking &&
-      booking.enabled &&
-      this.session &&
-      this.api &&
-      typeof this.api.listBookingSlots === 'function'
-    );
+    if (!booking || !booking.enabled || !this.session) return false;
+    // A calendar that finishes on its own page needs no slots call -- the button
+    // is a link. Requiring the API here would hide the only working path.
+    if (booking.completesElsewhere) return Boolean(booking.schedulingURL);
+    return Boolean(this.api && typeof this.api.listBookingSlots === 'function');
   };
 
   GarudaWidget.prototype.updateBookingVisibility = function updateBookingVisibility() {
@@ -3334,6 +4095,23 @@
     if (!available) return;
     nodes.bookingLabel.textContent = this.agent.booking.label;
     nodes.bookingButton.setAttribute('aria-label', this.agent.booking.label);
+  };
+
+  // A calendar with no create-booking API is handed over rather than faked. The
+  // link also goes into the transcript, because a popup blocker swallowing the
+  // click on somebody else's website must not leave the visitor with nothing.
+  GarudaWidget.prototype.openExternalBooking = function openExternalBooking() {
+    var booking = isRecord(this.agent.booking) ? this.agent.booking : null;
+    if (!booking || !booking.schedulingURL) return;
+    openExternal(booking.schedulingURL);
+    // The same reasoning as the WhatsApp handoff: a blocked popup cannot be
+    // detected, so the visitor is given something to tap rather than the widget
+    // guessing whether the open worked.
+    this.appendMessage({
+      id: randomID(),
+      role: 'assistant',
+      content: 'Appointments for this team are booked on ' + booking.providerLabel + '. Opening it now — this chat stays here.'
+    }, { action: { label: 'Open ' + booking.providerLabel, url: booking.schedulingURL } });
   };
 
   GarudaWidget.prototype.showBookingPicker = async function showBookingPicker() {
@@ -3698,7 +4476,7 @@
       '.gw-launcher{position:relative;min-width:60px;height:60px;border:0;border-radius:20px;padding:0 7px;background:var(--garuda-accent);color:var(--garuda-accent-text);display:flex;align-items:center;gap:0;box-shadow:0 14px 35px rgba(30,41,59,.22),0 4px 12px rgba(30,41,59,.12);cursor:pointer;transition:transform .2s ease,box-shadow .2s ease,min-width .25s ease;border:1px solid rgba(255,255,255,.18);}',
       '.gw-launcher:hover{transform:translateY(-2px);box-shadow:0 18px 42px rgba(30,41,59,.27),0 5px 14px rgba(30,41,59,.13);}',
       '.gw-launcher:active{transform:translateY(0) scale(.98);}',
-      '.gw-launcher:focus-visible,.gw-icon-button:focus-visible,.gw-send:focus-visible,.gw-suggestion:focus-visible,.gw-primary-button:focus-visible,.gw-secondary-button:focus-visible,.gw-contact-button:focus-visible,.gw-handoff-button:focus-visible,.gw-booking-button:focus-visible,.gw-slot:focus-visible,.gw-lead-dismiss:focus-visible,.gw-notice-action:focus-visible,a:focus-visible{outline:3px solid color-mix(in srgb,var(--garuda-accent) 36%,white);outline-offset:3px;}',
+      '.gw-launcher:focus-visible,.gw-icon-button:focus-visible,.gw-send:focus-visible,.gw-mic:focus-visible,.gw-voice-action:focus-visible,.gw-suggestion:focus-visible,.gw-primary-button:focus-visible,.gw-secondary-button:focus-visible,.gw-contact-button:focus-visible,.gw-handoff-button:focus-visible,.gw-booking-button:focus-visible,.gw-slot:focus-visible,.gw-lead-dismiss:focus-visible,.gw-notice-action:focus-visible,a:focus-visible{outline:3px solid color-mix(in srgb,var(--garuda-accent) 36%,white);outline-offset:3px;}',
       '.gw-launcher-icon{width:46px;height:46px;border-radius:15px;display:grid;place-items:center;flex:none;background:rgba(255,255,255,.13);}',
       '.gw-launcher-icon svg{width:25px;height:25px;}',
       '.gw-launcher-label{max-width:0;overflow:hidden;white-space:nowrap;font-size:14px;font-weight:720;letter-spacing:-.01em;opacity:0;transition:max-width .25s ease,opacity .18s ease,padding .25s ease;}',
@@ -3706,7 +4484,7 @@
       '.gw-open .gw-launcher{min-width:60px;}',
       '.gw-open .gw-launcher-label{max-width:0!important;opacity:0!important;padding:0!important;}',
       '.gw-unread{position:absolute;right:-4px;top:-6px;min-width:22px;height:22px;padding:0 6px;border-radius:999px;display:grid;place-items:center;background:#EF4444;color:#fff;border:3px solid #fff;font-size:10px;font-weight:800;box-shadow:0 4px 10px rgba(239,68,68,.28);}',
-      '.gw-panel{width:min(390px,calc(100vw - 32px));height:min(650px,calc(100dvh - 112px));min-height:440px;border-radius:24px;background:var(--garuda-background);border:1px solid rgba(148,163,184,.26);box-shadow:0 28px 70px rgba(15,23,42,.2),0 8px 25px rgba(15,23,42,.1);overflow:hidden;display:grid;grid-template-rows:auto auto minmax(0,1fr) auto auto auto auto;transform-origin:bottom right;animation:gw-enter .22s cubic-bezier(.2,.8,.2,1);}',
+      '.gw-panel{width:min(390px,calc(100vw - 32px));height:min(650px,calc(100dvh - 112px));min-height:440px;border-radius:24px;background:var(--garuda-background);border:1px solid rgba(148,163,184,.26);box-shadow:0 28px 70px rgba(15,23,42,.2),0 8px 25px rgba(15,23,42,.1);overflow:hidden;display:grid;grid-template-rows:auto auto minmax(0,1fr) auto auto auto auto auto;transform-origin:bottom right;animation:gw-enter .22s cubic-bezier(.2,.8,.2,1);}',
       '.gw-shell[data-position$="_left"] .gw-panel{transform-origin:bottom left;}',
       '.gw-shell[data-position^="top_"] .gw-panel{transform-origin:top right;}',
       '.gw-shell[data-position^="top_"][data-position$="_left"] .gw-panel{transform-origin:top left;}',
@@ -3791,6 +4569,28 @@
       '.gw-input:focus{border-color:color-mix(in srgb,var(--garuda-accent) 55%,#DCE2EA);box-shadow:0 0 0 3px color-mix(in srgb,var(--garuda-accent) 10%,transparent);background:var(--garuda-background);}',
       '.gw-input:disabled{cursor:not-allowed;opacity:.65;}',
       '.gw-counter{position:absolute;right:8px;bottom:-17px;font-size:9px;color:#64748B;}',
+      // The microphone reads as a control that is doing something, not as an
+      // icon that happens to be red: the button fills, the row above it names
+      // the state and counts, and both pulse together.
+      '.gw-mic{position:relative;width:44px;height:44px;flex:none;border:1px solid var(--garuda-line);border-radius:14px;display:grid;place-items:center;background:var(--garuda-surface);color:var(--garuda-text);cursor:pointer;transition:transform .15s,background .15s,color .15s,border-color .15s;}',
+      '.gw-mic:hover:not(:disabled){background:color-mix(in srgb,var(--garuda-accent) 9%,var(--garuda-surface));border-color:color-mix(in srgb,var(--garuda-accent) 40%,var(--garuda-line));color:var(--garuda-accent);}',
+      '.gw-mic:active:not(:disabled){transform:scale(.97);}',
+      '.gw-mic:disabled{opacity:.35;cursor:not-allowed;}',
+      '.gw-mic svg{width:20px;height:20px;}',
+      '.gw-mic[data-state="recording"]{background:#DC2626;border-color:#DC2626;color:#fff;box-shadow:0 0 0 4px rgba(220,38,38,.16);animation:gw-record 1.5s ease-in-out infinite;}',
+      '.gw-voice{display:flex;align-items:center;gap:8px;padding:9px 12px 0;background:var(--garuda-background);font-size:11px;line-height:1.45;}',
+      '.gw-voice-dot{width:10px;height:10px;flex:none;border-radius:50%;background:#DC2626;}',
+      '.gw-voice[data-phase="recording"] .gw-voice-dot{animation:gw-record 1.5s ease-in-out infinite;}',
+      '.gw-voice[data-phase="starting"] .gw-voice-dot,.gw-voice[data-phase="stopping"] .gw-voice-dot,.gw-voice[data-phase="transcribing"] .gw-voice-dot{width:13px;height:13px;background:transparent;border:2px solid var(--garuda-accent);border-top-color:transparent;animation:gw-spin .7s linear infinite;}',
+      '.gw-voice-status{flex:1;min-width:0;color:var(--garuda-muted);font-weight:600;}',
+      '.gw-voice[data-state="warn"] .gw-voice-status{color:#9A3412;font-weight:700;}',
+      '.gw-voice[data-state="error"] .gw-voice-status{color:#B91C1C;font-weight:700;}',
+      // Tabular figures, so a clock counting up does not shift the sentence
+      // beside it left and right on every tick.
+      '.gw-voice-time{flex:none;color:var(--garuda-text);font-weight:760;font-variant-numeric:tabular-nums;}',
+      '.gw-voice-action{flex:none;border:0;border-radius:8px;background:transparent;color:#5B6475;text-decoration:underline;font-size:11px;font-weight:720;cursor:pointer;padding:4px 3px;}',
+      '.gw-voice-action:hover{color:#B91C1C;}',
+      '@keyframes gw-record{0%,100%{opacity:1}50%{opacity:.5}}',
       '.gw-send{position:relative;width:44px;height:44px;flex:none;border:0;border-radius:14px;display:grid;place-items:center;background:var(--garuda-accent);color:var(--garuda-accent-text);box-shadow:0 6px 14px color-mix(in srgb,var(--garuda-accent) 23%,transparent);cursor:pointer;transition:transform .15s,opacity .15s;}',
       '.gw-send:hover:not(:disabled){transform:translateY(-1px)}.gw-send:active:not(:disabled){transform:scale(.97)}',
       '.gw-send:disabled{opacity:.35;cursor:not-allowed;box-shadow:none;}',
@@ -3843,7 +4643,7 @@
       '.gw-success-icon svg{width:21px;height:21px;}',
       '.gw-glowing .gw-launcher{animation:gw-glow 2.6s ease-in-out infinite;}',
       '.gw-transparent .gw-panel{background:color-mix(in srgb,var(--garuda-background) 78%,transparent);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);}',
-      '.gw-transparent .gw-header,.gw-transparent .gw-body,.gw-transparent .gw-typing,.gw-transparent .gw-contact-row,.gw-transparent .gw-composer,.gw-transparent .gw-footer{background:transparent;}',
+      '.gw-transparent .gw-header,.gw-transparent .gw-body,.gw-transparent .gw-typing,.gw-transparent .gw-contact-row,.gw-transparent .gw-voice,.gw-transparent .gw-composer,.gw-transparent .gw-footer{background:transparent;}',
       '.gw-transparent .gw-assistant .gw-bubble,.gw-transparent .gw-lead-card,.gw-transparent .gw-consent-card{background:color-mix(in srgb,var(--garuda-background) 70%,transparent);}',
       '@keyframes gw-glow{0%,100%{box-shadow:0 14px 35px rgba(30,41,59,.22),0 0 0 0 color-mix(in srgb,var(--garuda-accent) 55%,transparent)}55%{box-shadow:0 14px 35px rgba(30,41,59,.22),0 0 0 13px color-mix(in srgb,var(--garuda-accent) 0%,transparent)}}',
       '@keyframes gw-spin{to{transform:rotate(360deg)}}',

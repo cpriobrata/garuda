@@ -48,7 +48,7 @@ export function WebsiteImport({
   blocked,
 }: {
   agentId: string;
-  onSave: (title: string, content: string) => Promise<void>;
+  onSave: (title: string, content: string) => Promise<boolean>;
   blocked: boolean;
 }) {
   const [url, setUrl] = useState("");
@@ -137,9 +137,15 @@ export function WebsiteImport({
                 savePage.run(async () => {
                   setError("");
                   try {
-                    await onSave(page.title, page.text);
-                    setPage(null);
-                    setUrl("");
+                    // onSave reports failure by returning false rather than
+                    // throwing -- it handles its own errors -- so the fetched
+                    // page is only discarded once it is actually stored.
+                    if (await onSave(page.title, page.text)) {
+                      setPage(null);
+                      setUrl("");
+                    } else {
+                      setError("That page could not be saved. The text is still here — try again.");
+                    }
                   } catch (reason) {
                     setError(reason instanceof ApiError ? reason.message : "That page could not be saved. Try again.");
                   }

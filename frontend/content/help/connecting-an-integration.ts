@@ -84,7 +84,7 @@ export const article: HelpArticle = {
           tone: "caution",
           title: "Allow pop-ups if nothing opens",
           body: [
-            "The sign-in has to open in a new tab. If your browser blocks it, the card says so and nothing else happens: allow pop-ups for the workspace and choose Connect again.",
+            "The sign-in has to open in a new tab, and a browser that blocks one does it silently — no website can tell a blocked tab from a tab that opened behind the window. So if nothing appears, allow pop-ups for this site and choose Connect again. Nothing is authorised until you finish at the provider, so a second attempt costs you nothing.",
           ],
         },
       ],

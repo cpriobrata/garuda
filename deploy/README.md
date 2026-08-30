@@ -90,12 +90,38 @@ Google OAuth client, or the sign-in button will fail with `origin_mismatch`.
 
 ## Updating later
 
+Use `deploy/release.sh`. It builds, uploads, verifies and swaps in one command:
+
 ```bash
-scp garuda-api root@SERVER:/opt/garuda/garuda-api.new
-ssh root@SERVER 'mv /opt/garuda/garuda-api.new /opt/garuda/garuda-api \
-  && chown garuda:garuda /opt/garuda/garuda-api \
-  && chmod 755 /opt/garuda/garuda-api \
-  && systemctl restart garuda-api'
+GARUDA_DEPLOY_TARGET=root@SERVER GARUDA_DEPLOY_KEY=~/.ssh/garuda deploy/release.sh
+```
+
+**Do not do this by hand.** The three obvious commands — scp, mv, restart — took
+the site down twice on 30 August 2026, both times in ways that look like nothing
+until the service will not start:
+
+1. `scp` lost the connection part-way and left a **truncated** file. `mv` then put
+   that truncated file over the working binary. The service could not exec it and
+   every request 502'd until somebody read the journal.
+2. Retrying the transfer left the first attempt's `sftp-server` alive on the
+   server, still holding the staged file **open for writing**. Renaming it into
+   place carried that open handle along with the inode, and `exec` on a file open
+   for writing is `ETXTBSY` — so a byte-perfect binary still would not start, with
+   a journal full of "Text file busy" and a systemd restart loop racing every
+   attempt to fix it.
+
+The script exists because of those two and guards both: it uploads to a staging
+path nothing executes, compares sha256 before touching anything, clears whatever
+holds the file, swaps by rename, keeps the previous binary as `.prev`, and rolls
+back automatically if the health check does not come back 200.
+
+If you do need to intervene by hand, the rollback is one rename:
+
+```bash
+ssh root@SERVER 'cd /opt/garuda && systemctl stop garuda-api \
+  && fuser -k garuda-api; cp -f garuda-api.prev garuda-api.rollback \
+  && chown garuda:garuda garuda-api.rollback && chmod 755 garuda-api.rollback \
+  && mv -f garuda-api.rollback garuda-api && systemctl start garuda-api'
 ```
 
 ## Back up the database

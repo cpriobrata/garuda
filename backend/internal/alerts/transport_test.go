@@ -186,3 +186,94 @@ func TestARejectedWhatsAppAlertNeverEchoesTheToken(t *testing.T) {
 		t.Errorf("the provider's own code was lost, leaving nothing to diagnose: %v", err)
 	}
 }
+
+// Periskope is the transport that actually gets used at 3am, because it drives a
+// real WhatsApp account rather than Meta's Cloud API and so is not subject to the
+// 24-hour messaging window or template review. What goes on its wire is worth
+// pinning down.
+func TestPeriskopeSendsTheAlertToTheGroupWithBothHeaders(t *testing.T) {
+	var received struct {
+		path  string
+		auth  string
+		phone string
+		body  map[string]any
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received.path = r.URL.Path
+		received.auth = r.Header.Get("Authorization")
+		received.phone = r.Header.Get("x-phone")
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &received.body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	transport := NewPeriskope(PeriskopeConfig{
+		APIKey: "periskope-key", Phone: "164737000000", ChatID: "120363429970896961@g.us", BaseURL: server.URL + "/v1",
+	}).(*periskopeTransport)
+	transport.client = server.Client()
+
+	if err := transport.Send(context.Background(), "garuda-api (production): panic in POST /widget/v1/sessions"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if received.path != "/v1/message/send" {
+		t.Errorf("path = %q", received.path)
+	}
+	if received.auth != "Bearer periskope-key" {
+		t.Errorf("authorization = %q", received.auth)
+	}
+	// The account id travels in its own header, not the body. Without it the
+	// gateway does not know which WhatsApp account is sending, and the alert is
+	// refused rather than delivered somewhere unexpected.
+	if received.phone != "164737000000" {
+		t.Errorf("x-phone = %q", received.phone)
+	}
+	if received.body["chat_id"] != "120363429970896961@g.us" {
+		t.Errorf("chat_id = %v", received.body["chat_id"])
+	}
+	if text, _ := received.body["message"].(string); !strings.Contains(text, "panic in POST") {
+		t.Errorf("the alert text did not survive: %q", text)
+	}
+}
+
+// A partly configured channel must be silently off, never a startup failure and
+// never a request with a missing field that the gateway rejects at 3am.
+func TestPeriskopeIsOffUntilAllThreeValuesArePresent(t *testing.T) {
+	for name, config := range map[string]PeriskopeConfig{
+		"nothing":      {},
+		"no key":       {Phone: "164737000000", ChatID: "1203@g.us"},
+		"no phone":     {APIKey: "k", ChatID: "1203@g.us"},
+		"no chat":      {APIKey: "k", Phone: "164737000000"},
+		"blank padded": {APIKey: "  ", Phone: "  ", ChatID: "  "},
+	} {
+		if NewPeriskope(config).Enabled() {
+			t.Errorf("%s: reported enabled", name)
+		}
+	}
+	if !NewPeriskope(PeriskopeConfig{APIKey: "k", Phone: "1", ChatID: "c"}).Enabled() {
+		t.Error("a fully configured channel reported disabled")
+	}
+}
+
+// A refusal has to say what the gateway said. "Alert delivery failed" tells
+// nobody whether the key expired or the group id is wrong.
+func TestPeriskopeReportsWhyTheGatewayRefused(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid api key"}`))
+	}))
+	defer server.Close()
+
+	transport := NewPeriskope(PeriskopeConfig{
+		APIKey: "wrong", Phone: "1", ChatID: "c", BaseURL: server.URL + "/v1",
+	}).(*periskopeTransport)
+	transport.client = server.Client()
+
+	err := transport.Send(context.Background(), "anything")
+	if err == nil {
+		t.Fatal("a 401 was reported as a successful send")
+	}
+	if !strings.Contains(err.Error(), "invalid api key") {
+		t.Errorf("the gateway's reason was lost: %v", err)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -53,6 +54,12 @@ type resolvedBooking struct {
 	// own page, so the widget can tell the visitor before they pick a time.
 	CompletesElsewhere bool   `json:"completes_elsewhere,omitempty"`
 	ProviderLabel      string `json:"provider_label,omitempty"`
+
+	// SchedulingURL is where such a provider finishes. Without it the widget
+	// could only offer a picker whose Confirm can never succeed -- which is what
+	// it did until this was added, leaving the visitor retrying a 502 forever.
+	// It is present only when CompletesElsewhere is true.
+	SchedulingURL string `json:"scheduling_url,omitempty"`
 }
 
 func bookingAvailable(booking model.BookingConfig) bool {
@@ -64,6 +71,14 @@ func bookingAvailable(booking model.BookingConfig) bool {
 	provider, known := composio.CalendarProviderFor(bookingCalendar(booking))
 	if !known {
 		return false
+	}
+	// A provider that finishes on its own page can only be offered as a link, so
+	// its setting has to BE that link. Anything else -- an API identifier, a
+	// half-typed address -- would put a booking button in front of a visitor
+	// with nowhere for it to go, which is worse than not offering one.
+	if !provider.BookInProduct {
+		_, usable := schedulingLink(booking.CalendarSetting)
+		return usable
 	}
 	// A provider needing a setting it has not been given cannot offer a time
 	// either, and finding that out in front of a visitor is the wrong moment.
@@ -101,6 +116,9 @@ func resolveBooking(agent model.Agent) resolvedBooking {
 	if provider, known := composio.CalendarProviderFor(bookingCalendar(booking)); known && !provider.BookInProduct {
 		resolved.CompletesElsewhere = true
 		resolved.ProviderLabel = provider.Label
+		// bookingAvailable has already refused anything without a usable link,
+		// so this cannot be empty here.
+		resolved.SchedulingURL, _ = schedulingLink(booking.CalendarSetting)
 	}
 	return resolved
 }
@@ -166,6 +184,14 @@ func validateBooking(booking model.BookingConfig, details map[string]string) {
 			details["booking.calendar"] = "Choose a calendar Garuda can book into"
 		} else if provider.SettingLabel != "" && booking.CalendarSetting == "" {
 			details["booking.calendar_setting"] = provider.Label + " needs its " + strings.ToLower(provider.SettingLabel)
+		} else if !provider.BookInProduct {
+			// This provider finishes on its own page, so the setting has to be
+			// that page. Saying so here is the difference between the owner
+			// fixing a pasted API identifier now and a visitor finding a booking
+			// button that goes nowhere.
+			if _, usable := schedulingLink(booking.CalendarSetting); !usable {
+				details["booking.calendar_setting"] = "Paste the public " + provider.Label + " booking link visitors should open, starting https://"
+			}
 		}
 	}
 	if booking.Timezone != "" {
@@ -235,6 +261,12 @@ func (s *Server) listBookingSlots(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if link, elsewhere := externalScheduling(agent.Booking); elsewhere {
+		s.writeError(w, r, http.StatusConflict, "booking_completes_elsewhere",
+			"This appointment is booked on "+link.provider+".", map[string]string{"scheduling_url": link.url, "provider": link.provider})
+		return
+	}
+
 	booking := agent.Booking.Clone()
 	from, to, day, location := bookingWindow(booking, time.Now().UTC())
 	duration := time.Duration(appointmentMinutes(booking)) * time.Minute
@@ -288,6 +320,13 @@ func (s *Server) createBooking(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusNotFound, "booking_unavailable", "This assistant does not offer appointments", nil)
 		return
 	}
+
+	if link, elsewhere := externalScheduling(agent.Booking); elsewhere {
+		s.writeError(w, r, http.StatusConflict, "booking_completes_elsewhere",
+			"This appointment is booked on "+link.provider+".", map[string]string{"scheduling_url": link.url, "provider": link.provider})
+		return
+	}
+
 	var input bookingRequest
 	if !s.decodeJSON(w, r, &input) {
 		return
@@ -424,4 +463,50 @@ func (s *Server) writeBookingError(w http.ResponseWriter, r *http.Request, err e
 	}
 	s.logger.Warn("calendar request failed", "error", err, "request_id", requestID(r.Context()))
 	s.writeError(w, r, http.StatusBadGateway, "calendar_unavailable", "The calendar could not be reached. Please try again in a moment.", nil)
+}
+
+// schedulingLink is the public page a completes-elsewhere calendar finishes on.
+//
+// The customer's stored setting for such a provider IS that page -- Calendly's
+// "Event type URL" is the link they hand out anyway -- so it is not a secret and
+// giving it to the widget is the whole feature. It is still checked rather than
+// trusted: it goes into a link a visitor will click, and a stored setting that
+// is not a public https page must produce no link at all rather than a broken
+// one in front of somebody's customer.
+func schedulingLink(setting string) (string, bool) {
+	raw := strings.TrimSpace(setting)
+	if raw == "" || len(raw) > 400 {
+		return "", false
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "https" {
+		return "", false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	// A host with no dot is a machine on somebody's own network, and embedded
+	// credentials in a link handed to a visitor are never right.
+	if host == "" || !strings.Contains(host, ".") || parsed.User != nil {
+		return "", false
+	}
+	if host == "localhost" || strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") {
+		return "", false
+	}
+	return parsed.String(), true
+}
+
+// externalScheduling reports whether this agent's calendar finishes bookings on
+// its own page, and where. Kept in one place so the two routes and the bootstrap
+// can never disagree about which providers those are.
+func externalScheduling(booking model.BookingConfig) (struct{ url, provider string }, bool) {
+	var link struct{ url, provider string }
+	provider, known := composio.CalendarProviderFor(bookingCalendar(booking))
+	if !known || provider.BookInProduct {
+		return link, false
+	}
+	url, usable := schedulingLink(booking.CalendarSetting)
+	if !usable {
+		return link, false
+	}
+	link.url, link.provider = url, provider.Label
+	return link, true
 }

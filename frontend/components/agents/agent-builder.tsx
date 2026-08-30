@@ -10,7 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { ApiError, garudaApi, type AgentRecord } from "@/lib/api";
 import { WebsiteImport } from "@/components/agents/website-import";
-import { useCalendarConnection, type CalendarConnection } from "@/components/agents/calendar-connection";
+import { calendarLabelFor, calendarOptionFor, defaultCalendarToolkit, normalizeCalendar, useCalendarConnection, useCalendarOptions, type CalendarConnection, type CalendarOption, type CalendarOptions } from "@/components/agents/calendar-connection";
 import { cn } from "@/lib/utils";
 
 const sections = [
@@ -22,7 +22,7 @@ const sections = [
   { id: "appointments", label: "Appointments", icon: CalendarClock },
 ];
 
-const editableFields = ["name", "description", "greeting", "systemPrompt", "primaryColor", "accent", "launcherText", "widgetPosition", "allowedDomain", "handoffEnabled", "handoffNumber", "handoffLabel", "handoffMessage", "handoffAvailability", "handoffTriggers", "handoffAutoOffer", "handoffNotifyEmail", "bookingEnabled", "bookingLabel", "bookingTitle", "bookingTimezone", "bookingDuration", "bookingStartHour", "bookingEndHour", "bookingWeekdays", "bookingLeadDays", "bookingNoticeHours"] as const;
+const editableFields = ["name", "description", "greeting", "systemPrompt", "primaryColor", "accent", "launcherText", "widgetPosition", "allowedDomain", "handoffEnabled", "handoffNumber", "handoffLabel", "handoffMessage", "handoffAvailability", "handoffTriggers", "handoffAutoOffer", "handoffNotifyEmail", "bookingEnabled", "bookingCalendar", "bookingCalendarSetting", "bookingLabel", "bookingTitle", "bookingTimezone", "bookingDuration", "bookingStartHour", "bookingEndHour", "bookingWeekdays", "bookingLeadDays", "bookingNoticeHours"] as const;
 
 // Every builder value is a string, including the two that are not text. The
 // form is one flat record so that "which fields did the writer touch" stays a
@@ -47,6 +47,11 @@ export type AgentFormValues = Record<AgentFormField, string>;
 // touches it.
 export type AgentBookingRecord = {
   enabled?: boolean;
+  // The toolkit slug of the calendar this agent books into, and the one value
+  // that calendar needs beyond the connection. Both absent on every agent saved
+  // before an owner could choose.
+  calendar?: string;
+  calendar_setting?: string;
   button_label?: string;
   title?: string;
   duration_minutes?: number;
@@ -85,6 +90,8 @@ const fieldSections: Record<string, string> = {
   // booking.hours is one key for both ends of the working day, which is how
   // validateBooking reports them: the rule is about the pair, not either field.
   "booking.timezone": "appointments",
+  "booking.calendar": "appointments",
+  "booking.calendar_setting": "appointments",
   "booking.hours": "appointments",
   "booking.duration_minutes": "appointments",
   "booking.lead_days_ahead": "appointments",
@@ -119,6 +126,12 @@ export function agentFormValuesFromRecord(agent: AgentRecord, current: AgentForm
     handoffAutoOffer: agent.handoff?.auto_offer_after ? String(agent.handoff.auto_offer_after) : "0",
     handoffNotifyEmail: agent.handoff?.notify_email || "",
     bookingEnabled: booking?.enabled ? "true" : "false",
+    // A blank calendar is not "nothing chosen": the server reads it as Google
+    // Calendar, which is the diary this agent's visitors have been booking into
+    // all along. Showing it as unchosen invites somebody to "fix" it into a
+    // different one.
+    bookingCalendar: booking?.calendar || defaultCalendarToolkit,
+    bookingCalendarSetting: booking?.calendar_setting || "",
     bookingLabel: booking?.button_label || "",
     bookingTitle: booking?.title || "",
     // Never blanked by a load: the browser's own zone has usually been filled in
@@ -175,6 +188,12 @@ export function weekdaysFrom(value: string): number[] {
 export function bookingPayloadFrom(form: AgentFormValues) {
   return {
     enabled: form.bookingEnabled === "true",
+    calendar: normalizeCalendar(form.bookingCalendar),
+    // Sent as the owner left it, even where the chosen calendar asks for
+    // nothing. Whether a setting applies is a fact about the provider, and on a
+    // load that could not list the providers the only thing dropping it would
+    // achieve is losing an event type id somebody typed last week.
+    calendar_setting: form.bookingCalendarSetting.trim(),
     button_label: form.bookingLabel.trim(),
     title: form.bookingTitle.trim(),
     duration_minutes: wholeNumber(form.bookingDuration, 30),
@@ -214,14 +233,22 @@ function noticePhrase(hours: number) {
 
 // One sentence describing what a visitor is actually offered, so the writer can
 // check the settings without publishing them at somebody's real customers.
-export function bookingPreviewSentence(form: AgentFormValues, agentName: string): string {
+export function bookingPreviewSentence(form: AgentFormValues, agentName: string, calendars: CalendarOption[]): string {
   const booking = bookingPayloadFrom(form);
   // Both defaults are the server's own: resolveBooking names the button and
   // createBooking names the calendar event when the owner leaves them blank.
   const label = booking.button_label || "Book an appointment";
   const title = booking.title || `Appointment via ${agentName.trim() || "your agent"}`;
   const zone = booking.timezone ? `in ${booking.timezone}` : "in a time zone you have not chosen yet";
-  return `Visitors tap “${label}” and are offered ${booking.duration_minutes}-minute appointments ${weekdayPhrase(booking.weekdays)}, ${hourLabel(booking.start_hour)} to ${hourLabel(booking.end_hour)} ${zone}, ${noticePhrase(booking.notice_hours)} and up to ${booking.lead_days_ahead} days ahead. Each one is written into your Google Calendar as “${title}”.`;
+  const offer = `Visitors tap “${label}” and are offered ${booking.duration_minutes}-minute appointments ${weekdayPhrase(booking.weekdays)}, ${hourLabel(booking.start_hour)} to ${hourLabel(booking.end_hour)} ${zone}, ${noticePhrase(booking.notice_hours)} and up to ${booking.lead_days_ahead} days ahead.`;
+  const chosen = calendarOptionFor(calendars, booking.calendar);
+  const name = calendarLabelFor(calendars, booking.calendar);
+  // Only a provider we could look up may be described as finishing elsewhere,
+  // and only one that books in the chat may be promised an event. An unlisted
+  // calendar gets the sentence that is true either way.
+  if (chosen && !chosen.booksInChat) return `${offer} The time they pick is finished on ${name}, not here, so no event is written for them.`;
+  if (!chosen) return `${offer} Each one goes to ${name}.`;
+  return `${offer} Each one is written into your ${name} as “${title}”.`;
 }
 
 // A field the writer has already edited keeps what they typed. Everything else
@@ -296,6 +323,8 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
     handoffAutoOffer: "0",
     handoffNotifyEmail: "",
     bookingEnabled: "false",
+    bookingCalendar: defaultCalendarToolkit,
+    bookingCalendarSetting: "",
     bookingLabel: "",
     bookingTitle: "",
     // Filled from the browser after mount, never during render.
@@ -341,10 +370,15 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
     };
   }
 
-  // The prerequisite is asked about once, and only once the writer is somewhere
-  // the answer matters: the Appointments section, or any agent that already has
-  // booking switched on and could be published from any section.
-  const calendar = useCalendarConnection(section === "appointments" || form.bookingEnabled === "true");
+  // Both are asked about once, and only once the writer is somewhere the answer
+  // matters: the Appointments section, or any agent that already has booking
+  // switched on and could be published from any section.
+  const appointmentsInPlay = section === "appointments" || form.bookingEnabled === "true";
+  const calendars = useCalendarOptions(appointmentsInPlay);
+  // The connection question is about the calendar THIS agent books into, so
+  // switching the chooser asks it again about the new one.
+  const calendar = useCalendarConnection(appointmentsInPlay, form.bookingCalendar);
+  const calendarName = calendarLabelFor(calendars.options, form.bookingCalendar);
 
   // The owner's own zone is right for nearly all of them, but reading it during
   // render would make the server's HTML disagree with the browser's. It is read
@@ -443,7 +477,7 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
     if (form.bookingEnabled === "true" && (calendar.state === "missing" || calendar.state === "pending")) {
       setSection("appointments");
       setFieldMessages({});
-      setStatusMessage("Connect Google Calendar before publishing appointments");
+      setStatusMessage(`Connect ${calendarName} before publishing appointments`);
       setStatus("error");
       return;
     }
@@ -476,8 +510,8 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
     }
   }
 
-  async function addKnowledge(title: string, content: string) {
-    if (!beginAction("knowledge")) return;
+  async function addKnowledge(title: string, content: string): Promise<boolean> {
+    if (!beginAction("knowledge")) return false;
     const next = [...knowledge, { type: "text", title, content, status: "ready" }];
     if (demoMode) setKnowledge(next);
     beginSave();
@@ -501,6 +535,7 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
         setRevision(saved.revision);
       }
       setStatus("saved");
+      return true;
     } catch (error) {
       if (!demoMode && recordId) {
         try {
@@ -510,6 +545,7 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
         } catch { /* Keep the last confirmed server state. */ }
       }
       reportFailure(error);
+      return false;
     } finally {
       finishAction();
     }
@@ -517,7 +553,7 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
 
   return (
     <div className="-m-4 min-h-[calc(100vh-4rem)] bg-white sm:-m-6 lg:-m-8">
-      <div className="flex min-h-[4rem] flex-wrap items-center gap-y-2 border-b px-4 py-2 sm:h-16 sm:flex-nowrap sm:px-6 sm:py-0"><Button variant="ghost" size="icon" asChild><Link href="/app/agents"><ArrowLeft className="h-4 w-4" /></Link></Button><div className="ml-2 min-w-0 flex-1"><div className="flex min-w-0 items-center gap-2"><h1 className="truncate text-sm font-semibold text-slate-900">{existing ? `Edit ${form.name}` : "Create agent"}</h1><Badge variant={published ? "success" : "secondary"}>{published ? "Live" : "Draft"}</Badge></div><p className={cn("text-[10px]", status === "error" ? "text-red-500" : "text-slate-400")}>{status === "saving" ? "Saving draft…" : status === "saved" ? "Draft saved" : status === "error" ? (statusMessage || "Could not save — try again") : "Review and save your draft"}</p></div><div className="ml-auto flex shrink-0 basis-full justify-end gap-2 sm:basis-auto"><Button variant="outline" size="sm" onClick={saveDraftAction} loading={pendingAction === "save"} loadingLabel="Saving the draft" disabled={pendingAction !== "" && pendingAction !== "save"} className="hidden sm:inline-flex"><Save className="mr-1.5 h-3.5 w-3.5" /> Save</Button><Button variant="outline" size="sm" onClick={testAgent} loading={pendingAction === "test"} loadingLabel="Saving and testing the agent" disabled={pendingAction !== "" && pendingAction !== "test"}><Play className="mr-1.5 h-3.5 w-3.5" /> Test</Button><Button size="sm" onClick={publish} loading={pendingAction === "publish"} loadingLabel={published ? "Publishing your updates" : "Publishing the agent"} disabled={pendingAction !== "" && pendingAction !== "publish"}><Sparkles className="mr-1.5 h-3.5 w-3.5" /> {published ? "Publish updates" : "Publish agent"}</Button></div></div>
+      <div className="flex min-h-[4rem] flex-wrap items-center gap-y-2 border-b px-4 py-2 sm:h-16 sm:flex-nowrap sm:px-6 sm:py-0"><Button variant="ghost" size="icon" asChild><Link href="/app/agents"><ArrowLeft className="h-4 w-4" /></Link></Button><div className="ml-2 min-w-0 flex-1"><div className="flex min-w-0 items-center gap-2"><h1 className="truncate text-sm font-semibold text-slate-900">{existing ? `Edit ${form.name}` : "Create agent"}</h1><Badge variant={published ? "success" : "secondary"}>{published ? "Live" : "Draft"}</Badge></div><p className={cn("text-[10px]", status === "error" ? "text-red-500" : "text-slate-400")}>{status === "saving" ? "Saving draft…" : status === "saved" ? "Draft saved" : status === "error" ? (statusMessage || "Could not save — try again") : "Review and save your draft"}</p></div><div className="ml-auto flex shrink-0 basis-full justify-end gap-2 sm:basis-auto"><Button variant="outline" size="sm" onClick={saveDraftAction} loading={pendingAction === "save"} loadingLabel="Saving the draft" disabled={pendingAction !== "" && pendingAction !== "save"}><Save className="mr-1.5 h-3.5 w-3.5" /> Save</Button><Button variant="outline" size="sm" onClick={testAgent} loading={pendingAction === "test"} loadingLabel="Saving and testing the agent" disabled={pendingAction !== "" && pendingAction !== "test"}><Play className="mr-1.5 h-3.5 w-3.5" /> Test</Button><Button size="sm" onClick={publish} loading={pendingAction === "publish"} loadingLabel={published ? "Publishing your updates" : "Publishing the agent"} disabled={pendingAction !== "" && pendingAction !== "publish"}><Sparkles className="mr-1.5 h-3.5 w-3.5" /> <span className="hidden sm:inline">{published ? "Publish updates" : "Publish agent"}</span><span className="sm:hidden">Publish</span></Button></div></div>
       <div className="grid min-h-[calc(100vh-8rem)] lg:grid-cols-[205px_1fr_390px] xl:grid-cols-[230px_1fr_440px]">
         <aside className="hidden border-r bg-slate-50/60 p-3 lg:block">
           <p className="px-3 py-3 text-[10px] font-bold uppercase tracking-[.16em] text-slate-400">Configure</p>
@@ -534,7 +570,7 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
             {section === "knowledge" && <KnowledgeSection knowledge={knowledge} onAdd={addKnowledge} messages={fieldMessages} saving={pendingAction === "knowledge"} blocked={pendingAction !== "" && pendingAction !== "knowledge"} agentId={recordId} />}
             {section === "appearance" && <AppearanceSection primaryColor={form.primaryColor} setPrimaryColor={updateField("primaryColor")} accent={form.accent} setAccent={updateField("accent")} launcherText={form.launcherText} setLauncherText={updateField("launcherText")} widgetPosition={form.widgetPosition} setWidgetPosition={updateField("widgetPosition")} allowedDomain={form.allowedDomain} setAllowedDomain={updateField("allowedDomain")} messages={fieldMessages} />}
             {section === "handoff" && <HandoffSection enabled={form.handoffEnabled === "true"} setEnabled={(next) => updateField("handoffEnabled")(next ? "true" : "false")} number={form.handoffNumber} setNumber={updateField("handoffNumber")} label={form.handoffLabel} setLabel={updateField("handoffLabel")} message={form.handoffMessage} setMessage={updateField("handoffMessage")} availability={form.handoffAvailability} setAvailability={updateField("handoffAvailability")} triggers={form.handoffTriggers} setTriggers={updateField("handoffTriggers")} autoOffer={form.handoffAutoOffer} setAutoOffer={updateField("handoffAutoOffer")} notifyEmail={form.handoffNotifyEmail} setNotifyEmail={updateField("handoffNotifyEmail")} messages={fieldMessages} />}
-            {section === "appointments" && <BookingSection enabled={form.bookingEnabled === "true"} setEnabled={(next) => updateField("bookingEnabled")(next ? "true" : "false")} timezone={form.bookingTimezone} setTimezone={updateField("bookingTimezone")} duration={form.bookingDuration} setDuration={updateField("bookingDuration")} startHour={form.bookingStartHour} setStartHour={updateField("bookingStartHour")} endHour={form.bookingEndHour} setEndHour={updateField("bookingEndHour")} weekdays={form.bookingWeekdays} setWeekdays={updateField("bookingWeekdays")} leadDays={form.bookingLeadDays} setLeadDays={updateField("bookingLeadDays")} noticeHours={form.bookingNoticeHours} setNoticeHours={updateField("bookingNoticeHours")} label={form.bookingLabel} setLabel={updateField("bookingLabel")} title={form.bookingTitle} setTitle={updateField("bookingTitle")} preview={bookingPreviewSentence(form, form.name)} calendar={calendar} messages={fieldMessages} />}
+            {section === "appointments" && <BookingSection enabled={form.bookingEnabled === "true"} setEnabled={(next) => updateField("bookingEnabled")(next ? "true" : "false")} calendars={calendars} calendarToolkit={form.bookingCalendar} setCalendarToolkit={updateField("bookingCalendar")} calendarSetting={form.bookingCalendarSetting} setCalendarSetting={updateField("bookingCalendarSetting")} timezone={form.bookingTimezone} setTimezone={updateField("bookingTimezone")} duration={form.bookingDuration} setDuration={updateField("bookingDuration")} startHour={form.bookingStartHour} setStartHour={updateField("bookingStartHour")} endHour={form.bookingEndHour} setEndHour={updateField("bookingEndHour")} weekdays={form.bookingWeekdays} setWeekdays={updateField("bookingWeekdays")} leadDays={form.bookingLeadDays} setLeadDays={updateField("bookingLeadDays")} noticeHours={form.bookingNoticeHours} setNoticeHours={updateField("bookingNoticeHours")} label={form.bookingLabel} setLabel={updateField("bookingLabel")} title={form.bookingTitle} setTitle={updateField("bookingTitle")} preview={bookingPreviewSentence(form, form.name, calendars.options)} calendar={calendar} messages={fieldMessages} />}
             <div className="mt-8 flex justify-between border-t pt-5"><Button variant="ghost" size="sm" disabled={section === "identity"} onClick={() => setSection(sections[Math.max(0, sections.findIndex((item) => item.id === section) - 1)].id)}>Previous</Button><Button size="sm" onClick={() => { const index = sections.findIndex((item) => item.id === section); if (index < sections.length - 1) setSection(sections[index + 1].id); }}>Next section <ChevronRight className="ml-1.5 h-3.5 w-3.5" /></Button></div>
           </div>
         </section>
@@ -578,10 +614,10 @@ function GoalSection({ systemPrompt, setSystemPrompt, messages }: { systemPrompt
   return <><SectionHeading eyebrow="Goal & behavior" title="Give every conversation a clear purpose." description="These instructions are persisted with the agent and used by the private preview and published widget." /><div className="space-y-5"><div><p className="text-xs font-semibold text-slate-800">Start from a template</p><div className="mt-3 grid gap-2 sm:grid-cols-3">{templates.map((template) => <button key={template.title} type="button" onClick={() => setSystemPrompt(template.prompt)} className="rounded-xl border p-3 text-left text-xs font-semibold text-slate-700 transition hover:border-indigo-300 hover:bg-indigo-50">{template.title}</button>)}</div></div><div className="space-y-2"><Label htmlFor="agent-instructions">Agent instructions</Label><Textarea id="agent-instructions" value={systemPrompt} onChange={(event) => setSystemPrompt(event.target.value)} className="min-h-[180px]" /><FieldMessage message={messages.system_prompt} /><p className="text-[10px] text-slate-400">Keep instructions focused. Knowledge sources provide the factual context.</p></div></div></>;
 }
 
-function KnowledgeSection({ knowledge, onAdd, messages, saving, blocked, agentId }: { knowledge: AgentRecord["knowledge"]; onAdd: (title: string, content: string) => Promise<void>; messages: Record<string, string>; saving: boolean; blocked: boolean; agentId: string }) {
+function KnowledgeSection({ knowledge, onAdd, messages, saving, blocked, agentId }: { knowledge: AgentRecord["knowledge"]; onAdd: (title: string, content: string) => Promise<boolean>; messages: Record<string, string>; saving: boolean; blocked: boolean; agentId: string }) {
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
-  return <><SectionHeading eyebrow="Knowledge" title="Teach your agent what your team already knows." description="Add approved text Garuda can use when it answers. Each source is stored and processed separately." /><div className="space-y-4">{knowledge.map((source, index) => { const sourceStatus = source.status || "ready"; return <div key={source.id || `${source.title}-${index}`} className="flex items-center gap-3 rounded-xl border p-4"><span className="grid h-10 w-10 place-items-center rounded-xl bg-indigo-50 text-indigo-600"><BrainCircuit className="h-5 w-5" /></span><div className="min-w-0 flex-1"><p className="truncate text-xs font-semibold text-slate-900">{source.title}</p><p className="mt-1 text-[10px] text-slate-400">Text source · {source.content.length} characters</p></div><Badge variant={sourceStatus === "ready" ? "success" : sourceStatus === "failed" ? "warning" : "secondary"} className="capitalize">{sourceStatus}</Badge></div>; })}<div className="rounded-xl border border-dashed p-4"><p className="flex items-center gap-2 text-xs font-semibold text-slate-800"><UploadCloud className="h-4 w-4 text-indigo-600" /> Add a text knowledge source</p><div className="mt-3 space-y-2"><Input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Source title, e.g. Pricing FAQ" /><Textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="Paste accurate product, service, pricing or policy information…" className="min-h-[110px]" /><FieldMessage message={messages.knowledge} /><Button variant="outline" loading={saving} loadingLabel="Saving the knowledge source" disabled={blocked || !title.trim() || !content.trim()} onClick={async () => { await onAdd(title.trim(), content.trim()); setTitle(""); setContent(""); }}>Add and save source</Button></div></div><WebsiteImport agentId={agentId} onSave={onAdd} blocked={blocked} /></div></>;
+  return <><SectionHeading eyebrow="Knowledge" title="Teach your agent what your team already knows." description="Add approved text Garuda can use when it answers. Each source is stored and processed separately." /><div className="space-y-4">{knowledge.map((source, index) => { const sourceStatus = source.status || "ready"; return <div key={source.id || `${source.title}-${index}`} className="flex items-center gap-3 rounded-xl border p-4"><span className="grid h-10 w-10 place-items-center rounded-xl bg-indigo-50 text-indigo-600"><BrainCircuit className="h-5 w-5" /></span><div className="min-w-0 flex-1"><p className="truncate text-xs font-semibold text-slate-900">{source.title}</p><p className="mt-1 text-[10px] text-slate-400">Text source · {source.content.length} characters</p></div><Badge variant={sourceStatus === "ready" ? "success" : sourceStatus === "failed" ? "warning" : "secondary"} className="capitalize">{sourceStatus}</Badge></div>; })}<div className="rounded-xl border border-dashed p-4"><p className="flex items-center gap-2 text-xs font-semibold text-slate-800"><UploadCloud className="h-4 w-4 text-indigo-600" /> Add a text knowledge source</p><div className="mt-3 space-y-2"><Input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Source title, e.g. Pricing FAQ" /><Textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="Paste accurate product, service, pricing or policy information…" className="min-h-[110px]" /><FieldMessage message={messages.knowledge} /><Button variant="outline" loading={saving} loadingLabel="Saving the knowledge source" disabled={blocked || !title.trim() || !content.trim()} onClick={async () => { if (await onAdd(title.trim(), content.trim())) { setTitle(""); setContent(""); } }}>Add and save source</Button></div></div><WebsiteImport agentId={agentId} onSave={onAdd} blocked={blocked} /></div></>;
 }
 
 function AppearanceSection({ primaryColor, setPrimaryColor, accent, setAccent, launcherText, setLauncherText, widgetPosition, setWidgetPosition, allowedDomain, setAllowedDomain, messages }: { primaryColor: string; setPrimaryColor: (value: string) => void; accent: string; setAccent: (value: string) => void; launcherText: string; setLauncherText: (value: string) => void; widgetPosition: string; setWidgetPosition: (value: string) => void; allowedDomain: string; setAllowedDomain: (value: string) => void; messages: Record<string, string> }) {
@@ -691,6 +727,11 @@ function HandoffSection({ enabled, setEnabled, number, setNumber, label, setLabe
 type BookingSectionProps = {
   enabled: boolean;
   setEnabled: (value: boolean) => void;
+  calendars: CalendarOptions;
+  calendarToolkit: string;
+  setCalendarToolkit: (value: string) => void;
+  calendarSetting: string;
+  setCalendarSetting: (value: string) => void;
   timezone: string;
   setTimezone: (value: string) => void;
   duration: string;
@@ -740,21 +781,84 @@ function noticeChoiceLabel(hours: number) {
   return `${hours} hour${hours === 1 ? "" : "s"}`;
 }
 
-// The one thing that decides whether any of this works. Appointments read and
-// write the customer's own Google Calendar, so a workspace without one gets a
-// button that fails in front of a visitor.
-function CalendarPrerequisite({ calendar }: { calendar: CalendarConnection }) {
+// WHICH calendar this agent books into. One per agent, deliberately: "when are
+// you free" has to have a single answer, so this is a choice and not a set of
+// switches.
+//
+// Everything shown here is the server's own answer. The list decides what may be
+// chosen, the provider's own words label the one field it asks for, and a
+// calendar that finishes the booking on its own page says so before the owner
+// picks it rather than after their visitor has been sent somewhere unexpected.
+function CalendarChooser({ calendars, toolkit, setToolkit, setting, setSetting, messages }: { calendars: CalendarOptions; toolkit: string; setToolkit: (value: string) => void; setting: string; setSetting: (value: string) => void; messages: Record<string, string> }) {
+  const chosen = normalizeCalendar(toolkit);
+  const option = calendarOptionFor(calendars.options, chosen);
+  // The chosen calendar is always among the options, even when the list could
+  // not be loaded. Same reason as withCurrent above: a select painting its first
+  // option while the form still holds another is how somebody saves a diary they
+  // never picked.
+  const choices = calendars.options.map((entry) => ({ toolkit: entry.toolkit, label: entry.label }));
+  if (!choices.some((entry) => entry.toolkit === chosen)) choices.push({ toolkit: chosen, label: calendarLabelFor(calendars.options, chosen) });
+
+  return (
+    <div className="space-y-4">
+      <div className="space-y-2">
+        <Label htmlFor="booking-calendar">Calendar to book into</Label>
+        <select id="booking-calendar" value={chosen} onChange={(event) => setToolkit(event.target.value)} disabled={calendars.state !== "ready"} className="h-11 w-full rounded-lg border bg-white px-3 text-sm disabled:bg-slate-50 disabled:text-slate-500">
+          {choices.map((entry) => <option key={entry.toolkit} value={entry.toolkit}>{entry.label}</option>)}
+        </select>
+        <FieldMessage message={messages["booking.calendar"]} />
+        <p className="text-[10px] leading-4 text-slate-400">{option?.useCase || "One agent books into one calendar, so every answer it gives about your free time comes from the same place."}</p>
+      </div>
+
+      {calendars.state === "unavailable" && (
+        <div role="alert" className="rounded-xl border border-amber-300 bg-amber-50 p-4">
+          <p className="flex items-center gap-1.5 text-[10px] font-semibold text-amber-900"><AlertTriangle className="h-3.5 w-3.5 shrink-0" /> The calendars you can choose from could not be listed</p>
+          <p className="mt-2 text-[10px] leading-4 text-amber-800">{calendars.detail} This agent keeps the calendar it already has, and anything that calendar needs configuring cannot be shown until the list loads.</p>
+          <Button variant="ghost" size="sm" className="mt-2" onClick={calendars.reload}><RefreshCw className="mr-1.5 h-3.5 w-3.5" /> Try again</Button>
+        </div>
+      )}
+
+      {option?.settingLabel && (
+        <div className="space-y-2">
+          <Label htmlFor="booking-calendar-setting">{option.settingLabel}</Label>
+          <Input id="booking-calendar-setting" value={setting} onChange={(event) => setSetting(event.target.value)} autoComplete="off" spellCheck={false} aria-describedby="booking-calendar-setting-hint" />
+          <FieldMessage message={messages["booking.calendar_setting"]} />
+          <p id="booking-calendar-setting-hint" className="text-[10px] leading-4 text-slate-400">{option.settingHint} {option.label} cannot offer a time without it, and this draft will not save while it is empty.</p>
+        </div>
+      )}
+
+      {option && !option.booksInChat && (
+        <div className="rounded-xl border border-amber-300 bg-amber-50 p-4">
+          <p className="flex items-center gap-1.5 text-[10px] font-semibold text-amber-900"><ExternalLink className="h-3.5 w-3.5 shrink-0" /> {option.label} finishes the booking on its own page</p>
+          <p className="mt-2 text-[10px] leading-4 text-amber-800">{option.note || `${option.label} completes the booking on its own page, so the visitor finishes there rather than in the chat.`}</p>
+          <p className="mt-2 text-[10px] leading-4 text-amber-800">Garuda never writes the event, so nothing is booked until the visitor finishes on that page — and an appointment made there does not appear in your Appointments list, which only holds what Garuda booked.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The one thing that decides whether any of this works. Appointments run against
+// the calendar chosen above, so a workspace that has connected a DIFFERENT one
+// is still a button that fails in front of a visitor.
+function CalendarPrerequisite({ calendar, label, option }: { calendar: CalendarConnection; label: string; option?: CalendarOption }) {
   const connected = calendar.state === "connected";
   const blocked = calendar.state === "missing" || calendar.state === "pending";
-  const heading = connected ? "Google Calendar is connected"
-    : calendar.state === "checking" ? "Checking your Google Calendar connection…"
-    : calendar.state === "missing" ? "Connect Google Calendar before you switch this on"
-    : calendar.state === "pending" ? "Finish connecting Google Calendar"
-    : "Appointments need a connected Google Calendar";
-  const body = connected ? "Garuda reads free time from this calendar and writes each appointment into it."
+  // Only a provider the list described may be promised an event: an unlisted one
+  // gets the half of the sentence that is true of all of them.
+  const connectedBody = !option ? `Garuda reads free time from this calendar to offer the visitor a slot.`
+    : option.booksInChat ? "Garuda reads free time from this calendar and writes each appointment into it."
+    : `Garuda reads your availability from ${label}; the visitor finishes the booking on its own page.`;
+  const heading = connected ? `${label} is connected`
+    : calendar.state === "checking" ? `Checking your ${label} connection…`
+    : calendar.state === "missing" ? `Connect ${label} before you switch this on`
+    : calendar.state === "pending" ? `Finish connecting ${label}`
+    : `Appointments need a connected ${label}`;
+  const body = connected ? connectedBody
     : calendar.state === "checking" ? "Reading your connected accounts."
-    : calendar.state === "missing" ? "This workspace has no Google Calendar connection, so nothing on this page can be offered to a visitor yet."
-    : calendar.detail || "Connect one on the Integrations page. Until then a visitor who taps the button gets an apology instead of an appointment.";
+    : calendar.state === "missing" ? `This workspace has no ${label} connection, so nothing on this page can be offered to a visitor yet. Connecting a different calendar does not help: this agent books into ${label} and nowhere else.`
+    : calendar.state === "pending" ? `The ${label} connection was started but never finished signing in, so it cannot be used yet.`
+    : calendar.detail || `Connect ${label} on the Integrations page. Until then a visitor who taps the button gets an apology instead of an appointment.`;
   return (
     <div role={blocked ? "alert" : undefined} className={cn("rounded-xl border p-4", connected ? "border-emerald-200 bg-emerald-50" : blocked ? "border-amber-300 bg-amber-50" : "border-slate-200 bg-slate-50")}>
       <p className={cn("flex items-center gap-1.5 text-[10px] font-semibold", connected ? "text-emerald-800" : blocked ? "text-amber-900" : "text-slate-700")}>
@@ -772,7 +876,7 @@ function CalendarPrerequisite({ calendar }: { calendar: CalendarConnection }) {
   );
 }
 
-function BookingSection({ enabled, setEnabled, timezone, setTimezone, duration, setDuration, startHour, setStartHour, endHour, setEndHour, weekdays, setWeekdays, leadDays, setLeadDays, noticeHours, setNoticeHours, label, setLabel, title, setTitle, preview, calendar, messages }: BookingSectionProps) {
+function BookingSection({ enabled, setEnabled, calendars, calendarToolkit, setCalendarToolkit, calendarSetting, setCalendarSetting, timezone, setTimezone, duration, setDuration, startHour, setStartHour, endHour, setEndHour, weekdays, setWeekdays, leadDays, setLeadDays, noticeHours, setNoticeHours, label, setLabel, title, setTitle, preview, calendar, messages }: BookingSectionProps) {
   const [zoneChoices, setZoneChoices] = useState<string[]>([]);
   const selectedDays = weekdaysFrom(weekdays);
 
@@ -791,20 +895,29 @@ function BookingSection({ enabled, setEnabled, timezone, setTimezone, duration, 
     setWeekdays(next.join(","));
   }
 
-  const ready = enabled && Boolean(timezone.trim()) && calendar.state === "connected";
+  const chosen = calendarOptionFor(calendars.options, calendarToolkit);
+  const calendarName = calendarLabelFor(calendars.options, calendarToolkit);
+  // A setting the chosen calendar asks for and has not been given is refused by
+  // the server on save, so it is one of the things standing between this draft
+  // and a working button.
+  const settingMissing = Boolean(chosen?.settingLabel) && !calendarSetting.trim();
+  const ready = enabled && Boolean(timezone.trim()) && !settingMissing && calendar.state === "connected";
   const blockedReason = !enabled ? "Switch appointments on, then publish."
     : !timezone.trim() ? "Choose the time zone your working hours are in — without it the widget will not offer appointments at all."
+    : settingMissing ? `${calendarName} needs its ${(chosen?.settingLabel || "").toLowerCase()} before it can offer a single time.`
     : calendar.state === "connected" ? ""
-    : calendar.state === "checking" ? "Waiting on the Google Calendar check."
-    : "Connect Google Calendar on the Integrations page. Publishing without it gives visitors a button that cannot book anything.";
+    : calendar.state === "checking" ? `Waiting on the ${calendarName} check.`
+    : `Connect ${calendarName} on the Integrations page. Publishing without it gives visitors a button that cannot book anything.`;
 
-  return <><SectionHeading eyebrow="Appointments" title="Let visitors book a real slot in your calendar." description="The assistant offers times that are genuinely free in your Google Calendar, and the one the visitor picks becomes an event in it before they close the tab." />
+  return <><SectionHeading eyebrow="Appointments" title="Let visitors book a real slot in your calendar." description="The assistant offers times that are genuinely free in the calendar you choose below, and the visitor picks one before they close the tab." />
     <div className="space-y-6">
-      <CalendarPrerequisite calendar={calendar} />
+      <CalendarChooser calendars={calendars} toolkit={calendarToolkit} setToolkit={setCalendarToolkit} setting={calendarSetting} setSetting={setCalendarSetting} messages={messages} />
+
+      <CalendarPrerequisite calendar={calendar} label={calendarName} option={chosen} />
 
       <label htmlFor="booking-enabled" className="flex cursor-pointer items-start gap-3 rounded-xl border p-4 transition hover:border-indigo-200">
         <input id="booking-enabled" type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300 text-indigo-600" />
-        <span><span className="block text-xs font-semibold text-slate-900">Let visitors book appointments</span><span className="mt-1 block text-[10px] leading-4 text-slate-500">Each booking becomes a real event in the Google Calendar you connected — the same diary you and your team work from. Garuda only ever creates an event a visitor explicitly chose, but there is no undo from here.</span></span>
+        <span><span className="block text-xs font-semibold text-slate-900">Let visitors book appointments</span><span className="mt-1 block text-[10px] leading-4 text-slate-500">{chosen && !chosen.booksInChat ? `Visitors are offered your real availability and finish the booking on ${calendarName}'s own page rather than in the chat, so nothing is written into a diary from here.` : `Each booking becomes a real event in ${calendarName} — the same diary you and your team work from. Garuda only ever creates an event a visitor explicitly chose, but there is no undo from here.`}</span></span>
       </label>
 
       <div className="space-y-2">

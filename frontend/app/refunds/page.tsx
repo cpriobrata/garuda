@@ -16,13 +16,20 @@ import { faqPageJsonLd, pageMetadata, PLAN_LIMITS, PLAN_PRICE_USD } from "@/lib/
  *   - a failed payment stops the agents           backend/internal/api/billing.go applyStripeEvent (past_due)
  *   - cancelling deletes nothing                  no deletion path exists anywhere in the API
  *
- * OWNER DECISION — THE REFUND WINDOW.
- * Nothing in the product enforces a refund window, and no window has been agreed,
- * so this page states none. Inventing one ("14 days") would be a promise the owner
- * never made. When Ravan AI decides on a window, replace the paragraph marked
- * "REFUND WINDOW" in the "partial-refunds" section below with the rule, and say
- * plainly how it is counted: from the charge, or from the day the workspace was
- * created. Until then the honest answer is that a person reads every request.
+ * THE REFUND POLICY — decided by the owner, 30 August 2026: Garuda does not give
+ * refunds. Cancelling stops the next charge and the period already paid for runs
+ * to its end.
+ *
+ * It is stated plainly and early rather than buried, for the owner's sake as much
+ * as the customer's: a no-refund policy a customer only discovers after paying is
+ * the one that produces a chargeback, and a chargeback costs the fee, the amount,
+ * and a mark against the Stripe account. Stripe requires the policy be clearly
+ * published; this page is where.
+ *
+ * The single carve-out is not a softening of it. Consumer law in some countries
+ * gives a right to cancel a digital purchase that no contract term can remove,
+ * and a clause claiming otherwise is the kind a regulator strikes out whole.
+ * Naming the exception is what makes the rest of the clause stand up.
  *
  * OWNER DECISION — THE REPLY TARGET.
  * Garuda publishes no support SLA and nothing enforces a response time, so this
@@ -38,7 +45,7 @@ const SUPPORT_EMAIL = "info@ravan.ai";
 export const metadata: Metadata = pageMetadata({
   title: "Refunds and cancellation",
   description:
-    "How the $17 monthly Garuda subscription is cancelled, what happens to access and data at the end of a paid period, whether part-months are refunded, how to ask for a refund, and what a failed payment does to a workspace.",
+    "Garuda gives no refunds: payments are final and part-months are not prorated. How the $17 monthly subscription is cancelled, what happens to access and data at the end of a paid period, and what a failed payment does to a workspace.",
   path: PATH,
   socialTitle: "Garuda refunds and cancellation policy",
 });
@@ -148,51 +155,59 @@ const answers = [
     id: "partial-refunds",
     question: "Do you refund part of a month?",
     answer:
-      "Not automatically. Cancelling stops the next charge and leaves the month you already paid for running to its end, and nothing in the product prorates a part-month or issues a refund on its own. To get money back for a period you have been billed for, you have to ask, and a person decides.",
+      "No. Garuda does not give refunds, in whole or in part. Cancelling stops the next charge and the period you have already paid for runs to its end, so nothing is cut short — but the payment already taken is not returned.",
     body: (
       <>
-        {/* REFUND WINDOW — see the OWNER DECISION note at the top of this file. */}
-        <div className="rounded-xl border border-slate-200 bg-slate-50 p-5">
-          <p className="text-sm font-semibold text-slate-900">There is no published refund window yet</p>
+        <div className="rounded-xl border border-slate-300 bg-slate-50 p-5">
+          <p className="text-sm font-semibold text-slate-900">Garuda does not give refunds</p>
           <p className="mt-2 text-[15px] leading-7 text-slate-600">
-            Garuda has not agreed a fixed number of days inside which a refund is automatic, so this page does not state one
-            rather than inventing a promise. Until a window is published here, every request is judged on what happened, not on
-            a deadline. Asking early always helps.
+            Payments for the ${PLAN_PRICE_USD} monthly plan are final. Part-months are not prorated, unused time is not
+            refunded, and a period that has been charged for is not returned — whether the workspace was used heavily, lightly
+            or not at all. This is the whole policy, and it is on this page rather than in the small print because you should
+            know it before you pay, not after.
+          </p>
+          <p className="mt-3 text-[15px] leading-7 text-slate-600">
+            Cancelling is the remedy, and it is immediate in effect: it stops the next charge. Everything you have paid for
+            keeps running to the end of the period you paid for.
           </p>
         </div>
         <p>
-          Two situations are worth separating. If Garuda did not do what this site says it does, say so and ask — that is the
-          case a refund exists for. If the product worked and you simply stopped using it, cancelling is the remedy: it ends the
-          next charge, and the month you already paid for is one you already had.
+          One exception, and it is the law&rsquo;s rather than ours: if the country you buy from gives you a statutory right to
+          cancel a digital purchase and get your money back, you keep that right. Nothing on this page removes it. Write to{" "}
+          {SUPPORT_EMAIL} from the account email and say which right you are exercising.
+        </p>
+        <p>
+          If Garuda took money for something that does not work, that is a different conversation from a refund request, and it
+          starts the same way — write to {SUPPORT_EMAIL} and describe what happened.
         </p>
       </>
     ),
   },
   {
     id: "how-to-ask",
-    question: "How do I ask for a refund?",
-    answer: `Email ${SUPPORT_EMAIL} from the address on the account. Say what you want refunded and why, and include the charge details so the request can be matched to a payment without a round trip.`,
+    question: "What should I do instead of asking for a refund?",
+    answer: `Cancel. It takes one click in Billing, it stops the next charge, and everything you have paid for keeps working until the period ends. Because Garuda gives no refunds, cancelling early is the only thing that changes what you are charged — so do it as soon as you know.`,
     body: (
       <>
         <FactTable
-          caption="What to include in a refund request"
-          head={["Include", "Why it matters"]}
+          caption="What cancelling does, and what it does not"
+          head={["What happens", "Detail"]}
           rows={[
-            ["The account email", "It is how a workspace is identified. Sending from that address is the quickest evidence"],
-            ["The date and amount of the charge", "Matches the request to one payment rather than to a subscription"],
-            ["The invoice number", "Every invoice is listed in Billing in your portal, and Stripe emails the receipt too"],
-            ["What went wrong", "A refund decision is a judgement about what happened, so the account of it is the request"],
-            ["Whether you have already cancelled", "A refund and a cancellation are separate actions; neither implies the other"],
+            ["The next charge stops", "Immediately, from the moment you cancel. There is nothing else to do"],
+            ["This period keeps running", `Your agents stay live and answering until the date shown in Billing`],
+            ["The payment already taken stays taken", "It is not prorated and not returned. That is the policy above"],
+            ["Nothing is deleted", "Agents, knowledge, conversations and every captured lead stay in the workspace"],
+            ["You can come back", "Resume the plan before the period ends and nothing goes quiet at all"],
           ]}
         />
         <p>
-          Garuda offers no support SLA, and no response time is promised here — see{" "}
+          If something is genuinely broken, that is worth writing about whatever the refund policy says — email {SUPPORT_EMAIL}{" "}
+          from the account address with what happened and when. Garuda publishes no support SLA and no response time is promised
+          here; see{" "}
           <Link href="/support" className="font-medium text-indigo-700 underline underline-offset-4">
             the support page
           </Link>{" "}
-          for how that works. If your request is time-critical, say so in the subject line. A refund, when it is agreed, is
-          returned by Stripe to the card that paid, and the time it takes to appear is the card issuer&rsquo;s, not
-          Garuda&rsquo;s.
+          for how that works.
         </p>
       </>
     ),
@@ -231,11 +246,11 @@ const answers = [
         <p>
           Creating a Garuda account and signing in are free. What the subscription buys is the ability to build: without an
           active subscription, onboarding, creating an agent and publishing one are all refused, and the widget does not serve.
-          So the sequence is genuinely pay first, build second, and that is worth being blunt about on the page that handles
-          refunds.
+          So the sequence is genuinely pay first, build second — which, with no refunds, is worth being blunt about on this
+          page rather than anywhere else.
         </p>
         <p>
-          Before asking for the money back, it is worth ten minutes on{" "}
+          Before you decide it is not for you, it is worth ten minutes on{" "}
           <Link href="/support" className="font-medium text-indigo-700 underline underline-offset-4">
             the support page
           </Link>
@@ -285,7 +300,7 @@ export default function RefundsPage() {
     <SeoPageShell
       eyebrow="Refunds and cancellation"
       title="Cancelling, refunds, and what happens to your money"
-      summary={`Garuda is one USD $${PLAN_PRICE_USD} monthly subscription with no minimum term. Cancel from the Stripe billing portal and your workspace keeps working until the end of the period you paid for. Part-months are not refunded automatically; a refund is a request a person answers, and this page does not invent a deadline for making one.`}
+      summary={`Garuda is one USD ${PLAN_PRICE_USD} monthly subscription with no minimum term and no refunds. Payments are final: part-months are not prorated and unused time is not returned. Cancel whenever you like — it stops the next charge, and your workspace keeps working until the end of the period you have already paid for.`}
       breadcrumb={{ name: "Refunds", path: PATH }}
       reviewed={REVIEWED}
       structuredData={[

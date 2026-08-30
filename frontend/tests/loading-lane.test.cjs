@@ -215,7 +215,7 @@ function deferred() {
 process.env.NEXT_PUBLIC_API_URL = "https://api.example.test";
 
 const { Button } = requireFrontend("components/ui/button.tsx");
-const { createBusyAction, keepBusyUntilNavigation } = requireFrontend("lib/busy-action.ts");
+const { createBusyAction, keepBusyUntilNavigation, useBusyAction } = requireFrontend("lib/busy-action.ts");
 const { garudaApi } = requireFrontend("lib/api.ts");
 const { CheckoutForm } = requireFrontend("components/checkout/checkout-form.tsx");
 const { OnboardingFlow } = requireFrontend("components/onboarding/onboarding-flow.tsx");
@@ -282,6 +282,37 @@ test("an action that navigates stays busy instead of flicking back to idle", asy
   assert.equal(action.isRunning(), true);
 });
 
+// The hook is where the guard has to hold, because the second click carries the
+// handler built by the render that was still idle. If the flag lived in state
+// that closure would read "idle" and start the work a second time.
+test("the handler from the idle render still refuses the second click", async () => {
+  const started = [];
+  const gate = deferred();
+
+  function ConnectButton() {
+    const connect = useBusyAction();
+    return React.createElement(
+      Button,
+      { loading: connect.busy, loadingLabel: "Opening the Slack sign-in", onClick: () => void connect.run(async () => { started.push("connect"); await gate.promise; }) },
+      "Connect",
+    );
+  }
+
+  const view = renderComponent(ConnectButton);
+  const idleRender = view.find((element) => element.type === Button);
+  assert.equal(idleRender.props.loading, false);
+
+  idleRender.props.onClick();
+  idleRender.props.onClick();
+
+  assert.deepEqual(started, ["connect"], "the second click must not open a second sign-in");
+  assert.equal(view.find((element) => element.type === Button).props.loading, true, "and the button is already busy, before anything has been awaited");
+
+  gate.resolve();
+  await settle();
+  assert.equal(view.find((element) => element.type === Button).props.loading, false, "the button comes back when the work is done");
+});
+
 // ---------------------------------------------------------------------------
 // What a busy button renders.
 
@@ -314,6 +345,34 @@ test("a button that renders a link still takes the busy flag without breaking", 
   assert.ok(markup.includes('aria-busy="true"'));
   assert.ok(markup.includes("Open the workspace"));
   assert.ok(markup.startsWith("<a"), "the slot still renders the element it was given");
+});
+
+test("the busy cursor is not cancelled by the rule that disables the pointer", () => {
+  const idle = renderToStaticMarkup(React.createElement(Button, null, "Connect"));
+  const busy = renderToStaticMarkup(React.createElement(Button, { loading: true }, "Connect"));
+
+  assert.ok(idle.includes("disabled:pointer-events-none"), "a button disabled for any other reason still refuses the pointer");
+  assert.ok(!idle.includes("cursor-progress"), "and shows the ordinary cursor");
+
+  assert.ok(busy.includes("cursor-progress"), "a busy button asks for the progress cursor");
+  // An element that takes no pointer events is never the hit target, so the
+  // cursor the person sees is the page's own arrow and the class does nothing.
+  assert.ok(!busy.includes("disabled:pointer-events-none"), "which only appears if the pointer is handed back");
+  assert.ok(busy.includes("disabled:pointer-events-auto"), "the pointer returns for the cursor alone -- the disabled attribute still eats the click");
+});
+
+test("the busy label is announced from a region that was already on the page", () => {
+  const idle = renderToStaticMarkup(React.createElement(Button, null, "Connect"));
+  const busy = renderToStaticMarkup(React.createElement(Button, { loading: true, loadingLabel: "Opening the Slack sign-in" }, "Connect"));
+
+  assert.ok(idle.includes('<span role="status" class="sr-only"></span>'), "the region is on the page while idle, or the first change is read as nothing");
+  assert.ok(busy.includes('<span role="status" class="sr-only">Opening the Slack sign-in</span>'), "and fills with the label the moment the work starts");
+  assert.ok(busy.indexOf('role="status"') > busy.indexOf("</button>"), "it sits outside the button, whose own descendants are presentational");
+
+  const link = renderToStaticMarkup(
+    React.createElement(Button, { asChild: true, loading: true, loadingLabel: "Opening the workspace" }, React.createElement("a", { href: "/app" }, "Open")),
+  );
+  assert.ok(link.includes('<span role="status" class="sr-only">Opening the workspace</span>'), "a busy link says so too");
 });
 
 // ---------------------------------------------------------------------------

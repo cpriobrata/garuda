@@ -7,7 +7,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { ApiError, apiRequest } from "@/lib/api";
+import { ApiError, apiRequest, currentAccessToken } from "@/lib/api";
 
 // The workflow vocabulary the API validates against. Sending anything else is
 // answered with 422, so the export filter and the form both pick from this list.
@@ -55,7 +55,7 @@ export function LeadActions({ connected, onLeadAdded }: { connected: boolean; on
     let objectUrl = "";
     try {
       const query = exportStatus ? `?status=${encodeURIComponent(exportStatus)}` : "";
-      const token = window.sessionStorage.getItem("garuda_access_token");
+      const token = currentAccessToken();
       const response = await fetch(`${apiBaseUrl()}/leads/export${query}`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });

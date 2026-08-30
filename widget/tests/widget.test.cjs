@@ -562,7 +562,75 @@ function listenerRegistry() {
   };
 }
 
-function installFakeBrowser(fetchStub) {
+// A microphone the tests can drive. Everything the widget is required to prove
+// about recording is observable here: whether permission was asked for at all,
+// what the recorder was constructed with, and — the one that matters — whether
+// every track was actually stopped afterwards.
+function createFakeMicrophone(settings) {
+  settings = settings || {};
+  function audioTrack() {
+    return { kind: 'audio', stopped: false, stop() { this.stopped = true; } };
+  }
+  const tracks = [audioTrack(), audioTrack()];
+  const stream = { getTracks: () => tracks };
+  const microphone = {
+    tracks,
+    stream,
+    recorders: [],
+    grants: 0,
+    permissionQueries: 0,
+    // One chunk per timeslice, comfortably above minVoiceNoteBytes so the
+    // widget's own short-recording check does not fire by accident.
+    chunk: settings.chunk === undefined ? { size: 48 * 1024, type: 'audio/webm' } : settings.chunk,
+    refuse: settings.refuse || null,
+    permission: settings.permission || '',
+    supportedTypes: settings.supportedTypes || ['audio/webm;codecs=opus', 'audio/webm'],
+    recorder() { return microphone.recorders[microphone.recorders.length - 1]; },
+    released() { return tracks.every((track) => track.stopped); }
+  };
+
+  function FakeMediaRecorder(recordedStream, recorderOptions) {
+    this.stream = recordedStream;
+    this.mimeType = (recorderOptions && recorderOptions.mimeType) || '';
+    this.state = 'inactive';
+    this.timeslice = 0;
+    this.ondataavailable = null;
+    this.onstop = null;
+    microphone.recorders.push(this);
+  }
+  FakeMediaRecorder.isTypeSupported = (type) => microphone.supportedTypes.indexOf(type) !== -1;
+  FakeMediaRecorder.prototype.start = function start(timeslice) {
+    this.timeslice = timeslice;
+    this.state = 'recording';
+  };
+  // A real recorder delivers the tail of the audio and then fires stop. Doing
+  // both synchronously is what keeps these tests free of arbitrary waits.
+  FakeMediaRecorder.prototype.stop = function stop() {
+    this.state = 'inactive';
+    if (this.ondataavailable && microphone.chunk) this.ondataavailable({ data: microphone.chunk });
+    if (this.onstop) this.onstop();
+  };
+  microphone.MediaRecorder = FakeMediaRecorder;
+  microphone.mediaDevices = settings.withMediaDevices === false ? null : {
+    getUserMedia: async (constraints) => {
+      microphone.grants += 1;
+      microphone.constraints = constraints;
+      if (microphone.refuse) throw microphone.refuse;
+      return stream;
+    }
+  };
+  microphone.permissions = settings.withPermissions === false ? null : {
+    query: async () => {
+      microphone.permissionQueries += 1;
+      if (microphone.permission === 'throws') throw new Error('no microphone descriptor');
+      return { state: microphone.permission || 'prompt' };
+    }
+  };
+  return microphone;
+}
+
+function installFakeBrowser(fetchStub, options) {
+  options = options || {};
   const saved = {
     document: global.document,
     hadDocument: 'document' in global,
@@ -576,6 +644,10 @@ function installFakeBrowser(fetchStub) {
     hadHistory: 'history' in global,
     innerWidth: global.innerWidth,
     hadInnerWidth: 'innerWidth' in global,
+    mediaRecorder: global.MediaRecorder,
+    hadMediaRecorder: 'MediaRecorder' in global,
+    secureContext: global.isSecureContext,
+    hadSecureContext: 'isSecureContext' in global,
     // navigator is a getter on globalThis in modern Node, so it is swapped by
     // descriptor rather than by assignment.
     navigator: Object.getOwnPropertyDescriptor(global, 'navigator')
@@ -609,14 +681,27 @@ function installFakeBrowser(fetchStub) {
     replaceState(...args) { historyCalls.push(['replaceState', ...args]); return 'host-replaced'; }
   };
   global.history = { pushState: nativeHistory.pushState, replaceState: nativeHistory.replaceState };
+  // Recording is absent unless a test asks for it, which is the state every
+  // browser is in until it proves otherwise.
+  const microphone = options.microphone || null;
+  const navigatorStub = { language: 'en-GB' };
+  if (microphone && microphone.mediaDevices) navigatorStub.mediaDevices = microphone.mediaDevices;
+  if (microphone && microphone.permissions) navigatorStub.permissions = microphone.permissions;
   Object.defineProperty(global, 'navigator', {
-    value: { language: 'en-GB' },
+    value: navigatorStub,
     configurable: true,
     writable: true
   });
+  if (microphone && microphone.MediaRecorder) global.MediaRecorder = microphone.MediaRecorder;
+  else delete global.MediaRecorder;
+  // An insecure origin is a separate switch from a missing API, because over
+  // plain http the browser removes navigator.mediaDevices and the two look
+  // identical from the inside.
+  global.isSecureContext = options.secureContext !== false;
   if (fetchStub) global.fetch = fetchStub;
   return {
     document: documentStub,
+    microphone,
     nativeHistory,
     historyCalls,
     fireWindow: windowEvents.fire,
@@ -632,6 +717,10 @@ function installFakeBrowser(fetchStub) {
       else delete global.history;
       if (saved.hadInnerWidth) global.innerWidth = saved.innerWidth;
       else delete global.innerWidth;
+      if (saved.hadMediaRecorder) global.MediaRecorder = saved.mediaRecorder;
+      else delete global.MediaRecorder;
+      if (saved.hadSecureContext) global.isSecureContext = saved.secureContext;
+      else delete global.isSecureContext;
       if (saved.navigator) Object.defineProperty(global, 'navigator', saved.navigator);
       else delete global.navigator;
       global.fetch = saved.fetch;
@@ -657,7 +746,7 @@ function noContent() {
 // server sends, normalized exactly as a live bootstrap would be.
 function renderWidget(payload, options) {
   options = options || {};
-  const browser = installFakeBrowser(options.fetch);
+  const browser = installFakeBrowser(options.fetch, options);
   const instance = new widget.GarudaWidget({
     agentKey: 'pub_live_renderAgent',
     mode: 'live',
@@ -679,7 +768,14 @@ function renderWidget(payload, options) {
   // An open panel holds a polling interval, and a live interval keeps the test
   // runner from ever exiting. Teardown stops it whether the test opened the
   // panel or not.
-  const restore = () => { instance.stopPolling(); instance.stopJourney(); browser.restore(); };
+  // A recording holds an interval and, worse, a microphone. Teardown ends both
+  // whether the test remembered to or not.
+  const restore = () => {
+    instance.stopPolling();
+    instance.stopJourney();
+    instance.cancelVoiceRecording();
+    browser.restore();
+  };
   return { instance, nodes: instance.nodes, browser, restore };
 }
 
@@ -1509,6 +1605,73 @@ function slotButtons(rendered) {
   return rendered.nodes.bookingRegion.querySelectorAll('.gw-slot');
 }
 
+// A calendar with no create-booking API -- Calendly is the one this exists for --
+// used to paint a full time picker whose Confirm reached a provider that cannot
+// be booked through, came back 502, and offered a retry that failed identically
+// forever. No appointment was ever made and nothing said why.
+test('a calendar that finishes on its own page hands the visitor a link instead of a picker that cannot confirm', async () => {
+  const calls = [];
+  const rendered = renderWidget(
+    {
+      display_name: 'Northstar',
+      booking: {
+        enabled: true,
+        label: 'Book a call',
+        duration_minutes: 30,
+        timezone: 'Asia/Kolkata',
+        completes_elsewhere: true,
+        provider_label: 'Calendly',
+        scheduling_url: 'https://calendly.com/northstar/intro'
+      }
+    },
+    { fetch: async (url, settings) => { calls.push({ url, settings }); throw new Error('no request should be made'); } }
+  );
+  const startingHref = global.location.href;
+  try {
+    const booking = rendered.instance.agent.booking;
+    assert.equal(booking.completesElsewhere, true, 'the bootstrap field must survive normalizeBooking');
+    assert.equal(booking.schedulingURL, 'https://calendly.com/northstar/intro');
+    assert.equal(booking.providerLabel, 'Calendly');
+
+    // The button is still offered -- there IS a way to book, it is just not here.
+    assert.equal(rendered.nodes.bookingButton.hidden, false);
+
+    await dispatch(rendered.nodes.bookingButton, 'click');
+    await settle();
+
+    assert.equal(calls.length, 0, 'no slots call may be made to a calendar that cannot be booked through');
+    assert.equal(rendered.instance.bookingVisible, false, 'the in-chat picker must not open');
+    assert.equal(global.location.href, startingHref, 'the host page must never be navigated away');
+
+    const anchors = rendered.nodes.messages.querySelectorAll('a');
+    const link = anchors.find((node) => node.getAttribute('href') === 'https://calendly.com/northstar/intro');
+    assert.ok(link, 'the transcript carries the booking link, because a blocked popup cannot be detected');
+    assert.equal(link.getAttribute('rel'), 'noopener noreferrer');
+  } finally {
+    rendered.restore();
+  }
+});
+
+// A setting that is not a public https link would be a booking button pointing
+// nowhere in front of somebody's customer. No link means the ordinary in-chat
+// path, and the server refuses to publish such an agent in the first place.
+test('a completes-elsewhere calendar with no usable link offers no booking at all', () => {
+  const rendered = renderWidget({
+    display_name: 'Northstar',
+    booking: {
+      enabled: true, label: 'Book a call', duration_minutes: 30, timezone: 'Asia/Kolkata',
+      completes_elsewhere: true, provider_label: 'Calendly', scheduling_url: 'javascript:alert(1)'
+    }
+  });
+  try {
+    assert.equal(rendered.instance.agent.booking.completesElsewhere, false, 'only an https link is accepted');
+    assert.equal(rendered.instance.agent.booking.schedulingURL, '');
+    assert.equal(rendered.instance.bookingAvailable(), true, 'it falls back to the ordinary picker rather than vanishing');
+  } finally {
+    rendered.restore();
+  }
+});
+
 test('the booking button appears only when the bootstrap offers appointments', () => {
   const offering = renderWidget({
     display_name: 'Northstar',
@@ -2332,6 +2495,477 @@ test('a poll that outlives the session token renews it instead of dying', async 
     assert.equal(rendered.instance.session.sessionToken, 'a-renewed-token', 'the session was renewed');
     const delivered = rendered.instance.messages.some((message) => message.content === 'Priya here');
     assert.ok(delivered, 'the reply written after the token expired must still arrive');
+  } finally {
+    rendered.restore();
+  }
+});
+
+// ---- speaking instead of typing ----
+//
+// The rule the whole feature turns on: a transcript is put in front of the
+// visitor, never sent for them. Speech recognition is wrong sometimes, and a
+// misheard sentence delivered to a stranger's business is worse than an extra tap.
+
+// Voice work is a short chain of microtasks — a stubbed fetch, a decoded
+// envelope, then the composer — so a couple of turns is all it needs.
+async function drain() {
+  await settle();
+  await settle();
+}
+
+function voiceHeard(text, language) {
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: () => 'application/json' },
+    json: async () => ({ data: { text, language: language || 'en' } })
+  };
+}
+
+function voiceRefused(code, message, status) {
+  return {
+    ok: false,
+    status: status || 503,
+    headers: { get: () => 'application/json' },
+    json: async () => ({ error: { code, message } })
+  };
+}
+
+test('an insecure origin is not an old browser, and neither one gets a microphone button', () => {
+  // The order these are asked in is the whole point. Over plain http the
+  // browser removes navigator.mediaDevices altogether, so checking the API
+  // first would report a current browser as too old to record.
+  assert.equal(
+    widget.recordingSupport({ secureContext: false, hasMediaRecorder: true, hasGetUserMedia: false }),
+    'insecure_context'
+  );
+  assert.equal(
+    widget.recordingSupport({ secureContext: true, hasMediaRecorder: false, hasGetUserMedia: true }),
+    'no_media_recorder'
+  );
+  assert.equal(
+    widget.recordingSupport({ secureContext: true, hasMediaRecorder: true, hasGetUserMedia: false }),
+    'no_media_devices'
+  );
+  assert.equal(
+    widget.recordingSupport({ secureContext: true, hasMediaRecorder: true, hasGetUserMedia: true }),
+    'supported'
+  );
+
+  const unsupported = renderWidget({ display_name: 'Nova' });
+  try {
+    assert.equal(unsupported.nodes.mic.hidden, true, 'a browser with no MediaRecorder is offered no microphone');
+    assert.equal(unsupported.nodes.host.getAttribute('data-voice'), 'no_media_recorder');
+    unsupported.nodes.textarea.value = 'typed instead';
+    unsupported.instance.resizeInput();
+    assert.equal(unsupported.nodes.send.disabled, false, 'and the keyboard is untouched');
+  } finally {
+    unsupported.restore();
+  }
+
+  const insecure = renderWidget(
+    { display_name: 'Nova' },
+    { microphone: createFakeMicrophone({ withMediaDevices: false }), secureContext: false }
+  );
+  try {
+    assert.equal(insecure.nodes.mic.hidden, true);
+    assert.equal(
+      insecure.nodes.host.getAttribute('data-voice'),
+      'insecure_context',
+      'a customer whose staging site is on http can read why, rather than filing a bug'
+    );
+  } finally {
+    insecure.restore();
+  }
+
+  const ready = renderWidget({ display_name: 'Nova' }, { microphone: createFakeMicrophone() });
+  try {
+    assert.equal(ready.nodes.mic.hidden, false);
+    assert.equal(ready.nodes.mic.getAttribute('aria-label'), 'Record a voice message');
+    assert.equal(ready.nodes.mic.getAttribute('aria-pressed'), 'false');
+    assert.equal(ready.nodes.host.getAttribute('data-voice'), 'ready');
+    assert.equal(ready.nodes.voiceRow.hidden, true, 'nothing is announced until something is happening');
+    assert.equal(
+      ready.browser.microphone.grants,
+      0,
+      'a widget that asked for a microphone on load would be asking before the visitor chose to speak'
+    );
+  } finally {
+    ready.restore();
+  }
+});
+
+test('what was heard lands in the composer, and nothing is sent until the visitor sends it', async () => {
+  const calls = [];
+  const microphone = createFakeMicrophone();
+  const rendered = renderWidget({ display_name: 'Nova' }, {
+    microphone,
+    fetch: async (url, options) => {
+      calls.push({ url, options });
+      return voiceHeard('Do you deliver to Bristol on a Saturday?');
+    }
+  });
+  try {
+    rendered.nodes.textarea.value = 'Hi,';
+    rendered.instance.resizeInput();
+
+    await rendered.instance.startVoiceRecording();
+    assert.equal(microphone.grants, 1, 'the microphone is asked for on the press and at no other moment');
+    assert.equal(microphone.constraints.audio.echoCancellation, true);
+    assert.equal(rendered.instance.voice.state, 'recording');
+    assert.equal(rendered.nodes.voiceRow.hidden, false, 'a live microphone is unmistakable');
+    assert.equal(rendered.nodes.voiceDot.hidden, false);
+    assert.equal(rendered.nodes.voiceTime.hidden, false, 'and it is counting');
+    assert.equal(rendered.nodes.voiceAction.textContent, 'Cancel', 'with a way out of it');
+    assert.equal(rendered.nodes.mic.getAttribute('aria-pressed'), 'true');
+    assert.equal(rendered.nodes.send.disabled, true, 'nothing is sent out from under a live microphone');
+    assert.equal(microphone.recorder().timeslice, 1000, 'chunks arrive while recording, so the size is known in time');
+    assert.equal(microphone.recorder().mimeType, 'audio/webm;codecs=opus');
+
+    rendered.instance.stopVoiceRecording('');
+    await drain();
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'https://api.garuda.example/widget/v1/sessions/session-1/voice');
+    assert.equal(calls[0].options.method, 'POST');
+    assert.equal(calls[0].options.headers['X-Garuda-Session-Token'], 'short-lived-token');
+    assert.match(calls[0].options.headers['Content-Type'], /^audio\/webm/, 'acceptedVoiceMediaTypes takes this one');
+    assert.deepEqual(
+      Object.keys(calls[0].options.headers).sort(),
+      ['Content-Type', 'X-Garuda-Session-Token'],
+      'any other header fails the widget CORS preflight rather than the request'
+    );
+
+    assert.equal(
+      rendered.nodes.textarea.value,
+      'Hi, Do you deliver to Bristol on a Saturday?',
+      'the words the visitor typed and the words they spoke both survive'
+    );
+    assert.equal(rendered.instance.messages.length, 0, 'a transcript is not a sent message');
+    assert.equal(
+      calls.filter((call) => String(call.url).includes('/messages')).length,
+      0,
+      'the visitor reads what was heard and sends it themselves'
+    );
+    assert.equal(rendered.nodes.send.disabled, false, 'and send is theirs to press');
+    assert.match(rendered.nodes.voiceStatus.textContent, /Check it/);
+    assert.ok(rendered.nodes.textarea.focusCount > 0, 'with the caret waiting in the words to be checked');
+    assert.equal(rendered.instance.voice.state, 'idle');
+    assert.equal(microphone.released(), true);
+  } finally {
+    rendered.restore();
+  }
+});
+
+test('voice being unavailable on this site takes the button away rather than blaming the visitor', async () => {
+  const microphone = createFakeMicrophone();
+  const rendered = renderWidget({ display_name: 'Nova' }, {
+    microphone,
+    fetch: async () => voiceRefused(
+      'voice_unavailable',
+      'Voice messages are not available here; please type instead',
+      503
+    )
+  });
+  try {
+    await rendered.instance.startVoiceRecording();
+    rendered.instance.stopVoiceRecording('');
+    await drain();
+
+    assert.equal(rendered.nodes.mic.hidden, true, 'pressing it again could not end any differently');
+    assert.equal(rendered.nodes.host.getAttribute('data-voice'), 'unavailable');
+    assert.match(rendered.nodes.voiceStatus.textContent, /type your message/i);
+    assert.equal(rendered.nodes.voiceRow.getAttribute('data-state'), 'error');
+    rendered.nodes.textarea.value = 'I will type it then';
+    rendered.instance.resizeInput();
+    assert.equal(rendered.nodes.send.disabled, false, 'the keyboard is left doing the whole job');
+    assert.equal(rendered.instance.voice.state, 'idle');
+    assert.equal(microphone.released(), true, 'and the microphone was handed back on the way out');
+
+    await dispatch(rendered.nodes.voiceAction, 'click');
+    assert.equal(rendered.nodes.voiceRow.hidden, true, 'the sentence can be dismissed');
+    assert.equal(rendered.nodes.mic.hidden, true, 'but voice stays off for this website');
+  } finally {
+    rendered.restore();
+  }
+
+  // A lapsed subscription is the owner's business, not the visitor's, so it
+  // reads exactly like any other unavailable and names nobody's account.
+  const unpaid = renderWidget({ display_name: 'Nova' }, {
+    microphone: createFakeMicrophone(),
+    fetch: async () => voiceRefused('subscription_required', 'This assistant is temporarily unavailable', 402)
+  });
+  try {
+    await unpaid.instance.startVoiceRecording();
+    unpaid.instance.stopVoiceRecording('');
+    await drain();
+    assert.equal(unpaid.nodes.mic.hidden, true);
+    assert.match(unpaid.nodes.voiceStatus.textContent, /type your message/i);
+    assert.doesNotMatch(unpaid.nodes.voiceStatus.textContent, /subscription|billing|account|payment/i);
+  } finally {
+    unpaid.restore();
+  }
+});
+
+test('every documented voice failure is something a person can act on', () => {
+  const failure = (code) => widget.voiceFailure(new widget.WidgetError(code, 'server wording', 503));
+  const codes = [
+    'subscription_required', 'voice_unavailable', 'transcription_unavailable', 'audio_too_large',
+    'audio_too_short', 'no_speech_detected', 'voice_quota_exceeded', 'rate_limited',
+    'unsupported_media_type', 'network_error'
+  ];
+  const messages = codes.map((code) => failure(code).message);
+  messages.forEach((message, index) => {
+    assert.ok(message.length > 20, codes[index] + ' needs a sentence, not a code');
+    assert.doesNotMatch(message, /error|failed|invalid/i, codes[index] + ' must not read as a fault report');
+  });
+  // A lapsed subscription and a provider that was never configured read as the
+  // same sentence on purpose: both are the owner's business, both leave the
+  // visitor with the same thing to do, and only one of them would name somebody
+  // else's billing to a stranger.
+  assert.equal(failure('subscription_required').message, failure('voice_unavailable').message);
+  const distinct = messages.filter((message) => message !== failure('voice_unavailable').message);
+  assert.equal(new Set(distinct).size, distinct.length, 'the rest each say something different to do');
+
+  // Only the ones that mean "not here, not ever" take the button away.
+  // Everything else is worth another press.
+  assert.equal(failure('voice_unavailable').off, true);
+  assert.equal(failure('subscription_required').off, true);
+  assert.equal(failure('unsupported_media_type').off, true, 'this browser will record the same way next time');
+  assert.equal(failure('transcription_unavailable').off, false);
+  assert.equal(failure('audio_too_short').off, false);
+  assert.equal(failure('no_speech_detected').off, false);
+  assert.equal(failure('voice_quota_exceeded').off, false);
+  assert.equal(failure('rate_limited').off, false);
+  // Written by the rate limiter in front of the route rather than by the
+  // handler, so it must not fall through to wording that blames the recording.
+  assert.doesNotMatch(failure('rate_limited').message, /could not be understood/);
+  assert.equal(failure('anything_else').off, false);
+});
+
+test('a blocked microphone is answered differently from one that was merely dismissed', async () => {
+  const dismissed = widget.describeMicrophoneFailure({ name: 'NotAllowedError' }, 'prompt');
+  const blocked = widget.describeMicrophoneFailure({ name: 'NotAllowedError' }, 'denied');
+  assert.match(dismissed, /choose Allow/, 'a prompt that was dismissed can be shown again');
+  assert.doesNotMatch(
+    blocked,
+    /choose Allow/,
+    'once the browser has remembered a block no prompt appears again, so "press Allow" is a loop with no end'
+  );
+  assert.match(blocked, /site settings/);
+  assert.match(widget.describeMicrophoneFailure({ name: 'NotFoundError' }), /No microphone was found/);
+  assert.match(widget.describeMicrophoneFailure({ name: 'NotReadableError' }), /in use by another app/);
+  [dismissed, blocked, widget.describeMicrophoneFailure({ name: 'NotFoundError' })].forEach((message) => {
+    assert.match(message, /type your message|choose Allow/, 'every one of them ends somewhere the visitor can go');
+  });
+
+  const calls = [];
+  const microphone = createFakeMicrophone({
+    permission: 'denied',
+    refuse: Object.assign(new Error('denied'), { name: 'NotAllowedError' })
+  });
+  const rendered = renderWidget({ display_name: 'Nova' }, {
+    microphone,
+    fetch: async (url) => { calls.push(url); return voiceHeard('never spoken'); }
+  });
+  try {
+    await rendered.instance.startVoiceRecording();
+    assert.equal(
+      microphone.grants,
+      0,
+      'a remembered block rejects without ever prompting, so it is not asked for at all'
+    );
+    assert.match(rendered.nodes.voiceStatus.textContent, /site settings/);
+    assert.equal(rendered.nodes.voiceRow.getAttribute('data-state'), 'error');
+    assert.equal(rendered.nodes.mic.hidden, false, 'the button stays: this is something the visitor can undo');
+    assert.equal(calls.length, 0, 'nothing was recorded, so nothing was sent');
+    assert.equal(rendered.instance.voice.state, 'idle');
+    assert.equal(rendered.instance.voice.stream, null);
+  } finally {
+    rendered.restore();
+  }
+
+  // Firefox has no microphone permission descriptor at all. Not knowing which
+  // of the two it is costs the more specific message and nothing else — and it
+  // must not cost the visitor a broken button.
+  const firefox = renderWidget({ display_name: 'Nova' }, {
+    microphone: createFakeMicrophone({
+      withPermissions: false,
+      refuse: Object.assign(new Error('denied'), { name: 'NotAllowedError' })
+    }),
+    fetch: async () => voiceHeard('never spoken')
+  });
+  try {
+    await firefox.instance.startVoiceRecording();
+    assert.match(firefox.nodes.voiceStatus.textContent, /choose Allow/);
+    assert.equal(firefox.nodes.mic.hidden, false);
+    assert.equal(firefox.instance.voice.state, 'idle');
+  } finally {
+    firefox.restore();
+  }
+});
+
+test('the microphone is handed back however the recording ends', async () => {
+  const stopped = createFakeMicrophone();
+  const afterStop = renderWidget({ display_name: 'Nova' }, {
+    microphone: stopped,
+    fetch: async () => voiceHeard('A question about opening hours.')
+  });
+  try {
+    await afterStop.instance.startVoiceRecording();
+    assert.equal(stopped.released(), false, 'the tracks are live while the recording is');
+    afterStop.instance.stopVoiceRecording('');
+    await drain();
+    assert.equal(stopped.released(), true, 'every track, before the upload rather than after it');
+    assert.equal(afterStop.instance.voice.stream, null);
+    assert.equal(afterStop.instance.voice.recorder, null);
+  } finally {
+    afterStop.restore();
+  }
+
+  const cancelled = createFakeMicrophone();
+  const calls = [];
+  const afterCancel = renderWidget({ display_name: 'Nova' }, {
+    microphone: cancelled,
+    fetch: async (url) => { calls.push(url); return voiceHeard('never sent'); }
+  });
+  try {
+    await afterCancel.instance.startVoiceRecording();
+    await dispatch(afterCancel.nodes.voiceAction, 'click');
+    await drain();
+    assert.equal(cancelled.released(), true, 'cancelling releases the microphone');
+    assert.equal(calls.length, 0, 'and the recording goes nowhere');
+    assert.equal(afterCancel.nodes.voiceRow.hidden, true);
+    assert.equal(afterCancel.nodes.textarea.value, '');
+  } finally {
+    afterCancel.restore();
+  }
+
+  const closed = createFakeMicrophone();
+  const afterClose = renderWidget({ display_name: 'Nova' }, {
+    microphone: closed,
+    fetch: async () => voiceHeard('never sent')
+  });
+  try {
+    afterClose.instance.setOpen(true);
+    await afterClose.instance.startVoiceRecording();
+    afterClose.instance.setOpen(false);
+    await drain();
+    assert.equal(
+      closed.released(),
+      true,
+      'a closed panel with a live microphone behind it is the thing this must never do'
+    );
+    assert.equal(afterClose.instance.voice.state, 'idle');
+  } finally {
+    afterClose.restore();
+  }
+});
+
+test('a recording warns before the cap and stops itself at it', async () => {
+  const realNow = Date.now;
+  let clock = 1767225600000;
+  Date.now = () => clock;
+  const microphone = createFakeMicrophone();
+  const rendered = renderWidget({ display_name: 'Nova' }, {
+    microphone,
+    fetch: async () => voiceHeard('A minute of talking.')
+  });
+  try {
+    await rendered.instance.startVoiceRecording();
+
+    clock += 30000;
+    rendered.instance.voiceTick();
+    assert.equal(rendered.nodes.voiceTime.textContent, '0:30');
+    assert.equal(rendered.nodes.voiceRow.getAttribute('data-state'), '', 'half a minute in, nothing is urgent');
+
+    clock += 21000;
+    rendered.instance.voiceTick();
+    assert.match(rendered.nodes.voiceStatus.textContent, /9 seconds left/);
+    assert.equal(rendered.nodes.voiceRow.getAttribute('data-state'), 'warn');
+
+    clock += 9000;
+    rendered.instance.voiceTick();
+    await drain();
+    assert.equal(
+      rendered.instance.voice.state,
+      'idle',
+      'the cap is kept here rather than by the server refusing an upload the visitor waited for'
+    );
+    assert.equal(microphone.recorder().state, 'inactive');
+    assert.equal(microphone.released(), true);
+    assert.equal(rendered.nodes.textarea.value, 'A minute of talking.', 'and what was said still arrives');
+  } finally {
+    Date.now = realNow;
+    rendered.restore();
+  }
+});
+
+test('a tap on the button is not a sentence, and never reaches the network', async () => {
+  const calls = [];
+  const microphone = createFakeMicrophone({ chunk: { size: 300, type: 'audio/webm' } });
+  const rendered = renderWidget({ display_name: 'Nova' }, {
+    microphone,
+    fetch: async (url) => { calls.push(url); return voiceHeard('nothing'); }
+  });
+  try {
+    await rendered.instance.startVoiceRecording();
+    rendered.instance.stopVoiceRecording('');
+    await drain();
+
+    assert.equal(calls.length, 0, 'minVoiceNoteBytes answers this with a 422, and the round trip is not needed');
+    assert.match(rendered.nodes.voiceStatus.textContent, /too short/i);
+    assert.equal(rendered.nodes.mic.hidden, false, 'and the visitor can simply try again');
+    assert.equal(microphone.released(), true);
+  } finally {
+    rendered.restore();
+  }
+});
+
+test('a session that expired while the visitor was speaking is renewed rather than losing their words', async () => {
+  let attempts = 0;
+  const calls = [];
+  const microphone = createFakeMicrophone();
+  const rendered = renderWidget({ display_name: 'Nova' }, {
+    microphone,
+    fetch: async (url) => {
+      calls.push(String(url));
+      if (String(url).endsWith('/voice')) {
+        attempts += 1;
+        if (attempts === 1) return voiceRefused('invalid_session', 'The widget session is invalid or expired', 401);
+        return voiceHeard('Can somebody call me back this afternoon?');
+      }
+      return {
+        ok: true,
+        status: 201,
+        headers: { get: () => 'application/json' },
+        json: async () => ({
+          data: {
+            session_id: 'session-2', session_token: 'a-renewed-token',
+            conversation: { id: 'session-2', resumed: true, messages: [] }
+          }
+        })
+      };
+    }
+  });
+  try {
+    await rendered.instance.startVoiceRecording();
+    rendered.instance.stopVoiceRecording('');
+    await drain();
+    await drain();
+
+    assert.equal(attempts, 2, 'the recording is offered again rather than thrown away');
+    assert.equal(rendered.instance.session.sessionToken, 'a-renewed-token');
+    assert.equal(rendered.nodes.textarea.value, 'Can somebody call me back this afternoon?');
+    assert.equal(
+      calls.filter((url) => url.includes('/messages')).length,
+      0,
+      'and it still waits for the visitor to send it'
+    );
+    assert.equal(
+      rendered.instance.messages.some((message) => message.role === 'user'),
+      false
+    );
   } finally {
     rendered.restore();
   }

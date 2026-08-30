@@ -107,13 +107,23 @@ func New(cfg config.Config, dataStore store.Store, logger *slog.Logger) *Server 
 		supabase: supabase.New(supabaseURL, supabaseAnonKey),
 		google:   googleauth.New(cfg.GoogleOAuthClientID),
 		mailer:   mailer.New(cfg.SendGridAPIKey, cfg.SendGridAPIURL, cfg.SendGridFromEmail, cfg.SendGridFromName, cfg.SendGridReplyTo),
-		// WhatsApp is the owner's stated channel; the generic webhook keeps
-		// alerting working on a deployment whose WhatsApp credentials have not
-		// arrived yet. Neither configured means no alerts and no startup failure.
+		// WhatsApp is the owner's stated channel, and Periskope is tried FIRST
+		// because it drives a real WhatsApp account: no 24-hour window, no
+		// approved template, so an alert at 3am is an ordinary message rather
+		// than one Meta's own messaging rules may refuse. The Cloud API and the
+		// generic webhook follow, so a deployment configured either of the older
+		// ways keeps alerting. None configured means no alerts and no startup
+		// failure, like every other adapter here.
 		fetcher: fetcher.New(),
 		alerts: alerts.New(alerts.Options{
 			Service: "garuda-api (" + cfg.Environment + ")",
 			Transport: alerts.First(
+				alerts.NewPeriskope(alerts.PeriskopeConfig{
+					APIKey:  cfg.AlertPeriskopeKey,
+					Phone:   cfg.AlertPeriskopePhone,
+					ChatID:  cfg.AlertPeriskopeChat,
+					BaseURL: cfg.AlertPeriskopeURL,
+				}),
 				alerts.NewWhatsApp(alerts.WhatsAppConfig{
 					AccessToken:      cfg.AlertWhatsAppToken,
 					PhoneNumberID:    cfg.AlertWhatsAppPhoneID,

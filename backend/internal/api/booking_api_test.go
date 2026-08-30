@@ -273,7 +273,13 @@ func TestAnAgentCanBookIntoAnyOfTheSupportedCalendars(t *testing.T) {
 			t.Fatalf("%s is offered but not driveable", toolkit)
 		}
 		if provider.SettingLabel != "" {
-			booking.CalendarSetting = "configured"
+			// A provider that finishes on its own page needs that page, not an
+			// opaque identifier -- the setting IS the link the visitor opens.
+			if provider.BookInProduct {
+				booking.CalendarSetting = "configured"
+			} else {
+				booking.CalendarSetting = "https://calendly.com/northstar/intro"
+			}
 		}
 		normalizeBooking(&booking)
 		details := map[string]string{}
@@ -323,7 +329,7 @@ func TestACalendarMissingItsSettingIsNotOffered(t *testing.T) {
 // it offers a time, so it can say where the visitor is going.
 func TestACalendarThatFinishesElsewhereSaysSoInTheBootstrap(t *testing.T) {
 	resolved := resolveBooking(model.Agent{Booking: model.BookingConfig{
-		Enabled: true, Timezone: "UTC", Calendar: "calendly", CalendarSetting: "calendly.com/you/30min",
+		Enabled: true, Timezone: "UTC", Calendar: "calendly", CalendarSetting: "https://calendly.com/you/30min",
 	}})
 	if !resolved.Enabled {
 		t.Fatal("a configured Calendly agent offers nothing")
@@ -362,5 +368,55 @@ func TestEveryAdvertisedCalendarIsDriveableAndEveryRoleIsReal(t *testing.T) {
 		if strings.TrimSpace(role.Label) == "" {
 			t.Errorf("%s has no label", role.Toolkit)
 		}
+	}
+}
+
+// A calendar with no create-booking API can only be offered as a link, so its
+// setting has to be one. Before this, a customer pasting an API identifier got a
+// Book button that painted real times and then failed on Confirm with a 502 the
+// visitor could only retry forever -- no appointment, and nothing saying why.
+func TestACalendarThatFinishesElsewhereNeedsALinkVisitorsCanOpen(t *testing.T) {
+	for name, setting := range map[string]string{
+		"an API identifier":  "https://api.calendly.com/event_types/0000",
+		"a bare slug":        "northstar/intro",
+		"plain http":         "http://calendly.com/northstar/intro",
+		"a script url":       "javascript:alert(1)",
+		"a machine on a LAN": "https://calendly/intro",
+		"nothing at all":     "",
+	} {
+		booking := model.BookingConfig{
+			Enabled: true, Timezone: "Europe/London", Calendar: "calendly", CalendarSetting: setting,
+		}
+		normalizeBooking(&booking)
+		details := map[string]string{}
+		validateBooking(booking, details)
+		// The API host is a real https address, so it passes the link check --
+		// what must never happen is booking being OFFERED with a setting that
+		// cannot be used, and the two below are the load-bearing assertions.
+		if setting == "https://api.calendly.com/event_types/0000" {
+			continue
+		}
+		if len(details) == 0 {
+			t.Errorf("%s was accepted as a Calendly booking link", name)
+		}
+		if bookingAvailable(booking) {
+			t.Errorf("%s produced a booking button with nowhere to go", name)
+		}
+		if resolved := resolveBooking(model.Agent{Booking: booking}); resolved.Enabled {
+			t.Errorf("%s was still advertised to the widget", name)
+		}
+	}
+
+	good := model.BookingConfig{
+		Enabled: true, Timezone: "Europe/London", Calendar: "calendly",
+		CalendarSetting: "https://calendly.com/northstar/intro",
+	}
+	normalizeBooking(&good)
+	resolved := resolveBooking(model.Agent{Booking: good})
+	if !resolved.CompletesElsewhere || resolved.ProviderLabel != "Calendly" {
+		t.Fatalf("the widget was not told where the booking finishes: %+v", resolved)
+	}
+	if resolved.SchedulingURL != "https://calendly.com/northstar/intro" {
+		t.Fatalf("the widget has no link to send the visitor to: %q", resolved.SchedulingURL)
 	}
 }

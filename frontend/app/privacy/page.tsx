@@ -499,7 +499,7 @@ export default function PrivacyPage() {
       </LegalSection>
 
       {/* Cookies: the frontend contains no document.cookie use and no cookies()
-          call; auth lives in sessionStorage (frontend/lib/api.ts) and the widget
+          call; auth lives in localStorage (frontend/lib/api.ts) and the widget
           uses localStorage keys built by storageKey() in widget/src/v1.js. */}
       <LegalSection id="cookies" title="10. Cookies and browser storage">
         <p>
@@ -513,8 +513,8 @@ export default function PrivacyPage() {
           rows={[
             [
               "The customer portal",
-              "Your access token, refresh token and their expiry, in session storage.",
-              "Cleared when you sign out, and when the browser tab is closed.",
+              "Your access token, refresh token and their expiry, in local storage.",
+              "Cleared when you sign out, and when the token expires. Closing the tab does not clear it, so that signing in through Google in a new tab returns you to the app still signed in.",
             ],
             [
               "The customer portal",

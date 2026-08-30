@@ -83,7 +83,12 @@ export function AgentDetail({ agentId }: { agentId: string }) {
             </Button>
             <Button size="sm" asChild><Link href={`/app/agents/${encodeURIComponent(agentId)}/edit`}><Edit3 className="mr-1.5 h-3.5 w-3.5" /> Edit agent</Link></Button>
           </div>
+          {/* The reason a control is unavailable belongs on the screen, not only
+              in a title attribute: a tooltip needs a pointer hovering over a
+              disabled button, which is neither a touch screen nor a keyboard. */}
           {switchError ? <p className="flex items-center gap-1.5 text-[10px] font-medium text-rose-600"><AlertCircle className="h-3 w-3" /> {switchError}</p>
+            : !connected ? <p className="text-[10px] text-slate-500">Connect the Garuda API to pause this agent.</p>
+            : !action.available ? <p className="text-[10px] text-slate-500">Only a published agent can be paused. Publish it first from the editor.</p>
             : paused ? <p className="text-[10px] text-amber-600">The widget is not serving this agent. Its configuration is kept.</p>
             : null}
         </div>

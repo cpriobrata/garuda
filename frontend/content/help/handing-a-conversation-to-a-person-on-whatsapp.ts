@@ -216,10 +216,10 @@ export const article: HelpArticle = {
         [
           "They tap it, the label changes to ",
           { kind: "strong", text: "Opening WhatsApp…" },
-          ", and WhatsApp opens in a new tab with your message and their page URL typed in. If their browser blocks the new tab, the current one navigates instead rather than leaving a button that looks broken.",
+          ", and WhatsApp opens in a new tab with your message and their page URL typed in. A browser that blocks that tab does it silently, and nothing on the page can detect it.",
         ],
         [
-          "The chat says the handoff is opening and that they can keep typing there if they would rather. The conversation is not closed.",
+          "The chat says the handoff is opening, carries the same WhatsApp link as a button they can tap themselves, and says they can keep typing there if they would rather. The conversation is not closed, and the page they were reading is never navigated away from underneath them.",
         ],
       ],
     },

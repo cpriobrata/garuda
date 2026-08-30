@@ -58,7 +58,8 @@ section "Authentication is enforced"
 # Every one of these must refuse an anonymous caller. A 200 here is a breach,
 # and a 404 means the route was renamed and something is silently broken.
 for route in /v1/me /v1/agents /v1/leads /v1/conversations /v1/dashboard \
-             /v1/billing/invoices /v1/integrations/catalog /v1/leads/export; do
+             /v1/billing/invoices /v1/integrations/catalog /v1/leads/export \
+             /v1/appointments /v1/integrations/roles /v1/integrations/routes; do
   expect 401 "$route refuses an anonymous caller" "$API$route"
 done
 
@@ -67,6 +68,10 @@ for route in handoff activity messages leads reset booking; do
   expect 401 "POST /widget/v1/sessions/{id}/$route needs a session token" \
     -X POST -H 'Content-Type: application/json' -d '{}' "$API/widget/v1/sessions/x/$route"
 done
+# Voice takes raw audio, not JSON, and reaches a provider that bills by the
+# minute. The session check has to come before a single byte is read.
+expect 401 "POST /widget/v1/sessions/{id}/voice needs a session token" \
+  -X POST -H 'Content-Type: audio/webm' --data-binary 'not-audio' "$API/widget/v1/sessions/x/voice"
 # slots and the message poll are GETs. Sending a POST gets a 405 from the router
 # before the session is ever looked at, which would pass for the wrong reason.
 expect 401 "GET /widget/v1/sessions/{id}/slots needs a session token" "$API/widget/v1/sessions/x/slots"

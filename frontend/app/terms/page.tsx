@@ -264,7 +264,7 @@ export default function TermsPage() {
             ["Cancelling", "Cancel whenever you like. Your workspace stays active until the end of the period you have paid for."],
             [
               "Refunds",
-              "Part-months are not refunded automatically, and we have not set a fixed refund window. If you think a refund is due, ask at info@ravan.ai and a person will decide. Nothing here limits a refund the law where you live requires.",
+              "There are none. Payments are final: part-months are not prorated, unused time is not refunded, and a period already charged for is not returned. Cancel to stop the next charge — what you have paid for runs to the end of its period. Nothing here removes a refund the law where you live requires.",
             ],
             [
               "Failed payment",

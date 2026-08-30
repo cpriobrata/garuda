@@ -17,6 +17,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -64,6 +65,13 @@ export function WebhookEndpoints() {
   const [notice, setNotice] = useState<string | null>(null);
   const [issuedSecret, setIssuedSecret] = useState<{ endpointID: string; secret: string } | null>(null);
   const [copied, setCopied] = useState(false);
+  // Deleting an endpoint also deletes every delivery recorded against it, and
+  // the signing secret was shown once and cannot be recovered. None of that is
+  // guessable from a trash icon, and none of it has an undo.
+  const [confirmingDelete, setConfirmingDelete] = useState<WebhookEndpoint | null>(null);
+  // A failed fetch used to leave "Loading deliveries…" on screen forever, which
+  // reads as "still working" rather than "this did not load", so nobody retried.
+  const [deliveryErrors, setDeliveryErrors] = useState<Record<string, string>>({});
 
   const [url, setUrl] = useState("");
   const [description, setDescription] = useState("");
@@ -120,8 +128,17 @@ export function WebhookEndpoints() {
   };
 
   const loadDeliveries = async (endpointID: string) => {
-    const rows = await fetchDeliveries(endpointID);
-    setDeliveries((current) => ({ ...current, [endpointID]: rows }));
+    setDeliveryErrors((current) => {
+      const next = { ...current };
+      delete next[endpointID];
+      return next;
+    });
+    try {
+      const rows = await fetchDeliveries(endpointID);
+      setDeliveries((current) => ({ ...current, [endpointID]: rows }));
+    } catch (reason) {
+      setDeliveryErrors((current) => ({ ...current, [endpointID]: messageOf(reason) }));
+    }
   };
 
   const copySecret = async () => {
@@ -347,13 +364,7 @@ export function WebhookEndpoints() {
                     variant="ghost"
                     className="text-rose-600 hover:bg-rose-50 hover:text-rose-700"
                     disabled={pending === `delete:${endpoint.id}`}
-                    onClick={() =>
-                      void runAction(`delete:${endpoint.id}`, async () => {
-                        await deleteEndpoint(endpoint.id);
-                        setEndpoints((current) => (current || []).filter((row) => row.id !== endpoint.id));
-                        if (expanded === endpoint.id) setExpanded(null);
-                      })
-                    }
+                    onClick={() => setConfirmingDelete(endpoint)}
                   >
                     {pending === `delete:${endpoint.id}` ? (
                       <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -389,17 +400,55 @@ export function WebhookEndpoints() {
                   )}
                   Recent deliveries
                 </Button>
-                {expanded === endpoint.id && <DeliveryTable rows={deliveries[endpoint.id]} />}
+                {expanded === endpoint.id && (
+                  <DeliveryTable
+                    rows={deliveries[endpoint.id]}
+                    error={deliveryErrors[endpoint.id]}
+                    onRetry={() => void loadDeliveries(endpoint.id)}
+                  />
+                )}
               </div>
             </CardContent>
           </Card>
         ))}
       </div>
+      <ConfirmDialog
+          open={confirmingDelete !== null}
+          onOpenChange={(next) => { if (!next) setConfirmingDelete(null); }}
+          title="Delete this endpoint?"
+          description={<>Garuda will stop sending events to <span className="font-medium text-slate-700">{confirmingDelete?.url}</span>.</>}
+          consequences={[
+            "Whatever you have built on the other end — a Zap, a Make scenario, your own server — stops receiving leads and conversation events immediately.",
+            "The delivery history for this endpoint is deleted with it, so you will not be able to look back at what was sent or whether it arrived.",
+            "The signing secret cannot be recovered. Adding the endpoint again issues a new one, and you will have to update it wherever it is verified.",
+          ]}
+          confirmLabel="Delete endpoint"
+          confirmBusyLabel="Deleting the endpoint"
+          cancelLabel="Keep it"
+          failureMessage="The endpoint could not be deleted just now."
+          onConfirm={async () => {
+            const endpoint = confirmingDelete;
+            if (!endpoint) return;
+            await deleteEndpoint(endpoint.id);
+            setEndpoints((current) => (current || []).filter((row) => row.id !== endpoint.id));
+            if (expanded === endpoint.id) setExpanded(null);
+            setConfirmingDelete(null);
+          }}
+        />
+  
     </div>
   );
 }
 
-function DeliveryTable({ rows }: { rows?: WebhookDelivery[] }) {
+function DeliveryTable({ rows, error, onRetry }: { rows?: WebhookDelivery[]; error?: string; onRetry?: () => void }) {
+  if (error) {
+    return (
+      <div className="flex flex-wrap items-center gap-3 px-2 py-3 text-sm text-slate-600">
+        <span className="text-rose-600">{error}</span>
+        {onRetry && <Button type="button" variant="outline" size="sm" onClick={onRetry}>Try again</Button>}
+      </div>
+    );
+  }
   if (!rows) {
     return <p className="px-2 py-3 text-sm text-slate-500">Loading deliveries…</p>;
   }

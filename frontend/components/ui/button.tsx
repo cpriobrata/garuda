@@ -50,6 +50,14 @@ function Spinner({ className }: { className?: string }) {
 }
 
 const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(({ className, variant, size, asChild = false, loading = false, loadingLabel = "Working", disabled, children, ...props }, ref) => {
+  // A control's own descendants are presentational to assistive tech, so the
+  // hidden label inside it is a NAME and nothing more -- it is read only if the
+  // reader happens to visit the button, and a disabled button drops focus the
+  // moment it goes busy. This region sits outside the control so the change is
+  // spoken, and it is rendered while idle too: a live region inserted in the
+  // same paint as its text is routinely read as nothing at all.
+  const announcement = <span role="status" className="sr-only">{loading ? loadingLabel : ""}</span>;
+
   if (asChild) {
     // A Slot renders someone else's element -- usually a link -- so it takes the
     // busy flag but never the spinner, which would be a second child.
@@ -59,33 +67,47 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(({ className, va
     // branch did before, meant a disabled link stayed fully clickable.
     const inactive = disabled || loading;
     return (
-      <Slot
-        className={cn(buttonVariants({ variant, size, className }), inactive && "pointer-events-none opacity-50")}
-        ref={ref}
-        aria-busy={loading || undefined}
-        aria-disabled={inactive || undefined}
-        tabIndex={inactive ? -1 : undefined}
-        {...props}
-      >
-        {children}
-      </Slot>
+      <>
+        <Slot
+          className={cn(buttonVariants({ variant, size, className }), inactive && "pointer-events-none opacity-50")}
+          ref={ref}
+          aria-busy={loading || undefined}
+          aria-disabled={inactive || undefined}
+          tabIndex={inactive ? -1 : undefined}
+          {...props}
+        >
+          {children}
+        </Slot>
+        {announcement}
+      </>
     );
   }
 
   return (
-    <button
-      className={cn(buttonVariants({ variant, size, className }), loading && "relative cursor-progress disabled:opacity-100")}
-      ref={ref}
-      disabled={disabled || loading}
-      aria-busy={loading || undefined}
-      data-loading={loading ? "true" : undefined}
-      {...props}
-    >
-      {/* The label keeps its own space while it is hidden, so the button is
-          exactly as wide working as it is idle and nothing around it moves. */}
-      <span className={cn("inline-flex items-center justify-center", loading && "invisible")}>{children}</span>
-      {loading && <span className="absolute inset-0 grid place-items-center"><Spinner /><span className="sr-only">{loadingLabel}</span></span>}
-    </button>
+    <>
+      <button
+        className={cn(
+          buttonVariants({ variant, size, className }),
+          // The base disables pointer events while disabled, and an element that
+          // takes no pointer events draws no cursor of its own -- the arrow the
+          // person sees belongs to the page underneath. Handing them back is what
+          // makes the busy cursor appear; the click stays swallowed either way,
+          // because that is the disabled attribute's job and not the pointer's.
+          loading && "relative cursor-progress disabled:pointer-events-auto disabled:opacity-100",
+        )}
+        ref={ref}
+        disabled={disabled || loading}
+        aria-busy={loading || undefined}
+        data-loading={loading ? "true" : undefined}
+        {...props}
+      >
+        {/* The label keeps its own space while it is hidden, so the button is
+            exactly as wide working as it is idle and nothing around it moves. */}
+        <span className={cn("inline-flex items-center justify-center", loading && "invisible")}>{children}</span>
+        {loading && <span className="absolute inset-0 grid place-items-center"><Spinner /><span className="sr-only">{loadingLabel}</span></span>}
+      </button>
+      {announcement}
+    </>
   );
 });
 Button.displayName = "Button";

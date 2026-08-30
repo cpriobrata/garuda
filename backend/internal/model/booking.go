@@ -56,7 +56,13 @@ type BookingConfig struct {
 	// NoticeHours is how little warning the owner will accept. Somebody booking
 	// a slot eight minutes from now is a meeting nobody attends.
 	LeadDaysAhead int `json:"lead_days_ahead,omitempty"`
-	NoticeHours   int `json:"notice_hours,omitempty"`
+	// NoticeHours carries NO omitempty, deliberately. Zero here is a real answer
+	// -- "no minimum, book me in ten minutes" -- and normalizeBooking never
+	// replaces it with a default, so omitting it from the payload made that
+	// answer indistinguishable from an old agent that had never been asked. The
+	// builder read the absence as "unset" and showed 4 hours, so an owner who
+	// chose no minimum found it silently back to four on the next load.
+	NoticeHours int `json:"notice_hours"`
 }
 
 // Clone returns a copy that shares no mutable state with the store. Weekdays is

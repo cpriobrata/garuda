@@ -34,6 +34,10 @@ export function LeadDestinations() {
   // is what lets somebody type a channel without every keystroke being a write.
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [pending, setPending] = useState<string | null>(null);
+  // Where the switch is DRAWN while a write is in flight. The server's answer is
+  // still what wins; without this the control sat still for the whole round trip,
+  // which on a slow connection is several seconds of a toggle that looks broken.
+  const [optimistic, setOptimistic] = useState<Record<string, boolean>>({});
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -73,8 +77,9 @@ export function LeadDestinations() {
     }
   };
 
-  const persist = (destination: LeadDestination, enabled: boolean) =>
-    run(destination.toolkit, async () => {
+  const persist = async (destination: LeadDestination, enabled: boolean) => {
+    setOptimistic((current) => ({ ...current, [destination.toolkit]: enabled }));
+    await run(destination.toolkit, async () => {
       const setting = (drafts[destination.toolkit] ?? "").trim();
       const saved = await saveLeadRoute({ toolkit: destination.toolkit, setting, enabled });
       setRoutes((current) => ({
@@ -94,6 +99,14 @@ export function LeadDestinations() {
         ? `New leads will be sent to ${destination.label}.`
         : `${destination.label} will stop receiving leads. Your settings are kept.`;
     });
+    // Whatever happened, the switch goes back to reflecting stored state — which
+    // after a refused write is where it started, so the failure visibly undoes.
+    setOptimistic((current) => {
+      const next = { ...current };
+      delete next[destination.toolkit];
+      return next;
+    });
+  };
 
   if (available === null) {
     return (
@@ -122,7 +135,7 @@ export function LeadDestinations() {
       <div className="grid gap-3 sm:grid-cols-2">
         {available.map((destination) => {
           const route = routes[destination.toolkit];
-          const enabled = route?.enabled ?? false;
+          const enabled = optimistic[destination.toolkit] ?? route?.enabled ?? false;
           const busy = pending === destination.toolkit;
           const delivered = formatMoment(route?.last_delivered_at);
           const inputID = `lead-route-${destination.toolkit}`;
@@ -173,21 +186,25 @@ export function LeadDestinations() {
                 {route?.paused ? (
                   <p className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-xs text-amber-900">
                     <PauseCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
-                    <span>
+                    <span className="min-w-0 break-words">
                       Garuda stopped sending here after {route.failure_count} failures. Fix the settings above and save to start
                       again.
-                      {route.last_error ? <span className="mt-1 block font-mono text-[11px]">{route.last_error}</span> : null}
+                      {route.last_error ? <span className="mt-1 block break-all font-mono text-[11px]">{route.last_error}</span> : null}
                     </span>
                   </p>
                 ) : route?.last_error ? (
-                  <p className="text-xs text-amber-800">Last attempt failed: {route.last_error}</p>
+                  <p className="break-words text-xs text-amber-800">Last attempt failed: {route.last_error}</p>
                 ) : delivered ? (
                   <p className="text-xs text-slate-500">Last delivered {delivered}</p>
                 ) : null}
 
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <p className="text-xs text-slate-400">
-                    {enabled ? "Receiving new leads" : "Not receiving leads"}
+                    {!route
+                      ? "Switch this on to send leads here"
+                      : enabled
+                        ? "Receiving new leads"
+                        : "Not receiving leads"}
                   </p>
                   <Button
                     type="button"

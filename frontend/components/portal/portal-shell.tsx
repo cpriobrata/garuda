@@ -6,6 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import {
   Blocks,
   Bot,
+  CalendarClock,
   ChevronDown,
   CircleHelp,
   CreditCard,
@@ -28,7 +29,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { clearAuthSession, garudaApi } from "@/lib/api";
+import { clearAuthSession, garudaApi, hasAuthSession, onAuthSessionCleared } from "@/lib/api";
 import { agents as demoAgents, type Agent } from "@/lib/demo-data";
 import { cn } from "@/lib/utils";
 
@@ -37,6 +38,7 @@ const nav = [
   { label: "Agents", href: "/app/agents", icon: Bot },
   { label: "Conversations", href: "/app/conversations", icon: MessageSquareText },
   { label: "Leads", href: "/app/leads", icon: UsersRound },
+  { label: "Appointments", href: "/app/appointments", icon: CalendarClock },
   { label: "Widget", href: "/app/widget", icon: Inbox },
   { label: "Integrations", href: "/app/integrations", icon: Blocks },
 ];
@@ -84,6 +86,13 @@ export async function resolvePortalAccess(pathname: string): Promise<{ access: P
   return { access: evaluatePortalAccess(bootstrapResult.value, pathname), account: accountFromBootstrap(bootstrapResult.value), agents };
 }
 
+// The gate's own destination, and deliberately without the session=expired that
+// lib/api.ts adds: nothing here was rejected by the server, there was simply no
+// session to present.
+function signInDestination(pathname: string) {
+  return `/auth/sign-in?next=${encodeURIComponent(pathname)}`;
+}
+
 export function PortalShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
@@ -106,9 +115,9 @@ export function PortalShell({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!connected) return;
-    if (!window.sessionStorage.getItem("garuda_access_token")) {
-      setAccess({ state: "redirect", destination: `/auth/sign-in?next=${encodeURIComponent(pathname)}` });
-      router.replace(`/auth/sign-in?next=${encodeURIComponent(pathname)}`);
+    if (!hasAuthSession()) {
+      setAccess({ state: "redirect", destination: signInDestination(pathname) });
+      router.replace(signInDestination(pathname));
       return;
     }
 
@@ -135,6 +144,17 @@ export function PortalShell({ children }: { children: React.ReactNode }) {
     return () => { active = false; };
   }, [attempt, connected, pathname, router]);
 
+  // One session is now shared by every tab, so signing out in one of them has to
+  // close this one as well rather than leave a workspace on screen that no
+  // longer has a token behind it.
+  useEffect(() => {
+    if (!connected) return;
+    return onAuthSessionCleared(() => {
+      setAccess({ state: "redirect", destination: signInDestination(pathname) });
+      router.replace(signInDestination(pathname));
+    });
+  }, [connected, pathname, router]);
+
   const selectedAgent = agentItems.find((item) => item.id === selectedAgentId) || agentItems[0];
   const accountInitials = account.name.split(/\s+/).filter(Boolean).map((part) => part[0]).join("").slice(0, 2).toUpperCase() || "A";
 
@@ -156,9 +176,9 @@ export function PortalShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="min-h-screen bg-[#f7f8fb]">
       {mobileOpen && <button className="fixed inset-0 z-40 bg-slate-950/40 backdrop-blur-sm lg:hidden" onClick={() => setMobileOpen(false)} aria-label="Close navigation" />}
-      <aside className={cn("fixed inset-y-0 left-0 z-50 flex w-[250px] flex-col border-r border-slate-200 bg-white transition-transform duration-200 lg:translate-x-0", mobileOpen ? "translate-x-0" : "-translate-x-full")}>
-        <div className="flex h-16 items-center justify-between border-b px-5"><Brand href="/app" /><Button variant="ghost" size="icon" className="h-8 w-8 lg:hidden" onClick={() => setMobileOpen(false)}><X className="h-4 w-4" /></Button></div>
-        <div className="px-3 pt-4">
+      <aside className={cn("fixed inset-y-0 left-0 z-50 flex w-[250px] flex-col border-r border-slate-200 bg-white transition-[transform,visibility] duration-200 lg:visible lg:translate-x-0", mobileOpen ? "visible translate-x-0" : "invisible -translate-x-full")}>
+        <div className="flex h-16 shrink-0 items-center justify-between border-b px-5"><Brand href="/app" /><Button variant="ghost" size="icon" className="h-8 w-8 lg:hidden" onClick={() => setMobileOpen(false)}><X className="h-4 w-4" /></Button></div>
+        <div className="shrink-0 px-3 pt-4">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button className="flex w-full items-center gap-3 rounded-xl border bg-slate-50 px-3 py-2.5 text-left transition hover:bg-slate-100">
@@ -168,26 +188,26 @@ export function PortalShell({ children }: { children: React.ReactNode }) {
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent className="w-[224px]" align="start">
-              <DropdownMenuLabel>Switch agent</DropdownMenuLabel>
-              {agentItems.length ? agentItems.map((agent) => <DropdownMenuItem key={agent.id} onSelect={() => setSelectedAgentId(agent.id)}><span className={cn("mr-2 grid h-7 w-7 place-items-center rounded-lg bg-gradient-to-br text-[10px] font-bold text-white", agent.color)}>{agent.name[0]?.toUpperCase()}</span><span className="flex-1 truncate">{agent.name}</span>{agent.id === selectedAgent?.id ? <span className="text-[10px] font-semibold text-indigo-600">Selected</span> : null}</DropdownMenuItem>) : <DropdownMenuItem disabled>No agents in this workspace</DropdownMenuItem>}
+              <DropdownMenuLabel>Open an agent</DropdownMenuLabel>
+              {agentItems.length ? agentItems.map((agent) => <DropdownMenuItem key={agent.id} asChild><Link href={`/app/agents/${agent.id}`} onClick={() => { setSelectedAgentId(agent.id); setMobileOpen(false); }}><span className={cn("mr-2 grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-gradient-to-br text-[10px] font-bold text-white", agent.color)}>{agent.name[0]?.toUpperCase()}</span><span className="min-w-0 flex-1 truncate">{agent.name}</span><span className={cn("ml-2 shrink-0 text-[10px] font-semibold", agent.status === "live" ? "text-emerald-600" : "text-slate-400")}>{agent.status === "live" ? "Live" : "Draft"}</span></Link></DropdownMenuItem>) : <DropdownMenuItem disabled>No agents in this workspace</DropdownMenuItem>}
               <DropdownMenuSeparator />
               <DropdownMenuItem asChild><Link href="/app/agents/new"><Plus className="mr-2 h-4 w-4" /> New agent</Link></DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
-        <nav className="mt-5 flex-1 space-y-1 px-3" aria-label="Workspace navigation">
+        <nav className="mt-5 min-h-0 flex-1 space-y-1 overflow-y-auto px-3" aria-label="Workspace navigation">
           <p className="px-3 pb-2 text-[10px] font-bold uppercase tracking-[.16em] text-slate-400">Workspace</p>
           {nav.map((item) => <NavItem key={item.href} item={item} pathname={pathname} onNavigate={() => setMobileOpen(false)} />)}
           <p className="px-3 pb-2 pt-6 text-[10px] font-bold uppercase tracking-[.16em] text-slate-400">Manage</p>
           {lowerNav.map((item) => <NavItem key={item.href} item={item} pathname={pathname} onNavigate={() => setMobileOpen(false)} />)}
         </nav>
-        <div className="m-3 rounded-xl border border-indigo-100 bg-gradient-to-br from-indigo-50 to-violet-50 p-3.5">
+        <div className="m-3 shrink-0 rounded-xl border border-indigo-100 bg-gradient-to-br from-indigo-50 to-violet-50 p-3.5">
           <div className="flex items-center gap-2"><span className="grid h-7 w-7 place-items-center rounded-lg bg-indigo-600 text-white"><Sparkles className="h-3.5 w-3.5" /></span><p className="text-xs font-semibold text-indigo-950">Launch plan</p><Badge className="ml-auto bg-white text-[9px] text-indigo-700">{connected ? (account.planStatus || "Plan") : "Demo"}</Badge></div>
           {!connected && <><div className="mt-3 h-1.5 overflow-hidden rounded-full bg-indigo-100"><div className="h-full w-[42%] rounded-full bg-indigo-600" /></div><p className="mt-2 text-[10px] text-indigo-700">42 of 100 demo conversations</p></>}
           {connected && <p className="mt-3 text-[10px] leading-4 text-indigo-700">Subscription and server-recorded usage are available in billing.</p>}
           <Link href="/app/billing" className="mt-2 inline-block text-[10px] font-semibold text-indigo-700 hover:underline">View billing →</Link>
         </div>
-        <div className="border-t p-3">
+        <div className="shrink-0 border-t p-3">
           <DropdownMenu>
             <DropdownMenuTrigger asChild><button className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left hover:bg-slate-50"><Avatar className="h-8 w-8"><AvatarFallback className="bg-slate-950 text-white">{accountInitials}</AvatarFallback></Avatar><span className="min-w-0 flex-1"><span className="block truncate text-xs font-semibold text-slate-900">{account.name}</span><span className="block truncate text-[10px] text-slate-500">{account.organization}</span></span><ChevronDown className="h-4 w-4 text-slate-400" /></button></DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-52"><DropdownMenuLabel>{account.email || "Authenticated account"}</DropdownMenuLabel><DropdownMenuSeparator /><DropdownMenuItem asChild><Link href="/app/settings"><Settings className="mr-2 h-4 w-4" /> Account settings</Link></DropdownMenuItem><DropdownMenuItem asChild><Link href="/help"><CircleHelp className="mr-2 h-4 w-4" /> Help centre</Link></DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem className="text-red-600" asChild><Link href="/auth/sign-in" onClick={clearAuthSession}><LogOut className="mr-2 h-4 w-4" /> Sign out</Link></DropdownMenuItem></DropdownMenuContent>

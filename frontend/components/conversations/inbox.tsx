@@ -73,14 +73,43 @@ export function ConversationInbox() {
   // Read by an in-flight send to check the owner has not moved on to another
   // conversation before the response landed.
   const selectedRef = useRef(selected);
-  const active = items.find((item) => item.id === selected);
+  const listed = items.find((item) => item.id === selected);
+  // A conversation reached by link -- from an appointment or a lead -- may be
+  // older than the newest hundred the list holds, so it is not in `items`. The
+  // fetched detail stands in for the row, because the alternative is an empty
+  // pane on a link that worked, and the alternative before that was showing a
+  // different visitor's transcript under this one's heading.
+  const active: Conversation | undefined = listed || (connected && detail && detail.conversation.id === selected
+    ? {
+      id: detail.conversation.id,
+      visitor: detail.lead?.name || "Website visitor",
+      initials: (detail.lead?.name || "Website visitor").split(" ").map((part) => part[0] || "").join("").slice(0, 2).toUpperCase() || "WV",
+      message: "",
+      time: "",
+      unread: 0,
+      status: detail.lead ? "Lead captured" : "AI active",
+      source: detail.conversation.page_title || detail.conversation.page_url || "Website",
+      intent: "",
+    }
+    : undefined);
   const filtered = useMemo(() => items.filter((item) => `${item.visitor} ${item.message} ${item.intent}`.toLowerCase().includes(query.toLowerCase())), [items, query]);
 
   useEffect(() => {
     garudaApi.listConversations().then((next) => {
       setItems(next);
       const requested = new URLSearchParams(window.location.search).get("id");
-      setSelected((current) => requested && next.some((item) => item.id === requested) ? requested : next.some((item) => item.id === current) ? current : next[0]?.id || "");
+      setSelected((current) => {
+        // A requested id is HONOURED even when the list does not contain it. The
+        // list is only the newest hundred sessions, so an appointment or a lead
+        // linking to an older conversation used to fall through to next[0] --
+        // quietly showing a different visitor's transcript under a heading the
+        // owner arrived at from somebody else's booking. The detail effect below
+        // fetches it by id, which is the endpoint that can answer for any of
+        // them, and shows a real error if it genuinely does not exist.
+        if (requested) return requested;
+        if (next.some((item) => item.id === current)) return current;
+        return next[0]?.id || "";
+      });
     }).catch(() => undefined);
   }, []);
 
@@ -201,7 +230,7 @@ export function ConversationInbox() {
               <Button variant="ghost" size="icon" className="mr-1 h-8 w-8 md:hidden" onClick={() => setMobileDetail(false)}><ArrowLeft className="h-4 w-4" /></Button>
               <Avatar className="h-9 w-9"><AvatarFallback className="bg-indigo-100 text-[10px] font-bold text-indigo-700">{active.initials}</AvatarFallback></Avatar>
               <div className="ml-3 min-w-0"><div className="flex items-center gap-2"><p className="truncate text-xs font-semibold text-slate-900">{active.visitor}</p>{connected && detail?.lead ? <Badge variant="success" className="capitalize">{detail.lead.status}</Badge> : !connected ? <Badge variant="success">Demo · high intent</Badge> : null}</div><p className="mt-0.5 text-[9px] text-slate-400">{detail?.conversation.page_title || active.source}{connected && detail?.conversation.agent_id ? ` · Agent ${detail.conversation.agent_id}` : " · Aria (demo)"}</p></div>
-              <div className="ml-auto pl-2">{connected ? null : <Button variant="outline" size="sm" className="h-8 text-[10px]"><UserRound className="mr-1.5 h-3.5 w-3.5" /> Demo takeover</Button>}</div>
+              <div className="ml-auto pl-2">{connected ? null : <Button variant="outline" size="sm" className="h-8 text-[10px]" disabled title="Replying as a person works once this workspace is connected to the API."><UserRound className="mr-1.5 h-3.5 w-3.5" /> Takeover</Button>}</div>
             </div>
             <div ref={transcriptRef} className="hide-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-8">
               <div className="mx-auto max-w-2xl">

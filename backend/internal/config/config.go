@@ -38,6 +38,10 @@ type Config struct {
 	AlertWhatsAppBaseURL  string
 	AlertWhatsAppTemplate string
 	AlertWhatsAppLanguage string
+	AlertPeriskopeKey     string
+	AlertPeriskopePhone   string
+	AlertPeriskopeChat    string
+	AlertPeriskopeURL     string
 	AlertWebhookURL       string
 	AlertWebhookAuth      string
 
@@ -127,6 +131,10 @@ func Load() (Config, error) {
 		AlertWhatsAppBaseURL:  strings.TrimRight(env("ALERT_WHATSAPP_API_URL", "https://graph.facebook.com/v21.0"), "/"),
 		AlertWhatsAppTemplate: strings.TrimSpace(os.Getenv("ALERT_WHATSAPP_TEMPLATE")),
 		AlertWhatsAppLanguage: env("ALERT_WHATSAPP_TEMPLATE_LANGUAGE", "en"),
+		AlertPeriskopeKey:     strings.TrimSpace(os.Getenv("PERISKOPE_API_KEY")),
+		AlertPeriskopePhone:   strings.TrimSpace(os.Getenv("PERISKOPE_PHONE")),
+		AlertPeriskopeChat:    strings.TrimSpace(os.Getenv("PERISKOPE_ALERT_CHAT_ID")),
+		AlertPeriskopeURL:     strings.TrimRight(env("PERISKOPE_API_URL", "https://api.periskope.app/v1"), "/"),
 		AlertWebhookURL:       strings.TrimSpace(os.Getenv("ALERT_WEBHOOK_URL")),
 		AlertWebhookAuth:      strings.TrimSpace(os.Getenv("ALERT_WEBHOOK_AUTH")),
 		MetaPixelID:           strings.TrimSpace(os.Getenv("META_PIXEL_ID")),
