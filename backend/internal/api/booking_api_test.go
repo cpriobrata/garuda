@@ -1,9 +1,11 @@
 package api
 
 import (
+	"strings"
 	"testing"
 	"time"
 
+	"garuda/backend/internal/composio"
 	"garuda/backend/internal/llm"
 	"garuda/backend/internal/model"
 )
@@ -255,6 +257,110 @@ func TestThePeriodEndIsReadFromWhereverStripePutIt(t *testing.T) {
 	} {
 		if got := subscriptionPeriodEnd(object); got != nil {
 			t.Errorf("%s: invented a period end of %v", name, got)
+		}
+	}
+}
+
+// An agent books into exactly one calendar, and which one is the customer's
+// choice. Before this the two Google tool names were written into the booking
+// code, so a customer on Outlook or Cal.com had a Book button that could never
+// work.
+func TestAnAgentCanBookIntoAnyOfTheSupportedCalendars(t *testing.T) {
+	for _, toolkit := range []string{"googlecalendar", "outlook", "cal", "calendly"} {
+		booking := model.BookingConfig{Enabled: true, Timezone: "Europe/London", Calendar: toolkit}
+		provider, known := composio.CalendarProviderFor(toolkit)
+		if !known {
+			t.Fatalf("%s is offered but not driveable", toolkit)
+		}
+		if provider.SettingLabel != "" {
+			booking.CalendarSetting = "configured"
+		}
+		normalizeBooking(&booking)
+		details := map[string]string{}
+		validateBooking(booking, details)
+		if len(details) != 0 {
+			t.Errorf("%s was rejected: %v", toolkit, details)
+		}
+		if !bookingAvailable(booking) {
+			t.Errorf("%s was configured but not offered", toolkit)
+		}
+	}
+}
+
+// A stored blank has to keep meaning what it meant when it was written, which
+// was Google Calendar -- the only one that existed.
+func TestAnAgentWithNoCalendarChosenStillBooksIntoGoogle(t *testing.T) {
+	booking := model.BookingConfig{Enabled: true, Timezone: "UTC"}
+	if bookingCalendar(booking) != "googlecalendar" {
+		t.Fatalf("the default calendar is %q", bookingCalendar(booking))
+	}
+	if !bookingAvailable(booking) {
+		t.Fatal("an agent configured before other calendars existed stopped being offered")
+	}
+}
+
+// A provider that needs a setting and has not been given one cannot offer a
+// time, and finding that out in front of a visitor is the wrong moment.
+func TestACalendarMissingItsSettingIsNotOffered(t *testing.T) {
+	booking := model.BookingConfig{Enabled: true, Timezone: "UTC", Calendar: "cal"}
+	normalizeBooking(&booking)
+	if bookingAvailable(booking) {
+		t.Fatal("Cal.com was offered with no event type id")
+	}
+	details := map[string]string{}
+	validateBooking(booking, details)
+	if details["booking.calendar_setting"] == "" {
+		t.Error("saving it was allowed without the setting, so nobody was told")
+	}
+
+	booking.CalendarSetting = "12345"
+	if !bookingAvailable(booking) {
+		t.Fatal("Cal.com with its event type id was still not offered")
+	}
+}
+
+// Calendly finishes the booking on its own page. The widget has to know before
+// it offers a time, so it can say where the visitor is going.
+func TestACalendarThatFinishesElsewhereSaysSoInTheBootstrap(t *testing.T) {
+	resolved := resolveBooking(model.Agent{Booking: model.BookingConfig{
+		Enabled: true, Timezone: "UTC", Calendar: "calendly", CalendarSetting: "calendly.com/you/30min",
+	}})
+	if !resolved.Enabled {
+		t.Fatal("a configured Calendly agent offers nothing")
+	}
+	if !resolved.CompletesElsewhere || resolved.ProviderLabel != "Calendly" {
+		t.Fatalf("the widget is not told the booking finishes elsewhere: %+v", resolved)
+	}
+
+	// And one that does finish in the chat must not claim otherwise.
+	inChat := resolveBooking(model.Agent{Booking: model.BookingConfig{
+		Enabled: true, Timezone: "UTC", Calendar: "googlecalendar",
+	}})
+	if inChat.CompletesElsewhere {
+		t.Error("Google Calendar was marked as finishing elsewhere")
+	}
+}
+
+// Every app offered as a calendar must actually be driveable, and every app the
+// roles table describes must exist as something. A table that promises a job the
+// code cannot do is the exact failure this table was written to prevent.
+func TestEveryAdvertisedCalendarIsDriveableAndEveryRoleIsReal(t *testing.T) {
+	for _, role := range composio.RolesWith(composio.CapabilityCalendar) {
+		if _, known := composio.CalendarProviderFor(role.Toolkit); !known {
+			t.Errorf("%s is advertised as a calendar but cannot be driven", role.Toolkit)
+		}
+	}
+	for _, provider := range composio.CalendarProviders() {
+		if !composio.HasCapability(provider.Toolkit, composio.CapabilityCalendar) {
+			t.Errorf("%s can be driven as a calendar but is not offered as one", provider.Toolkit)
+		}
+	}
+	for _, role := range composio.AllRoles() {
+		if strings.TrimSpace(role.UseCase) == "" {
+			t.Errorf("%s has no use case, so nobody can tell what connecting it does", role.Toolkit)
+		}
+		if strings.TrimSpace(role.Label) == "" {
+			t.Errorf("%s has no label", role.Toolkit)
 		}
 	}
 }

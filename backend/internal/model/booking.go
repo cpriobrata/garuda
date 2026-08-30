@@ -14,6 +14,22 @@ package model
 type BookingConfig struct {
 	Enabled bool `json:"enabled"`
 
+	// Calendar is the connected app appointments are written to -- the toolkit
+	// slug, such as googlecalendar, outlook, cal or calendly. Empty means the
+	// account's Google Calendar, which is what every agent configured before
+	// other providers existed was using.
+	//
+	// ONE calendar per agent, deliberately. An agent stands for one job -- the
+	// sales agent, the clinic front desk -- and "when are you free" has to have
+	// a single answer. Two calendars would mean choosing one at booking time
+	// with no basis for the choice, or offering times somebody else owns.
+	Calendar string `json:"calendar,omitempty"`
+
+	// CalendarSetting is the one value a provider needs beyond the connection:
+	// a Cal.com event type id, a Calendly event URL. Empty for the calendars
+	// that need nothing.
+	CalendarSetting string `json:"calendar_setting,omitempty"`
+
 	// ButtonLabel is what the visitor clicks. Title is what the owner will see
 	// in their own calendar, where "Appointment" from a stranger is less useful
 	// than the business's own wording.

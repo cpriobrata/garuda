@@ -228,6 +228,9 @@ func (s *Server) Handler() http.Handler {
 	protected("GET /v1/dashboard", s.dashboard)
 	protected("GET /v1/integrations/catalog", s.listIntegrationCatalog)
 	protected("GET /v1/integrations/categories", s.listIntegrationCategories)
+	// What connecting an app actually does. Served from a table rather than
+	// inferred, so the screen never promises something the code cannot keep.
+	protected("GET /v1/integrations/roles", s.listIntegrationRoles)
 	protected("GET /v1/integrations/connections", s.listIntegrationConnections)
 	protectedLimited("POST /v1/integrations/connections", "integrations.connect", 30, time.Minute, s.connectIntegration)
 	protected("DELETE /v1/integrations/connections/{connectionID}", s.disconnectIntegration)

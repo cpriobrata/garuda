@@ -47,12 +47,36 @@ type resolvedBooking struct {
 	Label           string `json:"label,omitempty"`
 	DurationMinutes int    `json:"duration_minutes,omitempty"`
 	Timezone        string `json:"timezone,omitempty"`
+
+	// CompletesElsewhere says the chosen calendar finishes the booking on its
+	// own page, so the widget can tell the visitor before they pick a time.
+	CompletesElsewhere bool   `json:"completes_elsewhere,omitempty"`
+	ProviderLabel      string `json:"provider_label,omitempty"`
 }
 
 func bookingAvailable(booking model.BookingConfig) bool {
 	// A configuration switched on with no time zone cannot offer a correct time,
 	// and an appointment at the wrong hour is worse than no appointment.
-	return booking.Enabled && strings.TrimSpace(booking.Timezone) != ""
+	if !booking.Enabled || strings.TrimSpace(booking.Timezone) == "" {
+		return false
+	}
+	provider, known := composio.CalendarProviderFor(bookingCalendar(booking))
+	if !known {
+		return false
+	}
+	// A provider needing a setting it has not been given cannot offer a time
+	// either, and finding that out in front of a visitor is the wrong moment.
+	return provider.SettingLabel == "" || strings.TrimSpace(booking.CalendarSetting) != ""
+}
+
+// bookingCalendar is the calendar this agent books into. Empty means Google
+// Calendar: every agent configured before other providers existed was using it,
+// and a stored blank must keep meaning what it meant then.
+func bookingCalendar(booking model.BookingConfig) string {
+	if calendar := strings.TrimSpace(booking.Calendar); calendar != "" {
+		return calendar
+	}
+	return "googlecalendar"
 }
 
 func resolveBooking(agent model.Agent) resolvedBooking {
@@ -64,12 +88,20 @@ func resolveBooking(agent model.Agent) resolvedBooking {
 	if label == "" {
 		label = "Book an appointment"
 	}
-	return resolvedBooking{
+	resolved := resolvedBooking{
 		Enabled:         true,
 		Label:           label,
 		DurationMinutes: appointmentMinutes(booking),
 		Timezone:        booking.Timezone,
 	}
+	// Calendly and its like finish the booking on their own page. The widget has
+	// to know that before it offers a slot, so it can say where the visitor is
+	// going rather than surprising them with somebody else's website.
+	if provider, known := composio.CalendarProviderFor(bookingCalendar(booking)); known && !provider.BookInProduct {
+		resolved.CompletesElsewhere = true
+		resolved.ProviderLabel = provider.Label
+	}
+	return resolved
 }
 
 func appointmentMinutes(booking model.BookingConfig) int {
@@ -86,6 +118,8 @@ func normalizeBooking(booking *model.BookingConfig) {
 	booking.ButtonLabel = strings.TrimSpace(booking.ButtonLabel)
 	booking.Title = strings.TrimSpace(booking.Title)
 	booking.Timezone = strings.TrimSpace(booking.Timezone)
+	booking.Calendar = strings.ToLower(strings.TrimSpace(booking.Calendar))
+	booking.CalendarSetting = strings.TrimSpace(booking.CalendarSetting)
 	if booking.DurationMinutes < 0 {
 		booking.DurationMinutes = 0
 	}
@@ -124,6 +158,14 @@ func normalizeBooking(booking *model.BookingConfig) {
 func validateBooking(booking model.BookingConfig, details map[string]string) {
 	if booking.Enabled && booking.Timezone == "" {
 		details["booking.timezone"] = "Choose the time zone your working hours are in"
+	}
+	if booking.Calendar != "" {
+		provider, known := composio.CalendarProviderFor(booking.Calendar)
+		if !known {
+			details["booking.calendar"] = "Choose a calendar Garuda can book into"
+		} else if provider.SettingLabel != "" && booking.CalendarSetting == "" {
+			details["booking.calendar_setting"] = provider.Label + " needs its " + strings.ToLower(provider.SettingLabel)
+		}
 	}
 	if booking.Timezone != "" {
 		if _, err := time.LoadLocation(booking.Timezone); err != nil {
@@ -198,7 +240,7 @@ func (s *Server) listBookingSlots(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-	slots, err := s.composio.FreeSlots(ctx, session.AccountID, from, to, duration, booking.Timezone, day)
+	slots, err := s.composio.FreeSlotsOn(ctx, session.AccountID, bookingCalendar(booking), booking.CalendarSetting, from, to, duration, booking.Timezone, day)
 	if err != nil {
 		s.writeBookingError(w, r, err)
 		return
@@ -272,7 +314,7 @@ func (s *Server) createBooking(w http.ResponseWriter, r *http.Request) {
 	// Re-check rather than trust. Between being offered a time and choosing it,
 	// the owner may have taken that slot themselves, and double-booking somebody
 	// is the one outcome this feature must not produce.
-	slots, err := s.composio.FreeSlots(ctx, session.AccountID, from, to, duration, booking.Timezone, day)
+	slots, err := s.composio.FreeSlotsOn(ctx, session.AccountID, bookingCalendar(booking), booking.CalendarSetting, from, to, duration, booking.Timezone, day)
 	if err != nil {
 		s.writeBookingError(w, r, err)
 		return
@@ -304,12 +346,13 @@ func (s *Server) createBooking(w http.ResponseWriter, r *http.Request) {
 		description = strings.TrimSpace(description + "\n\nBooked from " + session.PageURL)
 	}
 
-	eventID, err := s.composio.Book(ctx, session.AccountID, composio.BookingRequest{
+	eventID, err := s.composio.BookOn(ctx, session.AccountID, bookingCalendar(booking), booking.CalendarSetting, composio.BookingRequest{
 		Start:           start.UTC(),
 		DurationMinutes: appointmentMinutes(booking),
 		Timezone:        booking.Timezone,
 		Summary:         truncateRunes(title, maxBookingTitle+200),
 		Description:     description,
+		AttendeeName:    name,
 		AttendeeEmail:   email,
 	})
 	if err != nil {

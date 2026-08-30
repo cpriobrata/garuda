@@ -53,6 +53,10 @@ type BookingRequest struct {
 	Timezone        string
 	Summary         string
 	Description     string
+
+	// AttendeeName is needed by the scheduling products, which book on behalf
+	// of a named person rather than simply writing an event into a diary.
+	AttendeeName string
 	// AttendeeEmail is the visitor's, and it is the only piece of their data
 	// that reaches the calendar provider. It is optional: a visitor who did not
 	// give an email still gets the appointment, the owner simply has no invite
@@ -152,7 +156,13 @@ func (d WorkingDay) bookable(moment time.Time) bool {
 // slotsFromBusy is the whole inversion, separated from the network so it can be
 // tested exhaustively without a calendar.
 func slotsFromBusy(data map[string]any, from, to time.Time, duration time.Duration, day WorkingDay) []Slot {
-	busy := busyPeriods(data)
+	return slotsFromBusyPeriods(busyPeriods(data), from, to, duration, day)
+}
+
+// slotsFromBusyPeriods is the inversion itself, taking periods rather than a
+// provider payload so every free/busy calendar shares one implementation of the
+// arithmetic that decides whether somebody gets double-booked.
+func slotsFromBusyPeriods(busy []Slot, from, to time.Time, duration time.Duration, day WorkingDay) []Slot {
 	sort.Slice(busy, func(i, j int) bool { return busy[i].Start.Before(busy[j].Start) })
 
 	// A last-resort guard only. normalizeBooking resolves the working day at save

@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	"garuda/backend/internal/composio"
 )
 
 // Integrations let each customer connect their own third-party accounts through
@@ -155,4 +157,47 @@ func safeToolkitSlug(value string) bool {
 		}
 	}
 	return true
+}
+
+// listIntegrationRoles answers the question the catalogue could not: what will
+// connecting this app actually do?
+//
+// Fourteen hundred products can be connected and only a handful have a job
+// attached. Rather than let the screen imply otherwise, this returns the whole
+// table -- app, capability, and the sentence a customer reads before they
+// connect -- and the UI shows the rest as "connects, nothing wired yet, use a
+// webhook", which is the truth.
+func (s *Server) listIntegrationRoles(w http.ResponseWriter, r *http.Request) {
+	roles := composio.AllRoles()
+	payload := make([]map[string]any, 0, len(roles))
+	for _, role := range roles {
+		entry := map[string]any{
+			"toolkit": role.Toolkit, "capability": string(role.Capability),
+			"label": role.Label, "use_case": role.UseCase,
+		}
+		if role.SettingLabel != "" {
+			entry["setting_label"] = role.SettingLabel
+			entry["setting_hint"] = role.SettingHint
+		}
+		if role.Partial {
+			entry["partial"] = true
+			entry["partial_note"] = role.PartialNote
+		}
+		payload = append(payload, entry)
+	}
+
+	// The calendars are listed separately because choosing one is a different
+	// decision from connecting it: an agent books into exactly one, and the UI
+	// needs to know which of them finish on their own page.
+	providers := composio.CalendarProviders()
+	calendars := make([]map[string]any, 0, len(providers))
+	for _, provider := range providers {
+		calendars = append(calendars, map[string]any{
+			"toolkit": provider.Toolkit, "label": provider.Label,
+			"setting_label": provider.SettingLabel,
+			"books_in_chat": provider.BookInProduct,
+		})
+	}
+
+	s.writeData(w, http.StatusOK, map[string]any{"roles": payload, "calendars": calendars})
 }
