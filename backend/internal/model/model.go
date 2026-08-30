@@ -21,6 +21,9 @@ type State struct {
 	CheckoutAttempts     []CheckoutAttempt     `json:"checkout_attempts,omitempty"`
 	WebhookEvents        []WebhookEvent        `json:"webhook_events"`
 	Jobs                 []Job                 `json:"jobs"`
+	// Additive: a file written before this existed decodes with none, which is
+	// exactly right -- nobody had configured a destination yet.
+	LeadRoutes []LeadRoute `json:"lead_routes,omitempty"`
 }
 
 type Account struct {

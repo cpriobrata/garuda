@@ -247,6 +247,31 @@ outbound webhook already reaches everything else through Zapier/Make/n8n. A test
 fails if any listed app has no use case, or if an advertised calendar cannot
 actually be driven.
 
+## 6n. Lead delivery — built 2026-08-30
+
+`internal/api/lead_routing.go` + `internal/composio/delivery.go`. A captured lead
+also lands in the app the customer connected.
+
+**Polled, not called from the lead handler.** The obvious design — one line in
+`widgetLead` saying "also send it to HubSpot" — puts a customer's CRM on the
+widget request path and loses the lead on a restart between the write and the
+send. Reading committed state on an interval makes the durable fact the trigger.
+Same shape as the outbound webhook dispatcher, deliberately.
+
+**The watermark starts at process start**, so connecting a CRM never replays
+weeks of history as notifications. A bounded batch per pass, and the watermark
+only advances as far as what was actually attempted — advancing past an untried
+remainder would skip it forever.
+
+**Circuit breaker at 5 consecutive failures.** Revoked credentials would
+otherwise cost one paid request per lead forever. Saving the route releases it,
+because editing the setting is somebody fixing what broke; leaving it latched
+means a destination that can only come back through support.
+
+Per ACCOUNT, not per agent — a customer's CRM is their CRM. The list of direct
+destinations is short on purpose; the outbound webhook stays the answer for the
+long tail, and the screen says so rather than implying 1,400 apps receive leads.
+
 ## 6j. Calendars — built 2026-08-30
 
 `internal/composio/calendars.go`. **One calendar per agent**, deliberately: an

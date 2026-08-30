@@ -561,6 +561,53 @@ inherit that caveat rather than take it from our UI.
 `calendar` is recorded on the booking, not looked up from the agent, so switching
 provider does not relabel last week's appointments.
 
+### Where leads go
+
+`GET /v1/integrations/routes`
+
+```json
+{ "routes": [{ "toolkit": "slack", "setting": "#sales", "enabled": true,
+               "failure_count": 0, "last_delivered_at": "…", "paused": false }],
+  "available": [{ "toolkit": "slack", "label": "Slack",
+                  "summary": "Every captured lead is posted to a channel.",
+                  "setting_label": "Channel", "setting_hint": "…" }] }
+```
+
+`PUT /v1/integrations/routes` takes `{toolkit, setting, enabled}`.
+`POST /v1/integrations/routes/test` sends one obviously-labelled sample lead.
+
+A destination is **per account, not per agent**: a customer's CRM is their CRM,
+the connection itself is already account scoped, and two answers to "where is my
+HubSpot" would be one too many.
+
+- `available` is a **short named list** — HubSpot, Slack, Google Sheets. Every
+  entry is a tool slug plus a field mapping somebody had to get right, and a lead
+  landing silently in the wrong column is worse than one arriving by webhook. An
+  app absent from it is a 422 `destination_not_supported` whose message points at
+  the outbound webhook.
+- `enabled` is separate from existence. Switching a destination off keeps the
+  setting, or turning it back on is a second trip to find a spreadsheet id.
+- Enabling a destination that needs a setting without one is refused at save
+  time, with detail key `setting` — it would otherwise fail on every lead,
+  silently, forever.
+- `paused` means the breaker tripped after `routeFailureLimit` consecutive
+  failures and Garuda has stopped trying. Saving the route again releases it,
+  because changing the setting is somebody repairing what broke.
+- `last_error` carries the **provider's own words**, bounded. A customer can act
+  on `channel_not_found` and cannot act on `error`.
+
+**Delivery is polled, never inline.** Committed leads are read on an interval and
+sent from there. Calling a customer's CRM from the widget's lead handler would
+make their slow CRM a slow chat widget for a visitor on their website, and a
+restart between the write and the send would lose the lead with nothing to replay
+it from. The watermark starts at process start: connecting HubSpot on Tuesday
+must not deliver Monday's hundred enquiries.
+
+The payload carries the lead's own fields and **no transcript** — a chat history
+copied into somebody's Slack is a copy of personal data outside the product.
+
+---
+
 ### What an integration is for
 
 `GET /v1/integrations/roles`

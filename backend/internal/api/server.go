@@ -137,6 +137,9 @@ func (s *Server) Handler() http.Handler {
 	// that is slow or down never degrades the product.
 	s.StartOutboundWebhooks()
 	s.StartRetention()
+	// Same reasoning for leads going to a connected app: the visitor's request
+	// has already returned before anything is sent to somebody's CRM.
+	s.StartLeadRouting()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /readyz", s.ready)
@@ -238,6 +241,14 @@ func (s *Server) Handler() http.Handler {
 	protected("GET /v1/integrations/connections", s.listIntegrationConnections)
 	protectedLimited("POST /v1/integrations/connections", "integrations.connect", 30, time.Minute, s.connectIntegration)
 	protected("DELETE /v1/integrations/connections/{connectionID}", s.disconnectIntegration)
+
+	// Where captured leads go besides Garuda. A destination is per account,
+	// because a customer's CRM is their CRM and setting it once is the whole
+	// point; the outbound webhook below stays the answer for everything else.
+	protected("GET /v1/integrations/routes", s.listLeadRoutes)
+	protectedLimited("PUT /v1/integrations/routes", "integrations.route_save", 60, time.Hour, s.saveLeadRoute)
+	// A test lead reaches a third party, so it is limited harder than saving.
+	protectedLimited("POST /v1/integrations/routes/test", "integrations.route_test", 20, time.Hour, s.testLeadRoute)
 
 	// In-app billing: everything the hosted Stripe portal used to do.
 	protectedLimited("GET /v1/billing/invoices", "billing.invoices", 60, time.Minute, s.listBillingInvoices)
