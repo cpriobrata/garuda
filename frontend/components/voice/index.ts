@@ -14,7 +14,10 @@ export {
   transcriptionFailureCodes,
   readVoiceCapability,
   recordingKeptSentence,
+  saveVoiceDetails,
+  voiceDetailsFailureMessage,
   type VoiceCapability,
+  type VoiceDetails,
   type VoiceTranscription,
 } from "@/components/voice/voice-api";
 export {

@@ -46,6 +46,11 @@ export type VoicePanelProps = {
   issues: VoiceSubmissionIssue[];
   submitting: boolean;
   idPrefix?: string;
+  // Supplied when the answers collected here are not the last thing asked, so
+  // the final control does not promise to build an agent it is only one step
+  // towards. Left out, the panel finishes the whole of onboarding.
+  submitLabel?: string;
+  submitLoadingLabel?: string;
   onStart: () => void;
   onStop: () => void;
   onDiscard: () => void;
@@ -340,8 +345,23 @@ export function VoiceOnboardingPanel(props: VoicePanelProps) {
                 {props.failure && <FailureNotice title="That did not go through" message={props.failure} />}
 
                 <div className="flex flex-wrap gap-2">
-                  <Button type="button" onClick={props.onSubmit} loading={props.submitting} loadingLabel="Building your agent" className="flex-1">
-                    <Check className="mr-2 h-4 w-4" aria-hidden="true" /> Build my agent
+                  <Button
+                    type="button"
+                    onClick={props.onSubmit}
+                    loading={props.submitting}
+                    loadingLabel={props.submitLoadingLabel || "Building your agent"}
+                    className="flex-1"
+                  >
+                    {props.submitLabel ? (
+                      <>
+                        {props.submitLabel}
+                        <ArrowRight className="ml-2 h-4 w-4" aria-hidden="true" />
+                      </>
+                    ) : (
+                      <>
+                        <Check className="mr-2 h-4 w-4" aria-hidden="true" /> Build my agent
+                      </>
+                    )}
                   </Button>
                   <Button type="button" variant="outline" onClick={props.onBackToTranscript} disabled={props.submitting}>
                     <ArrowLeft className="mr-2 h-4 w-4" aria-hidden="true" /> Back to transcript

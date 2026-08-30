@@ -1,7 +1,7 @@
 import { ChevronDown } from "lucide-react";
 
 /**
- * The six objections a buyer raises before they will pay for a chat agent.
+ * The objections a buyer raises before they will pay for a chat agent.
  *
  * Answered from the code rather than from marketing instinct. The full product
  * FAQ lives at /faq and goes wider; this list stays deliberately short and stays
@@ -10,6 +10,14 @@ import { ChevronDown } from "lucide-react";
  * Built on <details>/<summary>, a disclosure widget the browser already makes
  * keyboard operable and announces correctly: no JavaScript, no dependency, and
  * it works before hydration.
+ *
+ * NOTE ON MEASURED NUMBERS. The "will it slow my site down" answer used to quote
+ * a widget size ("about 27 KB gzipped, 106 KB uncompressed", measured 29 August
+ * 2026). The bundle has since grown well past both figures and is under active
+ * change, so the number was removed rather than replaced: a stale measurement on
+ * a page whose whole argument is "everything here is true today" is the most
+ * expensive kind of small error. app/faq/page.tsx still carries the same stale
+ * "about 27 KB" sentence and needs the same treatment.
  */
 
 export type FaqItem = { question: string; answer: string };
@@ -31,19 +39,29 @@ export const FAQ_ITEMS: FaqItem[] = [
       "The conversation, the page the chat started on, and contact details only when a visitor fills in the form and ticks the consent box. Visitors are identified by an opaque token that is HMAC-scoped to a single agent, so the same person on two Garuda-powered sites produces two unrelated identifiers. There is no cross-site identifier and no third-party tracking cookie. A first-time visitor is asked whether the assistant may remember the chat on that browser; choose “Use once” and no visitor token is stored at all.",
   },
   {
+    question: "Will it work on my website, and is it hard to install?",
+    answer:
+      "It is one script tag before the closing body tag, on any site where you can add one line of HTML. The portal gives you the tag already filled in with your agent's key, plus step-by-step guides for Webflow, WordPress, Shopify and Framer — including the honest caveats, such as Shopify theme code not running on checkout pages and Webflow serving site-wide custom code only on paid plans. You also list the domains the agent may load on, so the tag does nothing if it is copied onto a site that is not yours.",
+  },
+  {
     question: "Will it slow my website down?",
     answer:
-      "The snippet is a single async script tag, so it never blocks your page from parsing or rendering. Measured against api.garuda.ravan.ai on 29 August 2026, the widget is about 27 KB gzipped (106 KB uncompressed) and is served with a five-minute public cache header. It renders inside a Shadow DOM whose host style starts at all:initial, so your CSS and its CSS cannot collide in either direction.",
+      "The snippet is a single async script tag, so it never blocks your page from parsing or rendering. It is served with a five-minute public cache header, and it loads no third-party scripts and no web fonts — the only network requests it makes are to the Garuda API. It renders inside a Shadow DOM whose host style starts at all:initial, so your CSS and its CSS cannot collide in either direction.",
   },
   {
     question: "How long does setup actually take?",
     answer:
-      "There is no benchmark worth quoting, so here is the honest shape of the work. Four questions produce a draft agent. Reviewing and editing that draft is the part that deserves your attention. Then you paste in the knowledge it may answer from — up to five sources per agent, up to 100,000 characters each — and list the domains it is allowed to load on. Publishing itself is copying one line into your site. The slow parts are the ones only you can do: deciding what is true, and what may be said.",
+      "There is no benchmark worth quoting, so here is the honest shape of the work. Four questions produce a draft agent. Reviewing and editing that draft is the part that deserves your attention. Then you give it the knowledge it may answer from — import it from a page on your own website, or paste the text in, up to five sources per agent and 100,000 characters each — and list the domains it is allowed to load on. Publishing itself is copying one line into your site. The slow parts are the ones only you can do: deciding what is true, and what may be said.",
+  },
+  {
+    question: "Is there a free trial, and what happens after I pay?",
+    answer:
+      "There is no free trial, and we would rather you read that here than discover it at the checkout. The order is: create an account, confirm your email address, pay the first $17 on Stripe's own hosted checkout, and then answer the four questions that draft your agent. Nothing appears on your website until you publish it yourself, so the first month buys you the whole build and review, not just a look at it.",
   },
   {
     question: "Can I cancel?",
     answer:
-      "Yes. Billing runs through Stripe, and cancellation is done from the Stripe billing portal linked in your workspace. A cancelled subscription stays active until the end of the period you have already paid for, and the widget stops serving once the subscription is no longer active.",
+      "Yes, from the billing page in your workspace, which opens the Stripe billing portal — there is no minimum term and nobody to email. A cancelled subscription stays active until the end of the period you have already paid for, and the widget stops serving once the subscription is no longer active. Cancelling does not delete your agents, conversations or leads.",
   },
 ];
 

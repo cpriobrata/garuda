@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, Bot, BrainCircuit, Check, ChevronRight, Palette, Play, Save, Settings2, Sparkles, Target, UploadCloud } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Bot, BrainCircuit, CalendarCheck, CalendarClock, Check, ChevronRight, ExternalLink, Palette, Play, RefreshCw, Save, Settings2, Sparkles, Target, UploadCloud } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { ApiError, garudaApi, type AgentRecord } from "@/lib/api";
 import { WebsiteImport } from "@/components/agents/website-import";
+import { useCalendarConnection, type CalendarConnection } from "@/components/agents/calendar-connection";
 import { cn } from "@/lib/utils";
 
 const sections = [
@@ -18,9 +19,10 @@ const sections = [
   { id: "knowledge", label: "Knowledge", icon: BrainCircuit },
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "handoff", label: "Handoff rules", icon: Settings2 },
+  { id: "appointments", label: "Appointments", icon: CalendarClock },
 ];
 
-const editableFields = ["name", "description", "greeting", "systemPrompt", "primaryColor", "accent", "launcherText", "widgetPosition", "allowedDomain", "handoffEnabled", "handoffNumber", "handoffLabel", "handoffMessage", "handoffAvailability", "handoffTriggers", "handoffAutoOffer", "handoffNotifyEmail"] as const;
+const editableFields = ["name", "description", "greeting", "systemPrompt", "primaryColor", "accent", "launcherText", "widgetPosition", "allowedDomain", "handoffEnabled", "handoffNumber", "handoffLabel", "handoffMessage", "handoffAvailability", "handoffTriggers", "handoffAutoOffer", "handoffNotifyEmail", "bookingEnabled", "bookingLabel", "bookingTitle", "bookingTimezone", "bookingDuration", "bookingStartHour", "bookingEndHour", "bookingWeekdays", "bookingLeadDays", "bookingNoticeHours"] as const;
 
 // Every builder value is a string, including the two that are not text. The
 // form is one flat record so that "which fields did the writer touch" stays a
@@ -28,8 +30,33 @@ const editableFields = ["name", "description", "greeting", "systemPrompt", "prim
 // edges instead of a second shape running through the whole component.
 const handoffTriggerDefaults = "human, agent, real person, speak to someone, talk to a person";
 
+// The hours the booking service falls back to when a stored working day does not
+// describe a real window (backend/internal/composio/booking.go, slotsFromBusy).
+// The builder shows those same hours, so the form never claims a day the server
+// would not actually offer.
+const defaultStartHour = 9;
+const defaultEndHour = 18;
+const defaultWeekdays = "1,2,3,4,5";
+
 export type AgentFormField = (typeof editableFields)[number];
 export type AgentFormValues = Record<AgentFormField, string>;
+
+// model.BookingConfig as it comes back on the agent record. Every field is
+// optional on the wire, and the client type in lib/api.ts predates the feature,
+// so the shape is named here and read through a cast at the one place that
+// touches it.
+export type AgentBookingRecord = {
+  enabled?: boolean;
+  button_label?: string;
+  title?: string;
+  duration_minutes?: number;
+  timezone?: string;
+  start_hour?: number;
+  end_hour?: number;
+  weekdays?: number[];
+  lead_days_ahead?: number;
+  notice_hours?: number;
+};
 
 // The builder runs one async action at a time and every one of them writes the
 // same record, so they share a single slot: the clicked button shows the
@@ -55,9 +82,24 @@ const fieldSections: Record<string, string> = {
   "handoff.availability": "handoff",
   "handoff.auto_offer_after": "handoff",
   "handoff.notify_email": "handoff",
+  // booking.hours is one key for both ends of the working day, which is how
+  // validateBooking reports them: the rule is about the pair, not either field.
+  "booking.timezone": "appointments",
+  "booking.hours": "appointments",
+  "booking.duration_minutes": "appointments",
+  "booking.lead_days_ahead": "appointments",
+  "booking.notice_hours": "appointments",
+  "booking.button_label": "appointments",
+  "booking.title": "appointments",
 };
 
 export function agentFormValuesFromRecord(agent: AgentRecord, current: AgentFormValues): AgentFormValues {
+  const booking = (agent as AgentRecord & { booking?: AgentBookingRecord }).booking;
+  // Zero is a real answer for these two — midnight, and no minimum notice — so
+  // they are read by presence rather than by truthiness.
+  const startHour = typeof booking?.start_hour === "number" ? booking.start_hour : 0;
+  const endHour = typeof booking?.end_hour === "number" ? booking.end_hour : 0;
+  const realWorkingDay = endHour > startHour;
   return {
     name: agent.name,
     description: agent.description || "A focused AI agent for website conversations.",
@@ -76,6 +118,18 @@ export function agentFormValuesFromRecord(agent: AgentRecord, current: AgentForm
     handoffTriggers: (agent.handoff?.trigger_phrases || []).join(", "),
     handoffAutoOffer: agent.handoff?.auto_offer_after ? String(agent.handoff.auto_offer_after) : "0",
     handoffNotifyEmail: agent.handoff?.notify_email || "",
+    bookingEnabled: booking?.enabled ? "true" : "false",
+    bookingLabel: booking?.button_label || "",
+    bookingTitle: booking?.title || "",
+    // Never blanked by a load: the browser's own zone has usually been filled in
+    // by the time the record lands, and it is a better answer than nothing.
+    bookingTimezone: booking?.timezone || current.bookingTimezone,
+    bookingDuration: booking?.duration_minutes ? String(booking.duration_minutes) : "30",
+    bookingStartHour: realWorkingDay ? String(startHour) : String(defaultStartHour),
+    bookingEndHour: realWorkingDay ? String(endHour) : String(defaultEndHour),
+    bookingWeekdays: booking?.weekdays?.length ? booking.weekdays.join(",") : defaultWeekdays,
+    bookingLeadDays: booking?.lead_days_ahead ? String(booking.lead_days_ahead) : "14",
+    bookingNoticeHours: typeof booking?.notice_hours === "number" ? String(booking.notice_hours) : "4",
   };
 }
 
@@ -95,6 +149,79 @@ export function handoffPayloadFrom(form: AgentFormValues) {
     auto_offer_after: Number.isFinite(autoOffer) && autoOffer > 0 ? autoOffer : 0,
     notify_email: form.handoffNotifyEmail.trim(),
   };
+}
+
+// A form value that will not parse is sent as the documented default rather than
+// as NaN, which does not survive JSON and would reach the server as null.
+function wholeNumber(value: string, fallback: number) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+// The weekday set travels as one comma-separated string like every other form
+// value. Sorted and deduplicated here so the preview reads in week order and the
+// server is never asked to search the same day twice.
+export function weekdaysFrom(value: string): number[] {
+  const days = new Set<number>();
+  for (const part of value.split(",")) {
+    const day = Number.parseInt(part, 10);
+    if (Number.isInteger(day) && day >= 0 && day <= 6) days.add(day);
+  }
+  return [...days].sort((first, second) => first - second);
+}
+
+// Every key here is a json name on model.BookingConfig. The agent PATCH decodes
+// with DisallowUnknownFields, so one extra key is a 400 for the whole save.
+export function bookingPayloadFrom(form: AgentFormValues) {
+  return {
+    enabled: form.bookingEnabled === "true",
+    button_label: form.bookingLabel.trim(),
+    title: form.bookingTitle.trim(),
+    duration_minutes: wholeNumber(form.bookingDuration, 30),
+    timezone: form.bookingTimezone.trim(),
+    start_hour: wholeNumber(form.bookingStartHour, defaultStartHour),
+    end_hour: wholeNumber(form.bookingEndHour, defaultEndHour),
+    weekdays: weekdaysFrom(form.bookingWeekdays),
+    lead_days_ahead: wholeNumber(form.bookingLeadDays, 14),
+    notice_hours: wholeNumber(form.bookingNoticeHours, 4),
+  };
+}
+
+const weekdayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+function hourLabel(hour: number) {
+  // 24 is a real end of the working day — validateBooking allows it and the slot
+  // search reads it as "up to but not including" — but "24:00" is not a clock.
+  if (hour >= 24) return "midnight";
+  return `${String(hour).padStart(2, "0")}:00`;
+}
+
+function weekdayPhrase(days: number[]) {
+  // No days selected is the server's "Monday to Friday", not "never": empty
+  // weekdays fall through to the weekday default in composio.WorkingDay.
+  if (!days.length || (days.length === 5 && days.every((day) => day >= 1 && day <= 5))) return "Monday to Friday";
+  if (days.length === 7) return "any day";
+  const names = days.map((day) => weekdayNames[day]);
+  if (names.length === 1) return names[0];
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+function noticePhrase(hours: number) {
+  if (hours <= 0) return "starting immediately";
+  if (hours % 24 === 0) return `no sooner than ${hours / 24} day${hours === 24 ? "" : "s"} from now`;
+  return `no sooner than ${hours} hour${hours === 1 ? "" : "s"} from now`;
+}
+
+// One sentence describing what a visitor is actually offered, so the writer can
+// check the settings without publishing them at somebody's real customers.
+export function bookingPreviewSentence(form: AgentFormValues, agentName: string): string {
+  const booking = bookingPayloadFrom(form);
+  // Both defaults are the server's own: resolveBooking names the button and
+  // createBooking names the calendar event when the owner leaves them blank.
+  const label = booking.button_label || "Book an appointment";
+  const title = booking.title || `Appointment via ${agentName.trim() || "your agent"}`;
+  const zone = booking.timezone ? `in ${booking.timezone}` : "in a time zone you have not chosen yet";
+  return `Visitors tap “${label}” and are offered ${booking.duration_minutes}-minute appointments ${weekdayPhrase(booking.weekdays)}, ${hourLabel(booking.start_hour)} to ${hourLabel(booking.end_hour)} ${zone}, ${noticePhrase(booking.notice_hours)} and up to ${booking.lead_days_ahead} days ahead. Each one is written into your Google Calendar as “${title}”.`;
 }
 
 // A field the writer has already edited keeps what they typed. Everything else
@@ -168,6 +295,17 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
     handoffTriggers: handoffTriggerDefaults,
     handoffAutoOffer: "0",
     handoffNotifyEmail: "",
+    bookingEnabled: "false",
+    bookingLabel: "",
+    bookingTitle: "",
+    // Filled from the browser after mount, never during render.
+    bookingTimezone: "",
+    bookingDuration: "30",
+    bookingStartHour: String(defaultStartHour),
+    bookingEndHour: String(defaultEndHour),
+    bookingWeekdays: defaultWeekdays,
+    bookingLeadDays: "14",
+    bookingNoticeHours: "4",
   }));
   const editedFields = useRef(new Set<AgentFormField>());
   const [published, setPublished] = useState(existing && demoMode);
@@ -203,6 +341,20 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
     };
   }
 
+  // The prerequisite is asked about once, and only once the writer is somewhere
+  // the answer matters: the Appointments section, or any agent that already has
+  // booking switched on and could be published from any section.
+  const calendar = useCalendarConnection(section === "appointments" || form.bookingEnabled === "true");
+
+  // The owner's own zone is right for nearly all of them, but reading it during
+  // render would make the server's HTML disagree with the browser's. It is read
+  // after mount instead, and never over a zone already chosen or loaded.
+  useEffect(() => {
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (!zone) return;
+    setForm((current) => (current.bookingTimezone ? current : { ...current, bookingTimezone: zone }));
+  }, []);
+
   useEffect(() => {
     if (!existing || !agentId) return;
     let active = true;
@@ -231,6 +383,7 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
       welcome_message: form.greeting,
       branding: { primary_color: form.primaryColor, accent_color: form.accent, position: form.widgetPosition, launcher_text: form.launcherText, allowed_domains: form.allowedDomain.trim() ? [form.allowedDomain.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "")] : [] },
       handoff: handoffPayloadFrom(form),
+      booking: bookingPayloadFrom(form),
       ...(demoMode ? { knowledge } : {}),
     };
   }
@@ -280,6 +433,17 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
       setSection("appearance");
       setFieldMessages({ "branding.allowed_domains": "Add the website domain where this agent may run." });
       setStatusMessage("Add an allowed domain before publishing");
+      setStatus("error");
+      return;
+    }
+    // Publishing appointments with no calendar behind them ships a button that
+    // fails in front of a real visitor, and the owner would hear about it from
+    // them. Only a definite answer blocks: a check that could not be made is not
+    // evidence, so "unknown" and "checking" go through.
+    if (form.bookingEnabled === "true" && (calendar.state === "missing" || calendar.state === "pending")) {
+      setSection("appointments");
+      setFieldMessages({});
+      setStatusMessage("Connect Google Calendar before publishing appointments");
       setStatus("error");
       return;
     }
@@ -370,6 +534,7 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
             {section === "knowledge" && <KnowledgeSection knowledge={knowledge} onAdd={addKnowledge} messages={fieldMessages} saving={pendingAction === "knowledge"} blocked={pendingAction !== "" && pendingAction !== "knowledge"} agentId={recordId} />}
             {section === "appearance" && <AppearanceSection primaryColor={form.primaryColor} setPrimaryColor={updateField("primaryColor")} accent={form.accent} setAccent={updateField("accent")} launcherText={form.launcherText} setLauncherText={updateField("launcherText")} widgetPosition={form.widgetPosition} setWidgetPosition={updateField("widgetPosition")} allowedDomain={form.allowedDomain} setAllowedDomain={updateField("allowedDomain")} messages={fieldMessages} />}
             {section === "handoff" && <HandoffSection enabled={form.handoffEnabled === "true"} setEnabled={(next) => updateField("handoffEnabled")(next ? "true" : "false")} number={form.handoffNumber} setNumber={updateField("handoffNumber")} label={form.handoffLabel} setLabel={updateField("handoffLabel")} message={form.handoffMessage} setMessage={updateField("handoffMessage")} availability={form.handoffAvailability} setAvailability={updateField("handoffAvailability")} triggers={form.handoffTriggers} setTriggers={updateField("handoffTriggers")} autoOffer={form.handoffAutoOffer} setAutoOffer={updateField("handoffAutoOffer")} notifyEmail={form.handoffNotifyEmail} setNotifyEmail={updateField("handoffNotifyEmail")} messages={fieldMessages} />}
+            {section === "appointments" && <BookingSection enabled={form.bookingEnabled === "true"} setEnabled={(next) => updateField("bookingEnabled")(next ? "true" : "false")} timezone={form.bookingTimezone} setTimezone={updateField("bookingTimezone")} duration={form.bookingDuration} setDuration={updateField("bookingDuration")} startHour={form.bookingStartHour} setStartHour={updateField("bookingStartHour")} endHour={form.bookingEndHour} setEndHour={updateField("bookingEndHour")} weekdays={form.bookingWeekdays} setWeekdays={updateField("bookingWeekdays")} leadDays={form.bookingLeadDays} setLeadDays={updateField("bookingLeadDays")} noticeHours={form.bookingNoticeHours} setNoticeHours={updateField("bookingNoticeHours")} label={form.bookingLabel} setLabel={updateField("bookingLabel")} title={form.bookingTitle} setTitle={updateField("bookingTitle")} preview={bookingPreviewSentence(form, form.name)} calendar={calendar} messages={fieldMessages} />}
             <div className="mt-8 flex justify-between border-t pt-5"><Button variant="ghost" size="sm" disabled={section === "identity"} onClick={() => setSection(sections[Math.max(0, sections.findIndex((item) => item.id === section) - 1)].id)}>Previous</Button><Button size="sm" onClick={() => { const index = sections.findIndex((item) => item.id === section); if (index < sections.length - 1) setSection(sections[index + 1].id); }}>Next section <ChevronRight className="ml-1.5 h-3.5 w-3.5" /></Button></div>
           </div>
         </section>
@@ -385,7 +550,9 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
 
 function FieldMessage({ message }: { message?: string }) {
   if (!message) return null;
-  return <p className="text-[10px] text-red-500">{message}</p>;
+  // role="alert" so a rejected save is announced where it happened, rather than
+  // only appearing beside a field the writer may not be looking at.
+  return <p role="alert" className="text-[10px] text-red-500">{message}</p>;
 }
 
 function UnlistedMessages({ messages }: { messages: Record<string, string> }) {
@@ -518,6 +685,205 @@ function HandoffSection({ enabled, setEnabled, number, setNumber, label, setLabe
           <p className="mt-2 text-[10px] leading-4 text-slate-500">{enabled ? "Add a WhatsApp number with its country code to switch the button on." : "Tick the box above, add your WhatsApp number, then publish."}</p>
         </div>
       )}
+    </div></>;
+}
+
+type BookingSectionProps = {
+  enabled: boolean;
+  setEnabled: (value: boolean) => void;
+  timezone: string;
+  setTimezone: (value: string) => void;
+  duration: string;
+  setDuration: (value: string) => void;
+  startHour: string;
+  setStartHour: (value: string) => void;
+  endHour: string;
+  setEndHour: (value: string) => void;
+  weekdays: string;
+  setWeekdays: (value: string) => void;
+  leadDays: string;
+  setLeadDays: (value: string) => void;
+  noticeHours: string;
+  setNoticeHours: (value: string) => void;
+  label: string;
+  setLabel: (value: string) => void;
+  title: string;
+  setTitle: (value: string) => void;
+  preview: string;
+  calendar: CalendarConnection;
+  messages: Record<string, string>;
+};
+
+// Bounded by validateBooking: four hours per appointment, sixty days ahead, a
+// week of notice at most. Offering a value the server rejects is a round trip
+// spent telling somebody they may not have what the form let them pick.
+const durationChoices = [15, 20, 30, 45, 60, 90, 120, 180, 240];
+const leadDayChoices = [7, 14, 30, 60];
+const noticeChoices = [0, 1, 2, 4, 12, 24, 48, 168];
+// Monday first. A working week drawn from Sunday reads as a mistake to nearly
+// everyone who sits down to configure one.
+const weekdayOrder = [1, 2, 3, 4, 5, 6, 0];
+
+// A stored value none of the choices lists — set through the API, or by a later
+// version of this form — is added to the picker. Without this the select would
+// paint its first option while the form still held the stored number, and the
+// writer would save a value they never saw.
+function withCurrent(choices: number[], value: string) {
+  const current = Number.parseInt(value, 10);
+  if (!Number.isInteger(current) || choices.includes(current)) return choices;
+  return [...choices, current].sort((first, second) => first - second);
+}
+
+function noticeChoiceLabel(hours: number) {
+  if (hours <= 0) return "No minimum";
+  if (hours % 24 === 0) return `${hours / 24} day${hours === 24 ? "" : "s"}`;
+  return `${hours} hour${hours === 1 ? "" : "s"}`;
+}
+
+// The one thing that decides whether any of this works. Appointments read and
+// write the customer's own Google Calendar, so a workspace without one gets a
+// button that fails in front of a visitor.
+function CalendarPrerequisite({ calendar }: { calendar: CalendarConnection }) {
+  const connected = calendar.state === "connected";
+  const blocked = calendar.state === "missing" || calendar.state === "pending";
+  const heading = connected ? "Google Calendar is connected"
+    : calendar.state === "checking" ? "Checking your Google Calendar connection…"
+    : calendar.state === "missing" ? "Connect Google Calendar before you switch this on"
+    : calendar.state === "pending" ? "Finish connecting Google Calendar"
+    : "Appointments need a connected Google Calendar";
+  const body = connected ? "Garuda reads free time from this calendar and writes each appointment into it."
+    : calendar.state === "checking" ? "Reading your connected accounts."
+    : calendar.state === "missing" ? "This workspace has no Google Calendar connection, so nothing on this page can be offered to a visitor yet."
+    : calendar.detail || "Connect one on the Integrations page. Until then a visitor who taps the button gets an apology instead of an appointment.";
+  return (
+    <div role={blocked ? "alert" : undefined} className={cn("rounded-xl border p-4", connected ? "border-emerald-200 bg-emerald-50" : blocked ? "border-amber-300 bg-amber-50" : "border-slate-200 bg-slate-50")}>
+      <p className={cn("flex items-center gap-1.5 text-[10px] font-semibold", connected ? "text-emerald-800" : blocked ? "text-amber-900" : "text-slate-700")}>
+        {connected ? <CalendarCheck className="h-3.5 w-3.5 shrink-0" /> : blocked ? <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> : <CalendarClock className="h-3.5 w-3.5 shrink-0" />}
+        {heading}
+      </p>
+      <p className={cn("mt-2 text-[10px] leading-4", connected ? "text-emerald-700" : blocked ? "text-amber-800" : "text-slate-500")}>{body}</p>
+      {!connected && (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Button variant="outline" size="sm" asChild><Link href="/app/integrations">Open Integrations <ExternalLink className="ml-1.5 h-3.5 w-3.5" /></Link></Button>
+          <Button variant="ghost" size="sm" onClick={calendar.recheck} disabled={calendar.state === "checking"}><RefreshCw className={cn("mr-1.5 h-3.5 w-3.5", calendar.state === "checking" && "animate-spin")} /> Check again</Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BookingSection({ enabled, setEnabled, timezone, setTimezone, duration, setDuration, startHour, setStartHour, endHour, setEndHour, weekdays, setWeekdays, leadDays, setLeadDays, noticeHours, setNoticeHours, label, setLabel, title, setTitle, preview, calendar, messages }: BookingSectionProps) {
+  const [zoneChoices, setZoneChoices] = useState<string[]>([]);
+  const selectedDays = weekdaysFrom(weekdays);
+
+  // The zone list is a browser capability and an old browser has none, so it is
+  // read after mount inside a guard rather than during render.
+  useEffect(() => {
+    try {
+      setZoneChoices(Intl.supportedValuesOf("timeZone"));
+    } catch {
+      setZoneChoices([]);
+    }
+  }, []);
+
+  function toggleDay(day: number) {
+    const next = selectedDays.includes(day) ? selectedDays.filter((value) => value !== day) : [...selectedDays, day].sort((first, second) => first - second);
+    setWeekdays(next.join(","));
+  }
+
+  const ready = enabled && Boolean(timezone.trim()) && calendar.state === "connected";
+  const blockedReason = !enabled ? "Switch appointments on, then publish."
+    : !timezone.trim() ? "Choose the time zone your working hours are in — without it the widget will not offer appointments at all."
+    : calendar.state === "connected" ? ""
+    : calendar.state === "checking" ? "Waiting on the Google Calendar check."
+    : "Connect Google Calendar on the Integrations page. Publishing without it gives visitors a button that cannot book anything.";
+
+  return <><SectionHeading eyebrow="Appointments" title="Let visitors book a real slot in your calendar." description="The assistant offers times that are genuinely free in your Google Calendar, and the one the visitor picks becomes an event in it before they close the tab." />
+    <div className="space-y-6">
+      <CalendarPrerequisite calendar={calendar} />
+
+      <label htmlFor="booking-enabled" className="flex cursor-pointer items-start gap-3 rounded-xl border p-4 transition hover:border-indigo-200">
+        <input id="booking-enabled" type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300 text-indigo-600" />
+        <span><span className="block text-xs font-semibold text-slate-900">Let visitors book appointments</span><span className="mt-1 block text-[10px] leading-4 text-slate-500">Each booking becomes a real event in the Google Calendar you connected — the same diary you and your team work from. Garuda only ever creates an event a visitor explicitly chose, but there is no undo from here.</span></span>
+      </label>
+
+      <div className="space-y-2">
+        <Label htmlFor="booking-timezone">Your time zone</Label>
+        <Input id="booking-timezone" value={timezone} onChange={(event) => setTimezone(event.target.value)} list="booking-timezones" placeholder="Asia/Kolkata" autoComplete="off" spellCheck={false} aria-describedby="booking-timezone-hint" />
+        <datalist id="booking-timezones">{zoneChoices.map((zone) => <option key={zone} value={zone} />)}</datalist>
+        <FieldMessage message={messages["booking.timezone"]} />
+        <p id="booking-timezone-hint" className="text-[10px] text-slate-400">Filled in from this browser. It has to be a zone name such as Asia/Kolkata or Europe/London — an abbreviation like IST is rejected, because it means two different hours in two different countries.</p>
+      </div>
+
+      <div role="group" aria-labelledby="booking-hours-label">
+        <p id="booking-hours-label" className="text-sm font-medium leading-none text-slate-900">Working hours</p>
+        <div className="mt-2 grid gap-4 sm:grid-cols-2">
+          <div className="space-y-2">
+            <Label htmlFor="booking-start-hour" className="text-[10px] font-normal text-slate-500">Day starts</Label>
+            <select id="booking-start-hour" value={startHour} onChange={(event) => setStartHour(event.target.value)} className="h-11 w-full rounded-lg border bg-white px-3 text-sm">{Array.from({ length: 24 }, (unused, hour) => <option key={hour} value={hour}>{hourLabel(hour)}</option>)}</select>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="booking-end-hour" className="text-[10px] font-normal text-slate-500">Day ends</Label>
+            <select id="booking-end-hour" value={endHour} onChange={(event) => setEndHour(event.target.value)} className="h-11 w-full rounded-lg border bg-white px-3 text-sm">{Array.from({ length: 24 }, (unused, index) => index + 1).map((hour) => <option key={hour} value={hour}>{hour === 24 ? "Midnight" : hourLabel(hour)}</option>)}</select>
+          </div>
+        </div>
+        <div className="mt-2"><FieldMessage message={messages["booking.hours"]} /></div>
+        <p className="mt-2 text-[10px] text-slate-400">In your time zone. Nothing outside these hours is ever offered, so a visitor cannot take 3am because the calendar happened to be free.</p>
+      </div>
+
+      <div>
+        <p id="booking-weekdays-label" className="text-sm font-medium leading-none text-slate-900">Days you take appointments</p>
+        <div role="group" aria-labelledby="booking-weekdays-label" className="mt-2 flex flex-wrap gap-2">
+          {weekdayOrder.map((day) => {
+            const on = selectedDays.includes(day);
+            return <button key={day} type="button" aria-pressed={on} aria-label={weekdayNames[day]} onClick={() => toggleDay(day)} className={cn("h-10 min-w-[3.25rem] flex-1 rounded-lg border px-2 text-xs font-semibold transition sm:flex-none", on ? "border-indigo-300 bg-indigo-50 text-indigo-700" : "bg-white text-slate-500 hover:border-indigo-200")}>{weekdayNames[day].slice(0, 3)}</button>;
+          })}
+        </div>
+        <p className="mt-2 text-[10px] text-slate-400">{selectedDays.length ? "Tap a day to add or remove it." : "No days chosen, so Garuda falls back to Monday to Friday. Pick the days yourself if that is not your week."}</p>
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-3">
+        <div className="space-y-2">
+          <Label htmlFor="booking-duration">Appointment length</Label>
+          <select id="booking-duration" value={duration} onChange={(event) => setDuration(event.target.value)} className="h-11 w-full rounded-lg border bg-white px-3 text-sm">{withCurrent(durationChoices, duration).map((minutes) => <option key={minutes} value={minutes}>{minutes} minutes</option>)}</select>
+          <FieldMessage message={messages["booking.duration_minutes"]} />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="booking-lead-days">Offer times up to</Label>
+          <select id="booking-lead-days" value={leadDays} onChange={(event) => setLeadDays(event.target.value)} className="h-11 w-full rounded-lg border bg-white px-3 text-sm">{withCurrent(leadDayChoices, leadDays).map((days) => <option key={days} value={days}>{days} days ahead</option>)}</select>
+          <FieldMessage message={messages["booking.lead_days_ahead"]} />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="booking-notice">Minimum notice</Label>
+          <select id="booking-notice" value={noticeHours} onChange={(event) => setNoticeHours(event.target.value)} className="h-11 w-full rounded-lg border bg-white px-3 text-sm">{withCurrent(noticeChoices, noticeHours).map((hours) => <option key={hours} value={hours}>{noticeChoiceLabel(hours)}</option>)}</select>
+          <FieldMessage message={messages["booking.notice_hours"]} />
+          <p className="text-[10px] text-slate-400">How little warning you will accept. A slot eight minutes away is a meeting nobody attends.</p>
+        </div>
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="space-y-2">
+          <Label htmlFor="booking-label">Button label</Label>
+          <Input id="booking-label" value={label} onChange={(event) => setLabel(event.target.value)} placeholder="Book an appointment" maxLength={60} />
+          <FieldMessage message={messages["booking.button_label"]} />
+          <p className="text-[10px] text-slate-400">What the visitor taps, up to 60 characters.</p>
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="booking-title">Calendar event title</Label>
+          <Input id="booking-title" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Consultation" maxLength={120} />
+          <FieldMessage message={messages["booking.title"]} />
+          <p className="text-[10px] text-slate-400">What you will see in your own diary. The visitor&rsquo;s name is added after it.</p>
+        </div>
+      </div>
+
+      <div className={cn("rounded-xl border p-4", ready ? "border-emerald-200 bg-emerald-50" : "border-dashed bg-slate-50")}>
+        <p className={cn("flex items-center gap-1.5 text-[10px] font-semibold", ready ? "text-emerald-800" : "text-slate-700")}>
+          {ready ? <CalendarCheck className="h-3.5 w-3.5 shrink-0" /> : <CalendarClock className="h-3.5 w-3.5 shrink-0 text-indigo-500" />}
+          {ready ? "Ready after you publish" : "Not active yet"}
+        </p>
+        <p className={cn("mt-2 text-[10px] leading-4", ready ? "text-emerald-700" : "text-slate-500")}>{preview}</p>
+        {blockedReason && <p className="mt-2 text-[10px] leading-4 text-slate-500">{blockedReason}</p>}
+      </div>
     </div></>;
 }
 

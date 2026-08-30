@@ -185,7 +185,7 @@ func (s *Server) generateAgent(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusServiceUnavailable, "ai_unavailable", "Agent generation is temporarily unavailable", nil)
 		return
 	}
-	agent := agentFromDraft(identity.AccountID, draft, time.Now().UTC())
+	agent := agentFromDraft(identity.AccountID, draft, onboarding, time.Now().UTC())
 	if err := s.store.Update(func(state *model.State) error {
 		state.Agents = append(state.Agents, agent)
 		return nil
@@ -523,9 +523,28 @@ func (s *Server) previewAgentMessage(w http.ResponseWriter, r *http.Request) {
 	s.writeData(w, http.StatusOK, map[string]any{"preview_session_id": valueOr(input.PreviewSessionID, newID("preview_")), "message": map[string]any{"id": newID("pmsg_"), "role": "assistant", "content": reply, "created_at": time.Now().UTC()}})
 }
 
-func agentFromDraft(accountID string, draft llm.AgentDraft, now time.Time) model.Agent {
+// agentFromDraft turns a generated draft into an agent.
+//
+// The onboarding answers win over the draft where the owner actually answered.
+// They were asked "what should your assistant be called?" and typed a name; the
+// model then proposed its own, and the model was winning. Being asked a question
+// and having the answer quietly discarded is worse than never being asked.
+func agentFromDraft(accountID string, draft llm.AgentDraft, onboarding model.Onboarding, now time.Time) model.Agent {
+	name := draft.Name
+	if chosen := strings.TrimSpace(onboarding.Answers[voiceAgentDisplayNameAnswerKey]); chosen != "" {
+		name = chosen
+	}
+	booking := model.BookingConfig{}
+	if onboarding.Answers[voiceOfferBookingAnswerKey] == "true" {
+		// Pre-filled, NOT switched on. Booking writes real events into a real
+		// calendar, and it needs one connected before it can do anything, so
+		// saying yes during onboarding sets the defaults and leaves the switch to
+		// a person who has seen what it does.
+		booking = model.BookingConfig{ButtonLabel: "Book an appointment", DurationMinutes: 30, StartHour: 9, EndHour: 18, LeadDaysAhead: 14, NoticeHours: 4}
+	}
 	return model.Agent{
-		ID: newID("agt_"), AccountID: accountID, Name: draft.Name, Description: draft.Description,
+		ID: newID("agt_"), AccountID: accountID, Name: name, Description: draft.Description,
+		Booking:   booking,
 		PublicKey: newID("pub_live_"), Status: "draft", Revision: 1, SystemPrompt: draft.SystemPrompt,
 		WelcomeMessage: draft.WelcomeMessage, SuggestedReplies: draft.SuggestedReplies,
 		LeadCapture: model.LeadCaptureConfig{Enabled: true, Prompt: "Would you like the team to follow up?", AfterTurns: 3, Fields: []string{"name", "email", "phone"}, PrivacyText: "Your details will only be used for this follow-up."},

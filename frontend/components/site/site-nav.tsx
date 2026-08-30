@@ -54,17 +54,33 @@ export function SiteNav() {
             <Link href="/auth/sign-up">Create your agent</Link>
           </Button>
         </div>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-11 w-11 lg:hidden"
-          onClick={() => setOpen(!open)}
-          aria-label={open ? "Close navigation" : "Open navigation"}
-          aria-expanded={open}
-          aria-controls="site-nav-mobile"
-        >
-          {open ? <X className="h-5 w-5" aria-hidden="true" /> : <Menu className="h-5 w-5" aria-hidden="true" />}
-        </Button>
+        {/*
+          The primary call to action, kept reachable at every scroll position on a
+          phone. Ad traffic lands on the hero button, scrolls past it within a
+          screen or two, and previously had nothing to tap until the pricing card.
+
+          Hidden below 360px, which is the narrowest viewport this site targets:
+          the brand lockup, this button and the 44px menu target together need
+          about 300px, and under 360 that is more than the container allows. The
+          display switch lives on the button and the lg switch on the wrapper, so
+          no element carries two competing display utilities.
+        */}
+        <div className="flex items-center gap-2 lg:hidden">
+          <Button size="sm" className="hidden h-9 px-3 min-[360px]:inline-flex" asChild>
+            <Link href="/auth/sign-up">Create your agent</Link>
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-11 w-11"
+            onClick={() => setOpen(!open)}
+            aria-label={open ? "Close navigation" : "Open navigation"}
+            aria-expanded={open}
+            aria-controls="site-nav-mobile"
+          >
+            {open ? <X className="h-5 w-5" aria-hidden="true" /> : <Menu className="h-5 w-5" aria-hidden="true" />}
+          </Button>
+        </div>
       </div>
       <div id="site-nav-mobile" hidden={!open} className="border-t bg-white px-4 py-4 lg:hidden">
         <nav className="flex flex-col gap-1" aria-label="Main">

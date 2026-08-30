@@ -280,6 +280,73 @@ export async function apiRequest<T>(
   return result.envelope.data;
 }
 
+// ---- In-app billing ---------------------------------------------------------
+// Mirrors the payloads in backend/internal/api/billing.go. Amounts are minor
+// units (cents) and every timestamp is RFC 3339 or null, so neither is fit to
+// render without going through @/components/billing/billing-format first.
+
+export type BillingPlan = { code: string; unit_amount: number; currency: string; interval: string };
+
+export type BillingPaymentMethod = {
+  id: string;
+  brand: string;
+  last_four: string;
+  expiry_month: number;
+  expiry_year: number;
+  default: boolean;
+};
+
+export type BillingSubscriptionDetail = {
+  status: string;
+  current_period_end?: string | null;
+  cancel_at_period_end: boolean;
+  entitled: boolean;
+  // "stripe" when the provider answered, "local" or "demo" when the payload was
+  // built from stored state, "none" when billing is not configured at all.
+  source: string;
+  plan: BillingPlan;
+  payment_method: BillingPaymentMethod | null;
+};
+
+export type BillingInvoice = {
+  id: string;
+  number: string;
+  status: string;
+  amount_due: number;
+  amount_paid: number;
+  currency: string;
+  created?: string | null;
+  period_start?: string | null;
+  period_end?: string | null;
+  // Stripe's own signed links. Either can be empty, and an empty one means there
+  // is no receipt to offer rather than a link worth constructing.
+  hosted_invoice_url: string;
+  invoice_pdf: string;
+};
+
+export type BillingInvoiceList = { invoices: BillingInvoice[]; provider: string };
+export type BillingPaymentMethodList = { methods: BillingPaymentMethod[]; provider: string; defaultPaymentMethodId: string };
+
+function billingListMeta(meta: unknown): { provider: string; defaultPaymentMethodId: string } {
+  const record = (meta || {}) as Record<string, unknown>;
+  return {
+    provider: typeof record.provider === "string" ? record.provider : "",
+    defaultPaymentMethodId: typeof record.default_payment_method_id === "string" ? record.default_payment_method_id : "",
+  };
+}
+
+const demoBillingCard: BillingPaymentMethod = { id: "pm_demo_visa", brand: "visa", last_four: "4242", expiry_month: 4, expiry_year: 2029, default: true };
+
+const demoBillingDetail: BillingSubscriptionDetail = {
+  status: "active",
+  current_period_end: "2026-09-29T00:00:00Z",
+  cancel_at_period_end: false,
+  entitled: true,
+  source: "demo",
+  plan: { code: "starter_17", unit_amount: 1700, currency: "usd", interval: "month" },
+  payment_method: demoBillingCard,
+};
+
 export const garudaApi = {
   me: () => apiRequest<{
     user: { id: string; email: string; name?: string };
@@ -372,6 +439,62 @@ export const garudaApi = {
     method: "POST",
     timeoutMs: 25000,
     mock: () => ({ url: "/app/billing", demo: true }),
+  }),
+  billingSubscriptionDetail: () => apiRequest<BillingSubscriptionDetail>("/billing/subscription/detail", {
+    timeoutMs: 20000,
+    mock: () => demoBillingDetail,
+  }),
+  listBillingInvoices: async (): Promise<BillingInvoiceList> => {
+    let meta: unknown;
+    const invoices = await apiRequest<BillingInvoice[]>("/billing/invoices", {
+      timeoutMs: 20000,
+      onMeta: (value) => { meta = value; },
+      mock: () => [
+        // Demo receipts carry no links: there is no hosted invoice behind them,
+        // and a button that opens nothing is worse than no button.
+        { id: "in_demo_2", number: "GAR-DEMO-00829", status: "paid", amount_due: 1700, amount_paid: 1700, currency: "usd", created: "2026-08-29T09:12:00Z", period_start: "2026-08-29T09:12:00Z", period_end: "2026-09-29T09:12:00Z", hosted_invoice_url: "", invoice_pdf: "" },
+        { id: "in_demo_1", number: "GAR-DEMO-00729", status: "paid", amount_due: 1700, amount_paid: 1700, currency: "usd", created: "2026-07-29T09:12:00Z", period_start: "2026-07-29T09:12:00Z", period_end: "2026-08-29T09:12:00Z", hosted_invoice_url: "", invoice_pdf: "" },
+      ],
+    });
+    return { invoices, provider: billingListMeta(meta).provider || "demo" };
+  },
+  listBillingPaymentMethods: async (): Promise<BillingPaymentMethodList> => {
+    let meta: unknown;
+    const methods = await apiRequest<BillingPaymentMethod[]>("/billing/payment-methods", {
+      timeoutMs: 20000,
+      onMeta: (value) => { meta = value; },
+      mock: () => [demoBillingCard],
+    });
+    const listMeta = billingListMeta(meta);
+    return { methods, provider: listMeta.provider || "demo", defaultPaymentMethodId: listMeta.defaultPaymentMethodId || demoBillingCard.id };
+  },
+  // Returns the browser's authority to attach one card to this workspace's Stripe
+  // customer. Confirming it requires Stripe.js, which this app does not load, so
+  // this is wired but not yet called from the billing screen.
+  createBillingSetupIntent: () => apiRequest<{ client_secret: string; status: string; demo?: boolean; notice?: string }>("/billing/payment-methods/setup-intent", {
+    method: "POST",
+    headers: { "Idempotency-Key": typeof crypto !== "undefined" ? crypto.randomUUID() : "setup-intent" },
+    timeoutMs: 25000,
+    mock: () => ({ client_secret: "", status: "unavailable", demo: true, notice: "Local demo only. Stripe is not configured, so no card can be collected." }),
+  }),
+  setDefaultBillingPaymentMethod: (paymentMethodId: string) => apiRequest<BillingPaymentMethod>("/billing/payment-methods/default", {
+    method: "POST",
+    body: JSON.stringify({ payment_method_id: paymentMethodId }),
+    timeoutMs: 25000,
+    mock: () => ({ ...demoBillingCard, id: paymentMethodId, default: true }),
+  }),
+  // The API cancels at the end of the paid period unless `immediate` is sent, and
+  // the screen never sends it: an immediate cancel forfeits time already paid for.
+  cancelBillingSubscription: () => apiRequest<BillingSubscriptionDetail>("/billing/subscription/cancel", {
+    method: "POST",
+    body: JSON.stringify({ immediate: false }),
+    timeoutMs: 25000,
+    mock: () => ({ ...demoBillingDetail, cancel_at_period_end: true }),
+  }),
+  resumeBillingSubscription: () => apiRequest<BillingSubscriptionDetail>("/billing/subscription/resume", {
+    method: "POST",
+    timeoutMs: 25000,
+    mock: () => ({ ...demoBillingDetail, cancel_at_period_end: false }),
   }),
   listAgents: async (): Promise<Agent[]> => {
     const items = await apiRequest<Array<Record<string, unknown>>>("/agents?page_size=25", { mock: () => demoAgents as unknown as Array<Record<string, unknown>> });

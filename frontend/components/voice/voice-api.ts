@@ -108,6 +108,34 @@ export async function transcribeRecording(recording: Blob, durationSeconds: numb
   };
 }
 
+export type VoiceDetails = { agentDisplayName: string; offerBooking: boolean };
+
+// The agent's display name and the appointments answer, saved together.
+//
+// This endpoint is the only route that accepts them. PUT /v1/onboarding keeps
+// the four onboarding question ids and silently drops every other key, so a
+// name posted in that answers map would vanish without an error — which is why
+// the typed questions send them here too, not only the spoken ones.
+export async function saveVoiceDetails(details: VoiceDetails): Promise<void> {
+  await apiRequest<Record<string, unknown>>("/onboarding/voice/details", {
+    method: "PUT",
+    body: JSON.stringify({ agent_display_name: details.agentDisplayName, offer_booking: details.offerBooking }),
+    timeoutMs: 15000,
+    mock: () => ({ details: { agent_display_name: details.agentDisplayName, offer_booking: details.offerBooking } }),
+  });
+}
+
+export function voiceDetailsFailureMessage(reason: unknown): string {
+  const code = reason instanceof ApiError ? reason.code : "";
+  if (code === "validation_failed") {
+    return "That name was not accepted — use between 2 and 120 characters.";
+  }
+  if (reason instanceof Error && reason.name === "AbortError") {
+    return "Saving your agent’s name timed out. Please try again.";
+  }
+  return "We could not save your agent’s name and booking answer. Please try again.";
+}
+
 // Every failure says the recording is kept, because it is: the blob stays in
 // state and the retry button sends the same bytes again. Someone who has just
 // spoken for two minutes needs to be told that before anything else.
@@ -146,6 +174,13 @@ export function transcriptionFailureMessage(reason: unknown): string {
   }
   if (code === transcriptionFailureCodes.quotaExceeded) {
     return `This account has transcribed as much audio as an hour allows. Wait a little, or type your answers instead. ${recordingKeptSentence}`;
+  }
+  // Written by the rate limiter in front of the route rather than by the handler,
+  // which is why it is not in the list above. It is the one an owner who has been
+  // re-recording hits first, so it cannot be allowed to fall through to "we could
+  // not transcribe that", which sounds like the recording was at fault.
+  if (code === "rate_limited") {
+    return `You have sent a lot of recordings in the last hour, so transcription is paused for a short while. Type this answer instead, or come back to it shortly. ${recordingKeptSentence}`;
   }
   if (code === transcriptionFailureCodes.subscriptionRequired) {
     return `An active subscription is needed to transcribe a recording. You can type your answers instead. ${recordingKeptSentence}`;

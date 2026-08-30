@@ -1433,6 +1433,475 @@ test('a failed restart keeps the visitor where they were', async () => {
   }
 });
 
+// ---- appointments ----
+//
+// The times a visitor sees are rendered by the server in the OWNER's time zone
+// and are used as sent. These tests keep that honest: the stubbed payload below
+// is deliberately built so that the UTC instant and the owner's wording fall on
+// different hours, and one of them on a different day, so a widget that
+// reformatted a time in the browser's zone would be caught rather than passing.
+
+function jsonResponse(body, status) {
+  return new Response(JSON.stringify(body), {
+    status: status || 200,
+    headers: { 'Content-Type': 'application/json' }
+  });
+}
+
+// 09:00 and 09:30 on Tuesday, and 00:30 on Thursday, in Asia/Kolkata.
+function offeredSlots(slots) {
+  return {
+    data: {
+      slots: slots,
+      timezone: 'Asia/Kolkata',
+      duration_minutes: 30
+    }
+  };
+}
+
+const TUESDAY_NINE = {
+  start: '2026-09-01T03:30:00Z',
+  end: '2026-09-01T04:00:00Z',
+  label: 'Tue 1 Sep, 09:00',
+  day: 'Tue 1 Sep',
+  time: '09:00',
+  minutes: 30
+};
+const TUESDAY_NINE_THIRTY = {
+  start: '2026-09-01T04:00:00Z',
+  end: '2026-09-01T04:30:00Z',
+  label: 'Tue 1 Sep, 09:30',
+  day: 'Tue 1 Sep',
+  time: '09:30',
+  minutes: 30
+};
+const THURSDAY_HALF_PAST_MIDNIGHT = {
+  start: '2026-09-02T19:00:00Z',
+  end: '2026-09-02T19:30:00Z',
+  label: 'Thu 3 Sep, 00:30',
+  day: 'Thu 3 Sep',
+  time: '00:30',
+  minutes: 30
+};
+
+function bookingFields(rendered) {
+  return rendered.nodes.bookingRegion.querySelectorAll('.gw-field').map((group) => ({
+    label: group.querySelector('label'),
+    control: group.querySelector('input,select,textarea'),
+    error: group.querySelector('.gw-field-error')
+  }));
+}
+
+function slotButtons(rendered) {
+  return rendered.nodes.bookingRegion.querySelectorAll('.gw-slot');
+}
+
+test('the booking button appears only when the bootstrap offers appointments', () => {
+  const offering = renderWidget({
+    display_name: 'Northstar',
+    booking: { enabled: true, label: 'Book a fitting', duration_minutes: 30, timezone: 'Asia/Kolkata' }
+  });
+  try {
+    assert.equal(offering.instance.agent.booking.enabled, true);
+    assert.equal(offering.instance.agent.booking.timezone, 'Asia/Kolkata');
+    assert.equal(offering.nodes.bookingButton.hidden, false);
+    assert.equal(offering.nodes.bookingLabel.textContent, 'Book a fitting');
+    assert.equal(offering.nodes.bookingButton.getAttribute('aria-label'), 'Book a fitting');
+  } finally {
+    offering.restore();
+  }
+
+  const without = renderWidget({ display_name: 'Northstar' });
+  try {
+    assert.equal(without.instance.agent.booking.enabled, false);
+    assert.equal(
+      without.nodes.bookingButton.hidden,
+      true,
+      'a site that never connected a calendar shows no booking button'
+    );
+  } finally {
+    without.restore();
+  }
+
+  const switchedOff = renderWidget({ display_name: 'Northstar', booking: { enabled: false } });
+  try {
+    assert.equal(switchedOff.nodes.bookingButton.hidden, true);
+  } finally {
+    switchedOff.restore();
+  }
+
+  // Free times are only readable with a session token, so there is nothing to
+  // offer before there is a session.
+  const noSession = renderWidget(
+    { display_name: 'Northstar', booking: { enabled: true, timezone: 'Asia/Kolkata' } },
+    { session: null }
+  );
+  try {
+    assert.equal(noSession.nodes.bookingButton.hidden, true);
+  } finally {
+    noSession.restore();
+  }
+});
+
+test('the picker shows the times the server rendered, grouped by the day it named', async () => {
+  const calls = [];
+  const rendered = renderWidget(
+    {
+      display_name: 'Northstar',
+      booking: { enabled: true, label: 'Book an appointment', duration_minutes: 30, timezone: 'Asia/Kolkata' }
+    },
+    {
+      fetch: async (url, options) => {
+        calls.push({ url, options });
+        return jsonResponse(offeredSlots([TUESDAY_NINE, TUESDAY_NINE_THIRTY, THURSDAY_HALF_PAST_MIDNIGHT]));
+      }
+    }
+  );
+  try {
+    await rendered.instance.showBookingPicker();
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'https://api.garuda.example/widget/v1/sessions/session-1/slots');
+    assert.equal(
+      calls[0].options.headers['X-Garuda-Session-Token'],
+      'short-lived-token',
+      'free times are only readable with a live session'
+    );
+
+    const region = rendered.nodes.bookingRegion;
+    assert.deepEqual(
+      region.querySelectorAll('.gw-slot-day-name').map((name) => name.textContent),
+      ['Tue 1 Sep', 'Thu 3 Sep'],
+      'the days are the server own wording, in the order it sent them'
+    );
+    const lists = region.querySelectorAll('.gw-slot-list');
+    assert.equal(lists.length, 2);
+    lists.forEach((list) => {
+      assert.equal(list.tagName, 'ul', 'a list of times is a list');
+      assert.ok(list.getAttribute('aria-labelledby'), 'each list is named by its day heading');
+      list.childNodes.forEach((item) => assert.equal(item.tagName, 'li'));
+    });
+
+    const times = slotButtons(rendered);
+    assert.deepEqual(times.map((button) => button.textContent), ['09:00', '09:30', '00:30']);
+    times.forEach((button) => assert.equal(button.tagName, 'button', 'every slot is a real button'));
+    assert.deepEqual(
+      times.map((button) => button.getAttribute('aria-label')),
+      ['Book Tue 1 Sep, 09:00', 'Book Tue 1 Sep, 09:30', 'Book Thu 3 Sep, 00:30'],
+      'the accessible name carries the day as well as the time'
+    );
+
+    const note = region.querySelector('.gw-booking-note');
+    assert.equal(note.getAttribute('role'), 'status', 'the panel announces what the picker is doing');
+    assert.match(note.textContent, /Asia\/Kolkata/, 'a visitor elsewhere is told whose clock these are');
+    assert.match(note.textContent, /30 minutes/);
+
+    // The proof that nothing was reformatted here: the UTC instants behind these
+    // three times never appear on screen.
+    assert.doesNotMatch(region.textContent, /03:30|04:00|19:00/);
+    assert.equal(rendered.nodes.bookingButton.hidden, true, 'the button that opened the picker steps aside');
+
+    // Every slot is reachable by Tab already; the arrows are the shortcut a
+    // picker is expected to have. The key handler sits on the container the way
+    // it would in a browser, and the stub does not bubble, so the event is
+    // dispatched there with the slot it started on as its target.
+    const keys = region.querySelector('.gw-booking-body');
+    await dispatch(keys, 'keydown', { key: 'ArrowRight', target: times[0] });
+    assert.equal(times[1].focusCount > 0, true);
+    await dispatch(keys, 'keydown', { key: 'End', target: times[1] });
+    assert.equal(times[2].focusCount > 0, true);
+    await dispatch(keys, 'keydown', { key: 'Enter', target: times[2] });
+    assert.equal(times[1].focusCount, 1, 'a key the picker does not own is left alone');
+
+    // Escape belongs to the times while they are on screen. The conversation
+    // behind them is not thrown away with them.
+    rendered.instance.setOpen(true);
+    rendered.instance.handlePanelKeys({ key: 'Escape', preventDefault() {} });
+    assert.equal(rendered.instance.bookingVisible, false);
+    assert.equal(rendered.instance.open, true, 'the panel itself stays open');
+    assert.equal(rendered.nodes.bookingButton.hidden, false, 'and the way back in is there');
+    await rendered.instance.showBookingPicker();
+    assert.equal(slotButtons(rendered).length, 3, 'reopening reads the times again');
+    assert.equal(calls.length, 2);
+  } finally {
+    rendered.restore();
+  }
+});
+
+test('a time taken while the visitor was choosing is said plainly, with the times that are left', async () => {
+  const calls = [];
+  let slotsRequests = 0;
+  const rendered = renderWidget(
+    {
+      display_name: 'Northstar',
+      booking: { enabled: true, duration_minutes: 30, timezone: 'Asia/Kolkata' }
+    },
+    {
+      fetch: async (url, options) => {
+        calls.push({ url, options });
+        if (url.endsWith('/slots')) {
+          slotsRequests += 1;
+          // The owner took 09:00 between the two reads, which is exactly the
+          // race the 409 exists for.
+          return jsonResponse(offeredSlots(
+            slotsRequests === 1
+              ? [TUESDAY_NINE, TUESDAY_NINE_THIRTY]
+              : [TUESDAY_NINE_THIRTY]
+          ));
+        }
+        return jsonResponse({
+          error: { code: 'slot_taken', message: 'That time has just been taken. Please choose another.' }
+        }, 409);
+      }
+    }
+  );
+  try {
+    await rendered.instance.showBookingPicker();
+    await dispatch(slotButtons(rendered)[0], 'click');
+    bookingFields(rendered)[0].control.value = 'Ada Lovelace';
+    await dispatch(rendered.nodes.bookingRegion.querySelector('form'), 'submit');
+
+    assert.equal(slotsRequests, 2, 'the times are read again rather than trusted');
+    assert.equal(calls.length, 3);
+    assert.equal(calls[1].url, 'https://api.garuda.example/widget/v1/sessions/session-1/booking');
+
+    const note = rendered.nodes.bookingRegion.querySelector('.gw-booking-note');
+    assert.match(
+      note.textContent,
+      /taken while you were choosing/i,
+      'the visitor is told what happened, not shown an error code'
+    );
+    assert.equal(note.getAttribute('data-state'), 'notice');
+    assert.equal(rendered.instance.bookingVisible, true, 'the picker stays open so another time can be taken');
+    assert.deepEqual(
+      slotButtons(rendered).map((button) => button.textContent),
+      ['09:30'],
+      'the time that went is gone and the ones still free are offered'
+    );
+    assert.equal(
+      rendered.instance.messages.some((message) => /confirmed/i.test(message.content)),
+      false,
+      'nothing was booked, so nothing is confirmed'
+    );
+  } finally {
+    rendered.restore();
+  }
+});
+
+test('a calendar the owner never connected offers the lead form rather than blaming the visitor', async () => {
+  const rendered = renderWidget(
+    {
+      display_name: 'Northstar',
+      lead_capture_enabled: true,
+      booking: { enabled: true, timezone: 'Asia/Kolkata' }
+    },
+    {
+      fetch: async () => jsonResponse({
+        error: {
+          code: 'calendar_not_connected',
+          message: 'Appointments are not available right now. Please leave your details instead.'
+        }
+      }, 503)
+    }
+  );
+  try {
+    await rendered.instance.showBookingPicker();
+
+    assert.equal(rendered.instance.bookingVisible, false);
+    assert.equal(rendered.nodes.bookingRegion.childNodes.length, 0, 'the picker closes rather than sitting empty');
+    assert.equal(
+      rendered.nodes.leadRegion.querySelectorAll('form').length,
+      1,
+      'the visitor is offered the form instead of a dead end'
+    );
+    const last = rendered.instance.messages[rendered.instance.messages.length - 1];
+    assert.match(last.content, /not available right now/i);
+    assert.doesNotMatch(last.content, /error|failed|invalid/i, 'this is the owner problem, not the visitor fault');
+    assert.equal(
+      rendered.nodes.connectionNotice.hidden,
+      true,
+      'a calendar the owner has not connected is not a connection failure to retry'
+    );
+    assert.equal(rendered.nodes.bookingButton.hidden, true);
+  } finally {
+    rendered.restore();
+  }
+});
+
+test('confirming a time posts the slot start exactly as the server sent it', async () => {
+  const calls = [];
+  const rendered = renderWidget(
+    {
+      display_name: 'Northstar',
+      booking: { enabled: true, duration_minutes: 30, timezone: 'Asia/Kolkata' }
+    },
+    {
+      fetch: async (url, options) => {
+        calls.push({ url, options, body: options.body ? JSON.parse(options.body) : null });
+        if (url.endsWith('/slots')) {
+          return jsonResponse(offeredSlots([TUESDAY_NINE, THURSDAY_HALF_PAST_MIDNIGHT]));
+        }
+        return jsonResponse({
+          data: {
+            booked: true,
+            start: '2026-09-01T03:30:00Z',
+            minutes: 30,
+            timezone: 'Asia/Kolkata'
+          }
+        }, 201);
+      }
+    }
+  );
+  try {
+    await rendered.instance.showBookingPicker();
+    await dispatch(slotButtons(rendered)[0], 'click');
+
+    const fields = bookingFields(rendered);
+    assert.deepEqual(fields.map((field) => field.control.name), ['name', 'email', 'notes']);
+    fields.forEach((field) => {
+      assert.equal(field.label.htmlFor, field.control.id, 'every field is labelled by id');
+      assert.equal(field.control.getAttribute('aria-describedby'), field.error.id);
+    });
+    assert.equal(fields[1].control.required, false, 'the server books without an email, so the widget asks without one');
+    assert.match(fields[1].label.textContent, /optional/);
+
+    fields[0].control.value = 'Ada Lovelace';
+    fields[1].control.value = 'ada@example.com';
+    fields[2].control.value = 'Ground floor, please.';
+    await dispatch(rendered.nodes.bookingRegion.querySelector('form'), 'submit');
+
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].url, 'https://api.garuda.example/widget/v1/sessions/session-1/booking');
+    assert.equal(calls[1].options.method, 'POST');
+    assert.equal(calls[1].options.headers['X-Garuda-Session-Token'], 'short-lived-token');
+    assert.equal(
+      calls[1].body.start,
+      TUESDAY_NINE.start,
+      'the endpoint matches this instant against the calendar again, so it travels back untouched'
+    );
+    assert.equal(calls[1].body.name, 'Ada Lovelace');
+    assert.equal(calls[1].body.email, 'ada@example.com');
+    assert.equal(calls[1].body.notes, 'Ground floor, please.');
+
+    const last = rendered.instance.messages[rendered.instance.messages.length - 1];
+    assert.match(last.content, /confirmed for Tue 1 Sep, 09:00/, 'the confirmation uses the owner own wording');
+    assert.match(last.content, /Asia\/Kolkata/);
+    assert.equal(rendered.instance.bookingVisible, false, 'the picker closes once the time is taken');
+    assert.equal(rendered.nodes.bookingRegion.childNodes.length, 0);
+    assert.equal(rendered.nodes.bookingButton.hidden, false, 'the button comes back for a second appointment');
+  } finally {
+    rendered.restore();
+  }
+});
+
+test('a calendar the widget could not reach is offered another try, not a dead picker', async () => {
+  let reachable = false;
+  const rendered = renderWidget(
+    {
+      display_name: 'Northstar',
+      booking: { enabled: true, duration_minutes: 30, timezone: 'Asia/Kolkata' }
+    },
+    {
+      fetch: async () => (reachable
+        ? jsonResponse(offeredSlots([TUESDAY_NINE, TUESDAY_NINE_THIRTY]))
+        : jsonResponse({
+          error: {
+            code: 'calendar_unavailable',
+            message: 'The calendar could not be reached. Please try again in a moment.'
+          }
+        }, 502))
+    }
+  );
+  try {
+    await rendered.instance.showBookingPicker();
+
+    assert.equal(rendered.nodes.bookingRegion.childNodes.length, 0);
+    assert.equal(rendered.nodes.connectionNotice.hidden, false);
+    assert.match(rendered.nodes.noticeText.textContent, /could not be reached/i);
+    assert.equal(rendered.nodes.retryButton.hidden, false, 'a calendar that blinked is worth another try');
+    assert.equal(rendered.nodes.bookingButton.hidden, false, 'and the button comes back either way');
+    assert.equal(
+      rendered.nodes.leadRegion.querySelectorAll('form').length,
+      0,
+      'a transient failure is not a reason to give up on the appointment'
+    );
+
+    reachable = true;
+    await rendered.instance.lastRetry();
+
+    assert.equal(slotButtons(rendered).length, 2);
+    assert.equal(rendered.nodes.connectionNotice.hidden, true, 'the notice clears once the times arrive');
+  } finally {
+    rendered.restore();
+  }
+});
+
+test('a fully booked calendar says so instead of showing an empty list', async () => {
+  const rendered = renderWidget(
+    {
+      display_name: 'Northstar',
+      booking: { enabled: true, duration_minutes: 30, timezone: 'Asia/Kolkata' }
+    },
+    { fetch: async () => jsonResponse(offeredSlots([])) }
+  );
+  try {
+    await rendered.instance.showBookingPicker();
+    const note = rendered.nodes.bookingRegion.querySelector('.gw-booking-note');
+    assert.match(note.textContent, /no free times/i);
+    assert.equal(slotButtons(rendered).length, 0);
+    assert.equal(rendered.instance.bookingVisible, true, 'the visitor can still close it themselves');
+  } finally {
+    rendered.restore();
+  }
+});
+
+test('a booking field the server rejects is named on that field, and the button comes back', async () => {
+  const rendered = renderWidget(
+    {
+      display_name: 'Northstar',
+      booking: { enabled: true, duration_minutes: 30, timezone: 'Asia/Kolkata' }
+    },
+    {
+      fetch: async (url) => (url.endsWith('/slots')
+        ? jsonResponse(offeredSlots([TUESDAY_NINE]))
+        : jsonResponse({
+          error: {
+            code: 'validation_failed',
+            message: 'That email address is not valid',
+            details: { email: 'invalid' }
+          }
+        }, 422))
+    }
+  );
+  try {
+    await rendered.instance.showBookingPicker();
+    await dispatch(slotButtons(rendered)[0], 'click');
+
+    const form = rendered.nodes.bookingRegion.querySelector('form');
+    const submit = form.querySelector('.gw-lead-submit');
+    await dispatch(form, 'submit');
+    assert.equal(
+      bookingFields(rendered)[0].error.textContent,
+      'This field is required.',
+      'the form checks itself before it spends a round trip'
+    );
+
+    const fields = bookingFields(rendered);
+    fields[0].control.value = 'Ada Lovelace';
+    fields[1].control.value = 'ada@example.com';
+    await dispatch(form, 'submit');
+
+    assert.equal(fields[1].error.hidden, false);
+    assert.equal(fields[1].error.textContent, 'Email for the invite is invalid.');
+    assert.equal(fields[1].control.getAttribute('aria-invalid'), 'true');
+    assert.equal(submit.disabled, false, 'the visitor can correct the field and confirm again');
+    assert.equal(submit.textContent, 'Confirm appointment', 'the busy label does not stick');
+    assert.equal(rendered.instance.bookingVisible, true);
+  } finally {
+    rendered.restore();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // The visitor's journey.
 //

@@ -149,9 +149,14 @@ export function WidgetChatPreview() {
           <Launcher />
         </div>
       </div>
+      {/* The caption names what the illustration is for. The last assistant turn
+          above is the whole objection — "will it invent something and make me
+          apologise" — answered by showing the refusal rather than asserting it,
+          and a reader scanning on a phone will not notice that unless told. */}
       <figcaption className="mx-auto mt-5 max-w-[390px] text-center text-xs leading-5 text-slate-500">
-        A static illustration of the published widget, drawn from its real layout and wording. The business is an example, not a
-        customer, and the panel is not a live chat.
+        Note the last answer: asked for a price it has not been given, the agent declines to guess and offers a person instead.
+        That is the behaviour every drafted agent is instructed to follow. A static illustration of the published widget, drawn
+        from its real layout and wording — the business is an example, not a customer, and the panel is not a live chat.
       </figcaption>
     </figure>
   );

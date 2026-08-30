@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"garuda/backend/internal/llm"
 	"garuda/backend/internal/model"
 )
 
@@ -179,5 +180,81 @@ func TestAnUnsetWorkingDayIsDefaultedButAReversedOneIsRejected(t *testing.T) {
 	validateBooking(allDay, details)
 	if len(details) != 0 {
 		t.Fatalf("an all-day window was rejected: %v", details)
+	}
+}
+
+// The owner is asked "what should your assistant be called?" during onboarding.
+// The model then proposes its own name, and the model used to win: being asked a
+// question and having the answer quietly discarded is worse than never being
+// asked at all.
+func TestTheNameTheOwnerChoseBeatsTheOneTheModelProposed(t *testing.T) {
+	onboarding := model.Onboarding{
+		AccountID: "org_1",
+		Answers:   map[string]string{voiceAgentDisplayNameAnswerKey: "Priya"},
+	}
+	agent := agentFromDraft("org_1", llm.AgentDraft{Name: "Helpful Assistant", Description: "d"}, onboarding, time.Now().UTC())
+	if agent.Name != "Priya" {
+		t.Fatalf("agent name = %q, want the one the owner chose", agent.Name)
+	}
+
+	// And with no answer, the model's name is the right fallback.
+	unanswered := agentFromDraft("org_1", llm.AgentDraft{Name: "Helpful Assistant"}, model.Onboarding{}, time.Now().UTC())
+	if unanswered.Name != "Helpful Assistant" {
+		t.Fatalf("agent name = %q, want the draft's when nothing was chosen", unanswered.Name)
+	}
+}
+
+// Answering yes to appointments during onboarding prepares the settings. It does
+// NOT switch booking on: that writes real events into a real calendar, and it
+// needs one connected first, so the switch belongs to somebody who has seen what
+// it does.
+func TestAnsweringYesToAppointmentsPreparesButDoesNotEnableBooking(t *testing.T) {
+	onboarding := model.Onboarding{Answers: map[string]string{voiceOfferBookingAnswerKey: "true"}}
+	agent := agentFromDraft("org_1", llm.AgentDraft{Name: "Nova"}, onboarding, time.Now().UTC())
+
+	if agent.Booking.Enabled {
+		t.Fatal("onboarding switched booking on before a calendar was connected")
+	}
+	if agent.Booking.DurationMinutes != 30 || agent.Booking.StartHour != 9 || agent.Booking.EndHour != 18 {
+		t.Fatalf("the defaults were not prepared: %+v", agent.Booking)
+	}
+
+	declined := agentFromDraft("org_1", llm.AgentDraft{Name: "Nova"}, model.Onboarding{}, time.Now().UTC())
+	if declined.Booking.DurationMinutes != 0 {
+		t.Fatalf("an owner who did not ask for appointments got booking defaults: %+v", declined.Booking)
+	}
+}
+
+// Stripe moved the billing period onto the subscription ITEM in newer API
+// versions. The direct-read path already handled both; the webhook path did not,
+// so the stored renewal date silently stopped updating -- and that date is what a
+// cancellation dialog quotes back as the day the agents stop replying.
+func TestThePeriodEndIsReadFromWhereverStripePutIt(t *testing.T) {
+	legacy := map[string]any{"current_period_end": float64(1788000000)}
+	if got := subscriptionPeriodEnd(legacy); got == nil || got.Unix() != 1788000000 {
+		t.Fatalf("the subscription-level period end was not read: %v", got)
+	}
+
+	modern := map[string]any{
+		"items": map[string]any{
+			"data": []any{map[string]any{"current_period_end": float64(1788000000)}},
+		},
+	}
+	if got := subscriptionPeriodEnd(modern); got == nil || got.Unix() != 1788000000 {
+		t.Fatalf("the item-level period end was not read: %v", got)
+	}
+
+	// A payload with neither must report nothing rather than an epoch date, which
+	// would tell a customer their subscription ended in 1970.
+	for name, object := range map[string]map[string]any{
+		"empty":            {},
+		"items not a map":  {"items": "unexpected"},
+		"no item rows":     {"items": map[string]any{"data": []any{}}},
+		"row not a map":    {"items": map[string]any{"data": []any{"unexpected"}}},
+		"row without date": {"items": map[string]any{"data": []any{map[string]any{}}}},
+	} {
+		if got := subscriptionPeriodEnd(object); got != nil {
+			t.Errorf("%s: invented a period end of %v", name, got)
+		}
 	}
 }

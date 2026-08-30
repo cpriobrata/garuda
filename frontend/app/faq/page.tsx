@@ -131,7 +131,7 @@ const faqs: Faq[] = [
     id: "widget-impact",
     question: "Will the chat widget interfere with my site's design or speed?",
     answer:
-      "The widget renders inside a Shadow DOM, so its styles and your site's styles cannot reach each other. It is served gzipped at about 27 KB, loads asynchronously, and pulls in no third-party scripts or fonts — the only network requests it makes are to the Garuda API.",
+      "The widget renders inside a Shadow DOM, so its styles and your site's styles cannot reach each other. It is served gzipped and cached, loads asynchronously so it never blocks your page, and pulls in no third-party scripts or fonts — the only network requests it makes are to the Garuda API.",
   },
   {
     id: "where-answers-come-from",

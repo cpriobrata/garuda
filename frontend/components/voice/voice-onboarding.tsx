@@ -43,13 +43,17 @@ export type VoiceOnboardingProps = {
   // Injectable so the flow can be exercised without a server.
   transcribe?: (recording: Blob, durationSeconds: number) => Promise<VoiceTranscription>;
   idPrefix?: string;
+  // Passed straight to the panel. Supply them when onComplete is a step rather
+  // than the end of onboarding.
+  submitLabel?: string;
+  submitLoadingLabel?: string;
 };
 
 function revokeObjectUrl(url: string) {
   if (typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function") URL.revokeObjectURL(url);
 }
 
-export function VoiceOnboarding({ onComplete, onSkip, capability: providedCapability, transcribe, idPrefix }: VoiceOnboardingProps) {
+export function VoiceOnboarding({ onComplete, onSkip, capability: providedCapability, transcribe, idPrefix, submitLabel, submitLoadingLabel }: VoiceOnboardingProps) {
   const [state, dispatch] = useReducer(voiceFlowReducer, initialVoiceFlowState);
   const [capability, setCapability] = useState<VoiceCapability | null>(providedCapability ?? null);
   const [showIssues, setShowIssues] = useState(false);
@@ -201,6 +205,8 @@ export function VoiceOnboarding({ onComplete, onSkip, capability: providedCapabi
       issues={showIssues ? issues : []}
       submitting={submission.busy || submitted}
       idPrefix={idPrefix}
+      submitLabel={submitLabel}
+      submitLoadingLabel={submitLoadingLabel}
       onStart={recorder.start}
       onStop={recorder.stop}
       onDiscard={discard}

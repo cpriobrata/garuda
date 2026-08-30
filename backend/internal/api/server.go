@@ -478,8 +478,26 @@ func (s *Server) originAllowed(origin string) bool {
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		applySecurityHeaders(w.Header())
+		applyTransportSecurity(w.Header(), r)
 		next.ServeHTTP(w, r)
 	})
+}
+
+// applyTransportSecurity pins this host to HTTPS in every browser that has seen
+// it once. Access tokens, session tokens and lead data all travel over this
+// origin, and without HSTS the first request of a session -- the one a visitor
+// makes by typing the host, or following an old http link -- is downgradeable.
+//
+// It is sent ONLY over TLS, which is what the spec requires and also what keeps
+// it from pinning a developer's localhost to a scheme it does not serve. Two
+// years, subdomains included, and deliberately not preloaded: preload is a list
+// that is slow to leave, and it should be a decision rather than a side effect.
+func applyTransportSecurity(header http.Header, r *http.Request) {
+	secure := r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+	if !secure {
+		return
+	}
+	header.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
 }
 
 // applySecurityHeaders holds the set every response must carry. It is shared with

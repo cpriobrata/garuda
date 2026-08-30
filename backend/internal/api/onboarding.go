@@ -326,7 +326,7 @@ func (s *Server) completeOnboarding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC()
-	agent := agentFromDraft(identity.AccountID, draft, now)
+	agent := agentFromDraft(identity.AccountID, draft, onboarding, now)
 	job := model.Job{ID: newID("job_"), AccountID: identity.AccountID, Type: "generate_agent", Status: "succeeded", Result: map[string]any{"agent_id": agent.ID}, CreatedAt: now, UpdatedAt: now}
 	err = s.store.Update(func(state *model.State) error {
 		for index := range state.Onboarding {

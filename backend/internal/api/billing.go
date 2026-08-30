@@ -409,8 +409,8 @@ func applyStripeEvent(state *model.State, eventType string, object map[string]an
 	}
 	subscription.Status = status
 	subscription.Plan = "starter_17"
-	if value, present := object["current_period_end"]; present {
-		subscription.CurrentPeriodEnd = unixTime(value)
+	if endsAt := subscriptionPeriodEnd(object); endsAt != nil {
+		subscription.CurrentPeriodEnd = endsAt
 	}
 	if cancel, ok := object["cancel_at_period_end"].(bool); ok {
 		subscription.CancelAtPeriodEnd = cancel
@@ -1061,4 +1061,37 @@ func billingValidPaymentMethodID(value string) bool {
 		}
 	}
 	return true
+}
+
+// subscriptionPeriodEnd finds when the paid period ends, from either place
+// Stripe puts it.
+//
+// Newer API versions report the billing period on the subscription ITEM rather
+// than on the subscription itself, and internal/billing/stripe.go already falls
+// back to the item when it reads a subscription directly. The webhook path did
+// not, so on a newer API version the stored date silently stopped being updated
+// -- and that date is exactly what the cancellation dialog quotes back to a
+// customer as the day their agents stop replying.
+func subscriptionPeriodEnd(object map[string]any) *time.Time {
+	if value, present := object["current_period_end"]; present {
+		if moment := unixTime(value); moment != nil {
+			return moment
+		}
+	}
+	items, ok := object["items"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	data, ok := items["data"].([]any)
+	if !ok || len(data) == 0 {
+		return nil
+	}
+	first, ok := data[0].(map[string]any)
+	if !ok {
+		return nil
+	}
+	if value, present := first["current_period_end"]; present {
+		return unixTime(value)
+	}
+	return nil
 }

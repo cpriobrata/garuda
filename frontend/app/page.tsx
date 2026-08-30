@@ -14,7 +14,10 @@ import {
   KeyRound,
   LayoutDashboard,
   MessageCircleQuestion,
+  PhoneCall,
   Repeat2,
+  Route,
+  Send,
   ShieldCheck,
   Sparkles,
   UserCheck,
@@ -35,7 +38,19 @@ import { API_URL, PLAN_LIMITS, PLAN_PRICE_USD, pageMetadata } from "@/lib/seo";
  * in this repository today, or it says plainly that it does not exist yet. No
  * customers, no logos, no invented metrics. The numbers that do appear come from
  * backend/internal/config/plan.go — via PLAN_LIMITS, so the page cannot drift
- * from the server — and from a live request to https://api.garuda.ravan.ai.
+ * from the server.
+ *
+ * A COROLLARY THAT COST THIS PAGE A SENTENCE. A measured figure is a claim with
+ * a shelf life. The widget size quoted here ("about 27 KB gzipped", measured
+ * 29 August 2026) had already stopped being true by the next day, because the
+ * bundle it described kept being worked on. Prefer a structural fact — the async
+ * attribute, the Cache-Control the server sends, the limit in plan.go — over a
+ * measurement, and if you must quote a measurement, date it and re-take it.
+ *
+ * A SECOND COROLLARY. First-person sentences inside quotation marks read as
+ * customers talking even with no name attached. The "why this exists" section
+ * below is written in the second person and rendered as prose for that reason;
+ * it is not a testimonial block that lost its attributions.
  *
  * The FAQPage structured data for this product lives on /faq, which asks a wider
  * set of questions. The shorter list here is deliberately not marked up a second
@@ -57,21 +72,30 @@ export const metadata: Metadata = {
   title: { absolute: TITLE },
 };
 
+// ONE conversion, one label. Every primary button on this page is this button:
+// competing calls to action split a cold visitor's intent, and there is only one
+// thing worth doing here. The label matches the header and footer buttons, so a
+// visitor who scrolls past three of them sees the same promise three times.
 const CTA_HREF = "/auth/sign-up";
 const CTA_LABEL = "Create your agent";
 
 const heroFacts = [
   "Four questions to a first draft",
-  "One async script tag",
-  `USD $${PLAN_PRICE_USD}/month, cancel any time`,
+  "One script tag, any website",
+  "Answers only from knowledge you approve",
 ];
 
+// NOT TESTIMONIALS. These are the situations the product was built for, written
+// in the first person because that is how someone recognises their own problem.
+// They are deliberately NOT rendered as quotations attributed to anybody: Garuda
+// has no public customers, and a first-person sentence inside quote marks reads
+// as a customer voice whether or not a name is attached to it.
 const problems = [
-  "Someone lands on my pricing page at 11pm with one question. By morning they have booked with somebody else.",
-  "I tried a chatbot. It confidently invented a policy we do not have, and I was the one who had to apologise.",
-  "I do not have an afternoon spare to write prompts and draw conversation flowcharts.",
-  "I want the enquiry, but I am not willing to scrape an email address from someone who never agreed to give it.",
-  "Every tool I look at wants to plant its own tracker on my site.",
+  "Someone lands on your pricing page at 11pm with one question. By morning they have booked with somebody else.",
+  "The last chatbot you tried confidently invented a policy you do not have, and you were the one who had to apologise.",
+  "You do not have an afternoon spare to write prompts and draw conversation flowcharts.",
+  "You want the enquiry, but you are not willing to take an email address from someone who never agreed to give it.",
+  "Every tool you look at wants to plant its own tracker on your site.",
 ];
 
 const steps = [
@@ -91,13 +115,13 @@ const steps = [
     number: "03",
     icon: DatabaseZap,
     title: "Ground it in knowledge you approve",
-    text: "You paste in the text it may answer from — services, coverage, policies, the answers you retype every week. Up to five sources per agent, up to 100,000 characters each, and only sources marked ready are ever retrieved. Garuda does not crawl your website behind your back; what goes in is what you put in.",
+    text: "Import it from a page on your own website — paste the address and Garuda reads the page and shows you the extracted text before it becomes anything your agent can say. Or paste the text yourself. Up to five sources per agent, up to 100,000 characters each, and only sources marked ready are ever retrieved. Garuda reads only the addresses you hand it; it does not crawl your site behind your back.",
   },
   {
     number: "04",
     icon: Code2,
     title: "Publish one snippet",
-    text: "Publishing hands you a single script tag to paste before the closing body tag. Add the domains the agent is allowed to run on, and a request from any other origin is refused before a session is ever created.",
+    text: "Publishing hands you a single script tag to paste before the closing body tag, with step-by-step guides for Webflow, WordPress, Shopify and Framer if you would rather follow one. Add the domains the agent is allowed to run on, and a request from any other origin is refused before a session is ever created.",
   },
 ];
 
@@ -128,9 +152,24 @@ const capabilities = [
     text: "The widget mounts inside a Shadow DOM whose host style begins at all:initial, so your CSS and its CSS cannot collide in either direction. Sessions are only issued to origins on that agent's allowlist.",
   },
   {
+    icon: PhoneCall,
+    title: "Hands the visitor to a person",
+    text: "Turn on WhatsApp handoff and the agent offers a real person when it cannot help — on your trigger phrases, or automatically after a set number of turns. Your number is never in the public widget payload; the link is built only for a visitor holding a live session.",
+  },
+  {
+    icon: Send,
+    title: "Your team can answer in the same chat",
+    text: "Type a reply in the inbox and the visitor sees it in the widget, in the conversation they are already in. No new channel to install, and the agent reads what your colleague wrote as context rather than talking over it.",
+  },
+  {
+    icon: Route,
+    title: "You can see where the lead came from",
+    text: "Every conversation carries the visit behind it: the referring site, the campaign it arrived on, the pages that were read and how long each one held them. If you are paying for the click, you can see what the click did.",
+  },
+  {
     icon: LayoutDashboard,
     title: "One portal for the aftermath",
-    text: "Your agents, every conversation with its full transcript, each lead sitting beside the conversation that produced it, and daily activity for the workspace — in one place, not three.",
+    text: "Your agents, every conversation with its full transcript, each lead sitting beside the conversation that produced it, and daily activity for the workspace — in one place, not three. Add a webhook endpoint and every new lead is also delivered to your own systems, signed.",
   },
 ];
 
@@ -176,7 +215,12 @@ const planFeatures = [
   `Up to ${PLAN_LIMITS.publishedAgents} published agents`,
   `${PLAN_LIMITS.monthlyConversations} conversations in any rolling ${PLAN_LIMITS.conversationWindowDays}-day window`,
   `Up to ${PLAN_LIMITS.knowledgeSourcesPerAgent} knowledge sources per agent, ${PLAN_LIMITS.charactersPerSource.toLocaleString("en-US")} characters each`,
+  "Import knowledge straight from a page on your own website",
   "Consent-based lead capture, stored with its conversation",
+  "WhatsApp handoff when the agent cannot help",
+  "Reply to a visitor yourself from the inbox",
+  "The visitor journey and traffic source behind every lead",
+  "Signed outbound webhooks for leads and conversations",
   "Full transcripts, leads and daily activity in the portal",
   "Domain allowlisting and widget appearance controls",
   "Connect your own third-party accounts through Composio",
@@ -189,40 +233,67 @@ export default function LandingPage() {
 
       <main id="main" className="overflow-hidden bg-white">
         {/* ---------------------------------------------------------------- Hero */}
-        <section className="relative border-b border-slate-100 pb-20 pt-14 sm:pt-16 lg:pb-28 lg:pt-20">
+        {/*
+          THE FIRST SCREEN. A cold visitor arriving from an ad, on a phone, has to
+          get four answers before they scroll: what this is (the eyebrow), what it
+          does for them (the heading and the one paragraph under it), what it
+          costs (the line under the button), and what to do next (the button).
+          Budgeted against 360x640 with the 64px sticky header: eyebrow, heading,
+          one paragraph and the button land inside 640px, and the price sits
+          immediately under the button rather than below the fold.
+
+          The "1,400+ tools" badge that used to sit here now lives in the
+          integrations section, where it belongs. It is true, but it answers a
+          question nobody has yet on the first screen, and it cost the price its
+          place above the fold.
+        */}
+        <section className="relative border-b border-slate-100 pb-16 pt-8 sm:pb-20 sm:pt-16 lg:pb-28 lg:pt-20">
           <div className="surface-grid pointer-events-none absolute inset-0" aria-hidden="true" />
-          <div className="pointer-events-none absolute left-[12%] top-8 h-72 w-72 rounded-full bg-indigo-100/70 blur-[100px]" aria-hidden="true" />
-          <div className="pointer-events-none absolute right-[2%] top-24 h-72 w-72 rounded-full bg-fuchsia-100/50 blur-[110px]" aria-hidden="true" />
+          {/* Decoration only, and expensive decoration: two 288px circles under a
+              ~100px blur are composited before the heading can paint. On a phone
+              they sit mostly behind the text and off the edge of the viewport, so
+              they are worth less than the milliseconds they cost on the one
+              device this page is bought for. Restored from sm up. */}
+          <div className="pointer-events-none absolute left-[12%] top-8 hidden h-72 w-72 rounded-full bg-indigo-100/70 blur-[100px] sm:block" aria-hidden="true" />
+          <div className="pointer-events-none absolute right-[2%] top-24 hidden h-72 w-72 rounded-full bg-fuchsia-100/50 blur-[110px] sm:block" aria-hidden="true" />
           <div className="container relative grid items-center gap-14 lg:grid-cols-[1.05fr_.95fr] lg:gap-12">
             <div className="mx-auto max-w-2xl text-center lg:mx-0 lg:text-left">
-              <Badge variant="purple" className="mb-6 gap-1.5 border-indigo-200 bg-white/80 py-1.5 pl-2 pr-3 shadow-sm">
+              <Badge variant="purple" className="mb-4 gap-1.5 border-indigo-200 bg-white/80 py-1.5 pl-2 pr-3 shadow-sm sm:mb-6">
                 <span className="grid h-5 w-5 place-items-center rounded-full bg-indigo-600 text-white" aria-hidden="true">
-                  <Boxes className="h-3 w-3" />
+                  <Sparkles className="h-3 w-3" />
                 </span>
-                New — connect your own accounts, 1,400+ tools
+                AI chat agent for your business website
               </Badge>
-              <h1 className="text-balance text-[42px] font-bold leading-[1.05] tracking-[-0.045em] text-slate-950 sm:text-6xl lg:text-[64px]">
+              <h1 className="text-balance text-[34px] font-bold leading-[1.06] tracking-[-0.045em] text-slate-950 sm:text-6xl sm:leading-[1.05] lg:text-[64px]">
                 Answer every visitor from <span className="gradient-text">your own knowledge.</span>
               </h1>
-              <p className="mx-auto mt-6 max-w-xl text-balance text-lg leading-8 text-slate-600 lg:mx-0">
-                Garuda drafts an AI chat agent for your business from four questions. You edit it, ground it in the sources you
-                approve, and publish it with one embed snippet. It answers from your knowledge, says plainly when it does not
-                know, and asks for contact details only after the visitor agrees.
+              <p className="mx-auto mt-4 max-w-xl text-balance text-base leading-7 text-slate-600 sm:mt-6 sm:text-lg sm:leading-8 lg:mx-0">
+                For small teams whose website collects more questions than anyone has time to answer. Four questions, and you have
+                a draft agent to edit, ground in your own sources, and publish with one script tag.
               </p>
-              <p className="mx-auto mt-4 max-w-xl text-base leading-7 text-slate-500 lg:mx-0">
-                Built for small teams whose website collects more questions than anyone has time to answer.
-              </p>
-              <div className="mt-8 flex flex-col justify-center gap-3 sm:flex-row lg:justify-start">
-                <Button size="lg" className="h-[52px] rounded-xl px-7 shadow-glow" asChild>
+              <div className="mt-6 sm:mt-8">
+                <Button size="lg" className="h-[52px] w-full rounded-xl px-7 shadow-glow sm:w-auto" asChild>
                   <Link href={CTA_HREF}>
                     {CTA_LABEL} <ArrowRight className="ml-2 h-4 w-4" aria-hidden="true" />
                   </Link>
                 </Button>
-                <Button size="lg" variant="outline" className="h-[52px] rounded-xl bg-white/80 px-6" asChild>
-                  <Link href="#how-it-works">See the four steps</Link>
-                </Button>
+                {/* The price belongs here, under the button, and not one screen
+                    lower. So does the fact that there is no trial: a visitor who
+                    clicks expecting a free build and meets Stripe instead is a
+                    refund and a bad review, which costs more than the click. */}
+                <p className="mx-auto mt-3 max-w-xl text-sm leading-6 text-slate-600 lg:mx-0">
+                  USD ${PLAN_PRICE_USD} a month, one plan, cancel any time. No free trial — the first month is charged at checkout.
+                </p>
+                <p className="mt-3 text-sm">
+                  <Link
+                    href="#how-it-works"
+                    className="rounded font-semibold text-indigo-700 underline underline-offset-4 hover:text-indigo-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                  >
+                    See how it works, in four steps
+                  </Link>
+                </p>
               </div>
-              <ul className="mt-7 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-xs font-medium text-slate-500 lg:justify-start">
+              <ul className="mt-6 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-xs font-medium text-slate-500 lg:justify-start">
                 {heroFacts.map((fact) => (
                   <li key={fact} className="flex items-center gap-1.5">
                     <Check className="h-4 w-4 text-emerald-500" aria-hidden="true" />
@@ -249,7 +320,7 @@ export default function LandingPage() {
                 Why this exists
               </Badge>
               <h2 className="text-balance text-3xl font-bold tracking-[-0.035em] text-slate-950 sm:text-[42px]">
-                Five sentences we kept hearing.
+                Five situations this was built for.
               </h2>
               <p className="mt-5 text-lg leading-8 text-slate-600">
                 None of them are about artificial intelligence. They are about answers arriving too late, or arriving wrong.
@@ -258,11 +329,12 @@ export default function LandingPage() {
             <ul className="mx-auto mt-12 grid max-w-5xl gap-4 md:grid-cols-2 lg:grid-cols-3">
               {problems.map((problem, index) => (
                 <li key={problem} className={index === 0 ? "md:col-span-2 lg:col-span-1" : undefined}>
-                  <figure className="h-full rounded-2xl border border-slate-200 bg-white p-6 shadow-none">
-                    <blockquote className="text-[15px] leading-7 text-slate-700">
-                      <p>“{problem}”</p>
-                    </blockquote>
-                  </figure>
+                  {/* Plain prose, not a blockquote and not in quotation marks. The
+                      previous markup made five authored sentences look like five
+                      customers talking, which is a testimonial by another name. */}
+                  <p className="h-full rounded-2xl border border-slate-200 bg-white p-6 text-[15px] leading-7 text-slate-700 shadow-none">
+                    {problem}
+                  </p>
                 </li>
               ))}
               <li className="rounded-2xl border border-indigo-200 bg-indigo-50/60 p-6">
@@ -316,10 +388,36 @@ export default function LandingPage() {
                   <code>{`<script async src="${API_URL}/widget.js" data-agent-key="pub_live_…"></script>`}</code>
                 </pre>
               </div>
+              {/*
+                A MEASURED SIZE USED TO BE QUOTED HERE ("about 27 KB gzipped").
+                It was true when it was written and is not true now — the widget
+                bundle has grown, and it is under active change, so any number put
+                here goes stale between a commit and a deploy. What is left is the
+                part that cannot drift, because it is structural: the `async`
+                attribute above, and the Cache-Control the API actually sends
+                (public, max-age=300 — backend/internal/api/server.go).
+
+                If you want the number back, measure the deployed
+                /widget.js response and write the date beside it, the way the old
+                sentence did. Do not copy a figure from a local file.
+              */}
               <p className="mt-4 text-sm leading-6 text-slate-400">
-                One tag, loaded asynchronously so it never blocks your page from rendering. Measured live on 29 August 2026, the
-                script is about 27 KB gzipped and cached for five minutes.
+                One tag, loaded asynchronously, so the browser never waits for it before painting your page. It is cached for five
+                minutes, and it pulls in no third-party scripts and no web fonts — the only requests it makes are to the Garuda
+                API.
               </p>
+            </div>
+
+            {/* The same call to action, a third of the way down. On a phone the
+                hero button has been off screen for a while by this point, and the
+                next one was not until the pricing card. Same label, same target. */}
+            <div className="mt-8 flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
+              <Button size="lg" className="h-[52px] w-full rounded-xl bg-white px-7 text-slate-950 hover:bg-slate-100 sm:w-auto" asChild>
+                <Link href={CTA_HREF}>
+                  {CTA_LABEL} <ArrowRight className="ml-2 h-4 w-4" aria-hidden="true" />
+                </Link>
+              </Button>
+              <p className="text-center text-sm text-slate-400">USD ${PLAN_PRICE_USD} a month. Cancel any time.</p>
             </div>
           </div>
         </section>
@@ -335,7 +433,7 @@ export default function LandingPage() {
                 Grounded, consenting, and confined to your site.
               </h2>
               <p className="mt-5 text-lg leading-8 text-slate-600">
-                Six behaviours, each one a decision already made in the product rather than a promise about a roadmap.
+                Nine behaviours, each one a decision already made in the product rather than a promise about a roadmap.
               </p>
             </div>
             <div className="mt-14 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
@@ -406,8 +504,9 @@ export default function LandingPage() {
                       <CalendarClock className="h-4 w-4" aria-hidden="true" /> Not yet
                     </p>
                     <p className="mt-2 text-sm leading-6 text-amber-900/80">
-                      Agents taking actions inside those tools — booking the calendar slot, creating the CRM record — is the next
-                      step and is not shipped. We would rather write that down than imply it.
+                      Agents taking actions inside those tools — creating the CRM record, booking the calendar slot — is the next
+                      step, and there is nothing in the portal to switch it on today. Do not buy on it. We would rather write that
+                      down than imply it.
                     </p>
                   </div>
                 </div>
@@ -520,7 +619,8 @@ export default function LandingPage() {
               </Badge>
               <h2 className="text-3xl font-bold tracking-[-0.035em] text-slate-950 sm:text-[42px]">One plan. One price.</h2>
               <p className="mt-5 text-lg leading-8 text-slate-600">
-                No setup fee, no per-seat maths, no sales call to find out the number.
+                No setup fee, no per-seat maths, no sales call to find out the number. Everything below is on the only plan there
+                is.
               </p>
             </div>
             <Card className="mx-auto mt-12 max-w-[560px] overflow-hidden border-indigo-200 shadow-[0_24px_70px_rgba(79,70,229,.12)]">
@@ -556,9 +656,18 @@ export default function LandingPage() {
                     {CTA_LABEL} <ArrowRight className="ml-2 h-4 w-4" aria-hidden="true" />
                   </Link>
                 </Button>
+                {/* The order of operations, stated before the click rather than
+                    discovered at Stripe. This is the page's largest piece of
+                    friction and the honest way to handle it is to name it. */}
                 <p className="mt-4 text-center text-[11px] leading-5 text-slate-500">
-                  Checkout and cancellation run through Stripe. Cancel whenever you like; the workspace stays active until the end
-                  of the period you have already paid for.
+                  What happens next: create your account, confirm your email, pay the first ${PLAN_PRICE_USD} on Stripe&rsquo;s own
+                  checkout, then answer the four questions. There is no free trial. Cancel whenever you like from your workspace
+                  billing page; it stays active until the end of the period you have already paid for, and cancelling itself
+                  deletes nothing.{" "}
+                  <Link href="/refunds" className="font-semibold text-slate-600 underline underline-offset-4 hover:text-slate-900">
+                    Refunds and cancellation
+                  </Link>
+                  .
                 </p>
               </CardContent>
             </Card>

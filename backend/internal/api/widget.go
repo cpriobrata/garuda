@@ -158,6 +158,13 @@ type widgetMessageRequest struct {
 }
 
 func (s *Server) widgetMessage(w http.ResponseWriter, r *http.Request) {
+	// Authorize BEFORE reading the body. An anonymous caller was getting a 422
+	// about the shape of a request they were never entitled to make, which tells
+	// them about the API and costs a JSON decode per probe.
+	if _, authorized := s.authorizeWidgetSession(r); !authorized {
+		s.writeError(w, r, http.StatusUnauthorized, "invalid_session", "The widget session is invalid or expired", nil)
+		return
+	}
 	var input widgetMessageRequest
 	if !s.decodeJSON(w, r, &input) {
 		return

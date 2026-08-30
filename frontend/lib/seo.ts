@@ -81,6 +81,14 @@ export const marketingRoutes: ReadonlyArray<{
   { path: "/for/home-services", priority: 0.7, changeFrequency: "monthly" },
   { path: "/for/professional-services", priority: 0.7, changeFrequency: "monthly" },
   { path: "/for/healthcare-clinics", priority: 0.7, changeFrequency: "monthly" },
+  // Reachable, linked from the landing page and the footer, and previously
+  // absent from the sitemap -- which for pages a buyer reads before paying is a
+  // real loss, not a technicality.
+  { path: "/help", priority: 0.7, changeFrequency: "weekly" },
+  { path: "/blog", priority: 0.6, changeFrequency: "weekly" },
+  { path: "/support", priority: 0.5, changeFrequency: "monthly" },
+  { path: "/contact", priority: 0.5, changeFrequency: "monthly" },
+  { path: "/refunds", priority: 0.4, changeFrequency: "yearly" },
   { path: "/privacy", priority: 0.4, changeFrequency: "yearly" },
   { path: "/terms", priority: 0.4, changeFrequency: "yearly" },
 ];

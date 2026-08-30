@@ -319,6 +319,38 @@ test("a button that renders a link still takes the busy flag without breaking", 
 // ---------------------------------------------------------------------------
 // Onboarding: the double submit that produced a production 500.
 
+// answerEveryQuestionButTheLast walks the flow to the point where the next
+// interaction is the one that pays for a generation. It is a helper rather than
+// six inline calls because the flow has now grown twice, and each time it grew
+// the tests broke in a way that looked like a product regression and was not.
+async function answerEveryQuestionButTheLast(rendered) {
+  await answerQuestion(rendered, "Northstar Labs helps growth teams");
+  await answerQuestion(rendered, "Growth leaders evaluating conversion tooling");
+  await choiceButton(rendered, "Capture qualified leads").props.onClick();
+  await choiceButton(rendered, "Lead qualifier").props.onClick();
+  await answerQuestion(rendered, "Aria");
+}
+
+// The last step now saves the agent name and the appointments answer before it
+// asks for a generation, and that save is a real request. These tests are about
+// the double-click guard on the generation, not about the save, so the save is
+// stubbed at the network rather than mocked away -- a stub that returned an
+// error would make these pass for the wrong reason.
+function withDetailsSaved(body) {
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes("/onboarding/voice/details")) {
+      return {
+        ok: true, status: 200,
+        headers: { get: () => "application/json" },
+        json: async () => ({ data: { details: {} } }),
+      };
+    }
+    throw new Error("unexpected request to " + url);
+  };
+  return (async () => { try { return await body(); } finally { globalThis.fetch = original; } })();
+}
+
 function answerQuestion(rendered, text) {
   // Input and Textarea are forwardRef objects rather than functions, so the
   // controlled field is found by the props it was given.
@@ -339,19 +371,21 @@ test("clicking the last onboarding answer twice generates one agent", async () =
 
   await withStubbedApi({
     completeOnboarding: async (answers) => { completions.push(answers); await gate.promise; return { agent_id: "agent-1", job_id: "job-1", agent_name: "Nova" }; },
-  }, async () => {
+  }, async () => withDetailsSaved(async () => {
     const rendered = renderComponent(OnboardingFlow);
-    await answerQuestion(rendered, "Northstar Labs helps growth teams");
-    await answerQuestion(rendered, "Growth leaders evaluating conversion tooling");
-    await choiceButton(rendered, "Capture qualified leads").props.onClick();
+    await answerEveryQuestionButTheLast(rendered);
 
-    const finalChoice = choiceButton(rendered, "Lead qualifier");
+    const finalChoice = choiceButton(rendered, "Yes, we take appointments");
     const first = finalChoice.props.onClick();
     const second = finalChoice.props.onClick();
 
+    // The last step saves the name and the appointments answer before it asks
+    // for a generation, so the generation is now one await further away than it
+    // was. Yielding once gets there; the gate below is what holds it open.
+    await settle();
     assert.equal(completions.length, 1, "the second click must not pay for a second generation");
 
-    const busyChoice = choiceButton(rendered, "Lead qualifier");
+    const busyChoice = choiceButton(rendered, "Yes, we take appointments");
     assert.equal(busyChoice.props.disabled, true, "the choices are held while the agent is being built");
     assert.equal(busyChoice.props["aria-busy"], true, "and the chosen one says it is working");
 
@@ -360,8 +394,8 @@ test("clicking the last onboarding answer twice generates one agent", async () =
     await settle();
 
     assert.deepEqual(pushedDestinations, ["/app/generating"]);
-    assert.equal(choiceButton(rendered, "Lead qualifier").props.disabled, true, "the control stays busy until the new route paints");
-  });
+    assert.equal(choiceButton(rendered, "Yes, we take appointments").props.disabled, true, "the control stays busy until the new route paints");
+  }));
 });
 
 test("answering an onboarding question twice does not skip the next one", async () => {
@@ -393,23 +427,23 @@ test("a failed onboarding completion can be answered again", async () => {
       if (completions.length === 1) throw new Error("Request failed (500)");
       return { agent_id: "agent-1", job_id: "job-1", agent_name: "Nova" };
     },
-  }, async () => {
+  }, async () => withDetailsSaved(async () => {
     const rendered = renderComponent(OnboardingFlow);
-    await answerQuestion(rendered, "Northstar Labs helps growth teams");
-    await answerQuestion(rendered, "Growth leaders evaluating conversion tooling");
-    await choiceButton(rendered, "Capture qualified leads").props.onClick();
-    await choiceButton(rendered, "Lead qualifier").props.onClick();
+    await answerEveryQuestionButTheLast(rendered);
+    await choiceButton(rendered, "Yes, we take appointments").props.onClick();
     await settle();
 
     assert.equal(completions.length, 1);
-    assert.equal(choiceButton(rendered, "Lead qualifier").props.disabled, false, "a failure hands the question back");
+    assert.equal(choiceButton(rendered, "Yes, we take appointments").props.disabled, false, "a failure hands the question back");
 
-    await choiceButton(rendered, "Sales specialist").props.onClick();
+    // The same question again, answered the other way, because a retry has to
+    // work from whatever the person chooses the second time.
+    await choiceButton(rendered, "No, not for now").props.onClick();
     await settle();
 
     assert.equal(completions.length, 2, "the retry reaches the server");
     assert.deepEqual(pushedDestinations, ["/app/generating"]);
-  });
+  }));
 });
 
 // ---------------------------------------------------------------------------

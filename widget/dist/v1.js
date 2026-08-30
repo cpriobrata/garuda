@@ -69,6 +69,20 @@
   var MAX_LEAD_FORM_FIELDS = 20;
   var MAX_LEAD_FIELD_OPTIONS = 20;
   var MAX_LEAD_VALUE_LENGTH = 500;
+  // ---- appointments ----
+  // These three mirror what the booking endpoint stores, so the widget never
+  // builds a request the server has to refuse. See backend/internal/api/booking.go.
+  var MAX_BOOKING_NAME = 160;
+  var MAX_BOOKING_EMAIL = 254;
+  var MAX_BOOKING_NOTES = 500;
+  // A fortnight of working hours is several hundred free slots, which is more
+  // buttons than anyone reads and more DOM than a widget should put on somebody
+  // else's page. The soonest sixty are drawn and the rest are named as unshown
+  // rather than silently dropped.
+  var MAX_BOOKING_SLOTS = 60;
+  // Said in the visitor's own terms rather than as an error: between seeing a
+  // time and choosing it, the owner took it.
+  var SLOT_TAKEN_MESSAGE = 'That time was taken while you were choosing.';
 
   function isRecord(value) {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -302,6 +316,84 @@
     };
   }
 
+  // Like the handoff, the bootstrap says only that appointments exist, what to
+  // call the button, how long one takes and which zone the owner works in. The
+  // calendar, the working hours and the account are deliberately absent: the
+  // bootstrap is public, and free times are only readable inside an endpoint
+  // that first checks the session token. See backend/internal/api/booking.go.
+  function normalizeBooking(raw) {
+    if (!isRecord(raw) || raw.enabled !== true) {
+      return { enabled: false, label: '', durationMinutes: 0, timezone: '' };
+    }
+    var minutes = Number(raw.duration_minutes);
+    return {
+      enabled: true,
+      label: asText(raw.label, 'Book an appointment', 60),
+      durationMinutes: Number.isFinite(minutes) && minutes > 0 ? Math.floor(minutes) : 0,
+      timezone: asText(raw.timezone, '', 64)
+    };
+  }
+
+  // A slot arrives twice over: the instant the booking call has to echo back,
+  // and the owner's own wording for it. The wording is used exactly as sent. A
+  // browser that re-rendered start in its own locale would show a visitor in
+  // another country a time the owner never offered.
+  function normalizeBookingSlot(raw) {
+    if (!isRecord(raw)) return null;
+    var start = asText(raw.start, '', 60);
+    if (!start) return null;
+    var label = asText(raw.label, '', 80);
+    var day = asText(raw.day, '', 40);
+    var time = asText(raw.time, '', 24);
+    // A payload missing one of the three rendered forms borrows another rather
+    // than deriving one from start, for the same reason.
+    if (!time) time = label;
+    if (!time) return null;
+    if (!day) day = label || 'Available times';
+    if (!label) label = day + ', ' + time;
+    var minutes = Number(raw.minutes);
+    return {
+      start: start,
+      label: label,
+      day: day,
+      time: time,
+      minutes: Number.isFinite(minutes) && minutes > 0 ? Math.floor(minutes) : 0
+    };
+  }
+
+  function normalizeBookingSlots(payload) {
+    var data = isRecord(payload) && isRecord(payload.data) ? payload.data : payload;
+    data = isRecord(data) ? data : {};
+    var offered = Array.isArray(data.slots) ? data.slots : [];
+    var slots = [];
+    offered.slice(0, MAX_BOOKING_SLOTS).forEach(function (raw) {
+      var slot = normalizeBookingSlot(raw);
+      if (slot) slots.push(slot);
+    });
+    var minutes = Number(data.duration_minutes);
+    return {
+      slots: slots,
+      truncated: offered.length > MAX_BOOKING_SLOTS,
+      timezone: asText(data.timezone, '', 64),
+      durationMinutes: Number.isFinite(minutes) && minutes > 0 ? Math.floor(minutes) : 0
+    };
+  }
+
+  function groupBookingSlots(slots) {
+    var groups = [];
+    // The day is server text used as a key, so the map has no prototype for it
+    // to collide with.
+    var byDay = Object.create(null);
+    slots.forEach(function (slot) {
+      if (!byDay[slot.day]) {
+        byDay[slot.day] = { day: slot.day, slots: [] };
+        groups.push(byDay[slot.day]);
+      }
+      byDay[slot.day].slots.push(slot);
+    });
+    return groups;
+  }
+
   function normalizeAgentPayload(payload) {
     var envelope = isRecord(payload) && isRecord(payload.data) ? payload.data : payload;
     var raw = isRecord(envelope) && isRecord(envelope.agent) ? envelope.agent : envelope;
@@ -358,7 +450,8 @@
         return RESERVED_LEAD_FIELDS.indexOf(field) !== -1;
       }),
       launcherLabel: asText(raw.launcher_label || raw.launcher_text, '', 50),
-      handoff: normalizeHandoff(raw.handoff)
+      handoff: normalizeHandoff(raw.handoff),
+      booking: normalizeBooking(raw.booking)
     };
   }
 
@@ -902,6 +995,56 @@
     return { url: url, label: asText(data.label, 'Talk to a person', 60) };
   };
 
+  // The owner's real free times, read behind the session token. The bootstrap
+  // could not carry these even if it wanted to: it is public and cached, and
+  // these change minute to minute.
+  LiveAPI.prototype.listBookingSlots = async function listBookingSlots(session) {
+    var response = await this.request(
+      '/widget/v1/sessions/' + encodeURIComponent(session.sessionID) + '/slots',
+      { headers: { 'X-Garuda-Session-Token': session.sessionToken } }
+    );
+    if (!response.ok) throw await safeErrorFromResponse(response);
+    return normalizeBookingSlots(await response.json());
+  };
+
+  LiveAPI.prototype.createBooking = async function createBooking(session, request) {
+    var response = await this.request(
+      '/widget/v1/sessions/' + encodeURIComponent(session.sessionID) + '/booking',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Garuda-Session-Token': session.sessionToken
+        },
+        body: JSON.stringify(bookingRequestBody(request))
+      }
+    );
+    if (!response.ok) throw await safeErrorFromResponse(response);
+    var json = await response.json();
+    var data = isRecord(json) && isRecord(json.data) ? json.data : json;
+    data = isRecord(data) ? data : {};
+    var minutes = Number(data.minutes);
+    return {
+      booked: data.booked !== false,
+      minutes: Number.isFinite(minutes) && minutes > 0 ? Math.floor(minutes) : 0,
+      timezone: asText(data.timezone, '', 64)
+    };
+  };
+
+  // The chosen slot's own start travels back byte for byte. The endpoint checks
+  // the calendar again and matches on that exact instant, so a value this widget
+  // had reformatted would no longer be the time that was offered.
+  function bookingRequestBody(request) {
+    var body = { start: request.start };
+    var name = asText(request.name, '', MAX_BOOKING_NAME);
+    var email = asText(request.email, '', MAX_BOOKING_EMAIL);
+    var notes = asText(request.notes, '', MAX_BOOKING_NOTES);
+    if (name) body.name = name;
+    if (email) body.email = email;
+    if (notes) body.notes = notes;
+    return body;
+  }
+
   LiveAPI.prototype.resetSession = async function resetSession(session) {
     var response = await this.request(
       '/widget/v1/sessions/' + encodeURIComponent(session.sessionID) + '/reset',
@@ -1221,6 +1364,17 @@
     throw new WidgetError('handoff_unavailable', 'Human handoff is not available in the demo.', 404);
   };
 
+  // The demo has no owner and therefore no calendar. Both halves exist so the
+  // widget finds the same methods in either mode, and both refuse the way the
+  // live endpoints refuse an agent that does not offer appointments.
+  DemoAPI.prototype.listBookingSlots = async function listBookingSlots() {
+    throw new WidgetError('booking_unavailable', 'Appointments are not available in the demo.', 404);
+  };
+
+  DemoAPI.prototype.createBooking = async function createBooking() {
+    throw new WidgetError('booking_unavailable', 'Appointments are not available in the demo.', 404);
+  };
+
   DemoAPI.prototype.resetSession = async function resetSession(session) {
     if (this.storage) {
       try {
@@ -1276,6 +1430,7 @@
     normalizePosition: normalizePosition,
     normalizeToggles: normalizeToggles,
     normalizeLeadForm: normalizeLeadForm,
+    normalizeBooking: normalizeBooking,
     safeImageURL: safeImageURL,
     validOpaqueToken: validOpaqueToken,
     safeHttpUrl: safeHttpUrl,
@@ -1394,6 +1549,11 @@
     this.sending = false;
     this.unread = 0;
     this.leadVisible = false;
+    // The appointment picker owns one card in the panel at a time. bookingPicker
+    // holds that card's parts while it is open and is null the moment it closes,
+    // which is also how a reply that lands after a dismissal knows to stop.
+    this.bookingVisible = false;
+    this.bookingPicker = null;
     this.autoOpened = false;
     this.lastRetry = null;
     this.nodes = {};
@@ -1550,9 +1710,11 @@
     var suggestions = element('div', 'gw-suggestions');
     suggestions.setAttribute('aria-label', 'Suggested questions');
     var leadRegion = element('div', 'gw-lead-region');
+    var bookingRegion = element('div', 'gw-booking-region');
     body.appendChild(messages);
     body.appendChild(suggestions);
     body.appendChild(leadRegion);
+    body.appendChild(bookingRegion);
 
     var typing = element('div', 'gw-typing');
     typing.hidden = true;
@@ -1579,8 +1741,18 @@
     handoffButton.appendChild(handoffLabel);
     var handoffHint = element('p', 'gw-handoff-hint');
     handoffHint.hidden = true;
+    // Booking sits with the other two for the same reason the handoff does: it
+    // is an action about this conversation, and this is where the visitor is
+    // already looking when they decide they want to speak to somebody.
+    var bookingButton = element('button', 'gw-booking-button');
+    bookingButton.type = 'button';
+    bookingButton.hidden = true;
+    bookingButton.appendChild(svgIcon('M8 3.5v3m8-3v3M4.5 10h15M6.5 6h11A2 2 0 0 1 19.5 8v9.5a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2Z'));
+    var bookingLabel = element('span', '', 'Book an appointment');
+    bookingButton.appendChild(bookingLabel);
     contactRow.appendChild(contactButton);
     contactRow.appendChild(handoffButton);
+    contactRow.appendChild(bookingButton);
     contactRow.appendChild(handoffHint);
 
     var composer = element('form', 'gw-composer');
@@ -1649,12 +1821,15 @@
       historyStatus: historyStatus,
       suggestions: suggestions,
       leadRegion: leadRegion,
+      bookingRegion: bookingRegion,
       typing: typing,
       contactButton: contactButton,
       restart: restart,
       handoffButton: handoffButton,
       handoffLabel: handoffLabel,
       handoffHint: handoffHint,
+      bookingButton: bookingButton,
+      bookingLabel: bookingLabel,
       composer: composer,
       textarea: textarea,
       counter: counter,
@@ -1689,6 +1864,7 @@
     });
     restart.addEventListener('click', function () { self.restartConversation(); });
     handoffButton.addEventListener('click', function () { self.requestHandoff(); });
+    bookingButton.addEventListener('click', function () { self.showBookingPicker(); });
     panel.addEventListener('keydown', function (event) { self.handlePanelKeys(event); });
     global.addEventListener('online', function () { self.updateConnectionState(); });
     // A hidden tab must not poll. Browsers throttle background timers rather
@@ -2271,6 +2447,13 @@
   GarudaWidget.prototype.handlePanelKeys = function handlePanelKeys(event) {
     if (event.key !== 'Escape') return;
     event.preventDefault();
+    // Escape dismisses the appointment times first. They are what the visitor
+    // opened last, and closing the whole panel instead would take the
+    // conversation behind them away as well.
+    if (this.bookingVisible) {
+      this.closeBookingPicker(true);
+      return;
+    }
     this.setOpen(false);
   };
 
@@ -2604,7 +2787,7 @@
     if (!nodes.handoffButton) return;
     nodes.restart.hidden = !this.session || this.messages.length === 0;
     var available = this.handoffAvailable();
-    nodes.handoffButton.hidden = !available || this.leadVisible;
+    nodes.handoffButton.hidden = !available || this.leadVisible || this.bookingVisible;
     if (!available) {
       nodes.handoffHint.hidden = true;
       return;
@@ -2685,6 +2868,7 @@
       this.leadVisible = false;
       nodes.handoffButton.classList.remove('gw-handoff-offered');
       nodes.leadRegion.textContent = '';
+      this.closeBookingPicker(false);
       this.clearTranscript();
       this.hydrateConversation(session.conversation);
       this.clearNotice();
@@ -2725,8 +2909,10 @@
       !lastMessage ||
       lastMessage.role !== 'assistant' ||
       this.sending ||
-      this.leadVisible;
+      this.leadVisible ||
+      this.bookingVisible;
     this.updateHandoffVisibility();
+    this.updateBookingVisibility();
   };
 
   // ---- the lead form the customer built ----
@@ -3020,17 +3206,384 @@
     });
   };
 
-  GarudaWidget.prototype.captureLeadWithRefresh = async function captureLeadWithRefresh(request, retrying) {
+  // A panel open long enough for a session to expire must not lose the visitor's
+  // work. Every write the visitor makes goes through here: one expiry is
+  // answered by opening a fresh session and running the call again, and a second
+  // failure is reported rather than retried.
+  GarudaWidget.prototype.withFreshSession = async function withFreshSession(operation, retrying) {
     try {
-      return await this.api.captureLead(this.session, request);
+      return await operation();
     } catch (error) {
       var canRefresh = !retrying &&
         error instanceof WidgetError &&
         (error.status === 401 || error.code === 'session_expired' || error.code === 'invalid_session');
       if (!canRefresh) throw error;
       await this.ensureSession(true);
-      return this.captureLeadWithRefresh(request, true);
+      return this.withFreshSession(operation, true);
     }
+  };
+
+  GarudaWidget.prototype.captureLeadWithRefresh = function captureLeadWithRefresh(request, retrying) {
+    var self = this;
+    return this.withFreshSession(function () {
+      return self.api.captureLead(self.session, request);
+    }, retrying);
+  };
+
+  // ---- appointments ----
+  //
+  // Real free times from the owner's own calendar, chosen from inside the chat.
+  // Three rules shape everything below.
+  //
+  // The owner's wording is the only wording. Every time a visitor sees is a
+  // string the server rendered in the owner's zone; nothing here formats a date.
+  //
+  // A time can go while it is on screen. The server re-checks the calendar at
+  // booking time and answers 409 when the owner has taken the slot since it was
+  // offered, so that answer re-reads the times rather than showing an error.
+  //
+  // A calendar the owner has not connected is not the visitor's problem. It is
+  // answered with the lead form, never with a failure that reads as their fault.
+
+  GarudaWidget.prototype.bookingAvailable = function bookingAvailable() {
+    var booking = isRecord(this.agent.booking) ? this.agent.booking : null;
+    return Boolean(
+      booking &&
+      booking.enabled &&
+      this.session &&
+      this.api &&
+      typeof this.api.listBookingSlots === 'function'
+    );
+  };
+
+  GarudaWidget.prototype.updateBookingVisibility = function updateBookingVisibility() {
+    var nodes = this.nodes;
+    if (!nodes.bookingButton) return;
+    var available = this.bookingAvailable();
+    nodes.bookingButton.hidden = !available || this.leadVisible || this.bookingVisible;
+    if (!available) return;
+    nodes.bookingLabel.textContent = this.agent.booking.label;
+    nodes.bookingButton.setAttribute('aria-label', this.agent.booking.label);
+  };
+
+  GarudaWidget.prototype.showBookingPicker = async function showBookingPicker() {
+    var self = this;
+    if (this.bookingVisible || !this.bookingAvailable() || !this.nodes.bookingRegion) return;
+    this.bookingVisible = true;
+    this.updateContactVisibility();
+
+    var card = element('section', 'gw-booking-card');
+    card.setAttribute('aria-labelledby', 'gw-booking-title');
+    var top = element('div', 'gw-booking-top');
+    var headingWrap = element('div');
+    headingWrap.appendChild(element('span', 'gw-booking-eyebrow', 'Appointment'));
+    var heading = element('h2', '', this.agent.booking.label);
+    heading.id = 'gw-booking-title';
+    headingWrap.appendChild(heading);
+    var dismiss = element('button', 'gw-lead-dismiss');
+    dismiss.type = 'button';
+    dismiss.setAttribute('aria-label', 'Close the appointment times');
+    dismiss.appendChild(svgIcon('M6 6l12 12M18 6 6 18'));
+    top.appendChild(headingWrap);
+    top.appendChild(dismiss);
+    // One announced line carries the whole state of the picker: that times are
+    // being fetched, which zone they are in, and that a chosen time just went.
+    var note = element('p', 'gw-booking-note');
+    note.setAttribute('role', 'status');
+    var body = element('div', 'gw-booking-body');
+    card.appendChild(top);
+    card.appendChild(note);
+    card.appendChild(body);
+    this.bookingPicker = { card: card, note: note, body: body, dismiss: dismiss, payload: null };
+    this.nodes.bookingRegion.replaceChildren(card);
+    this.scrollToBottom(true);
+    dismiss.addEventListener('click', function () { self.closeBookingPicker(true); });
+    body.addEventListener('keydown', function (event) { self.moveSlotFocus(event); });
+    await this.loadBookingSlots('');
+  };
+
+  GarudaWidget.prototype.closeBookingPicker = function closeBookingPicker(returnFocus) {
+    if (!this.nodes.bookingRegion) return;
+    this.bookingVisible = false;
+    this.bookingPicker = null;
+    this.nodes.bookingRegion.replaceChildren();
+    this.updateContactVisibility();
+    if (returnFocus && this.nodes.textarea) this.nodes.textarea.focus({ preventScroll: true });
+  };
+
+  GarudaWidget.prototype.setBookingNote = function setBookingNote(text, state) {
+    var picker = this.bookingPicker;
+    if (!picker) return;
+    picker.note.textContent = text;
+    if (state) picker.note.setAttribute('data-state', state);
+    else picker.note.removeAttribute('data-state');
+  };
+
+  // leading carries the sentence that has to survive the round trip -- the one
+  // that says a chosen time was taken -- so the visitor reads why the list they
+  // were looking at was replaced.
+  GarudaWidget.prototype.loadBookingSlots = async function loadBookingSlots(leading) {
+    var self = this;
+    var picker = this.bookingPicker;
+    if (!picker) return;
+    this.setBookingNote(
+      leading ? leading + ' Finding the times that are still free…' : 'Finding open times…',
+      leading ? 'notice' : ''
+    );
+    picker.body.replaceChildren();
+    try {
+      await this.ensureSession();
+      var payload = await this.withFreshSession(function () {
+        return self.api.listBookingSlots(self.session);
+      }, false);
+      // A visitor who closed the picker while this was in flight gets nothing
+      // drawn back on top of them.
+      if (this.bookingPicker !== picker) return;
+      this.clearNotice();
+      picker.payload = payload;
+      this.renderBookingSlots(payload, leading);
+    } catch (error) {
+      if (this.bookingPicker !== picker) return;
+      // The promise is handed back so the notice's own button stays busy for as
+      // long as the second attempt actually takes.
+      this.bookingFailed(error, function () { return self.showBookingPicker(); });
+    }
+  };
+
+  GarudaWidget.prototype.renderBookingSlots = function renderBookingSlots(payload, leading) {
+    var self = this;
+    var picker = this.bookingPicker;
+    if (!picker) return;
+    var booking = this.agent.booking;
+    var timezone = payload.timezone || booking.timezone;
+    var minutes = payload.durationMinutes || booking.durationMinutes;
+    picker.timezone = timezone;
+    picker.minutes = minutes;
+    picker.body.replaceChildren();
+    if (!payload.slots.length) {
+      this.setBookingNote(
+        leading
+          ? leading + ' There are no other free times at the moment.'
+          : 'There are no free times at the moment. Ask the assistant and the team can find one for you.',
+        'notice'
+      );
+      picker.dismiss.focus({ preventScroll: true });
+      return;
+    }
+    var lines = [];
+    if (leading) lines.push(leading);
+    if (minutes) lines.push('Each appointment takes ' + minutes + ' minutes.');
+    // The zone is named because the times are the owner's, not the visitor's,
+    // and a visitor in another country has no other way to know that.
+    if (timezone) lines.push('Times are shown in ' + timezone + '.');
+    if (payload.truncated) lines.push('Showing the soonest ' + payload.slots.length + ' times.');
+    this.setBookingNote(lines.join(' '), leading ? 'notice' : '');
+
+    var days = element('div', 'gw-booking-days');
+    groupBookingSlots(payload.slots).forEach(function (group) {
+      var section = element('div', 'gw-slot-day');
+      var dayName = element('h3', 'gw-slot-day-name', group.day);
+      dayName.id = 'gw-slot-day-' + randomID();
+      var list = element('ul', 'gw-slot-list');
+      list.setAttribute('aria-labelledby', dayName.id);
+      group.slots.forEach(function (slot) {
+        var item = element('li');
+        var choice = element('button', 'gw-slot', slot.time);
+        choice.type = 'button';
+        // The visible label is the time alone, because the day above it is not
+        // read out with it. The accessible name carries both.
+        choice.setAttribute('aria-label', 'Book ' + slot.label);
+        choice.addEventListener('click', function () { self.showBookingForm(slot); });
+        item.appendChild(choice);
+        list.appendChild(item);
+      });
+      section.appendChild(dayName);
+      section.appendChild(list);
+      days.appendChild(section);
+    });
+    picker.body.appendChild(days);
+    // The button that opened the picker is hidden by now, so focus has to be
+    // taken somewhere deliberate rather than dropped on the document.
+    var first = picker.body.querySelectorAll('.gw-slot')[0];
+    if (first) first.focus({ preventScroll: true });
+    this.scrollToBottom(true);
+  };
+
+  // Arrow keys walk the times the way a picker is expected to behave. Every slot
+  // is still a real button, so Tab and Enter work without any of this.
+  GarudaWidget.prototype.moveSlotFocus = function moveSlotFocus(event) {
+    var picker = this.bookingPicker;
+    if (!picker || !event || !event.key) return;
+    var forward = event.key === 'ArrowRight' || event.key === 'ArrowDown';
+    var backward = event.key === 'ArrowLeft' || event.key === 'ArrowUp';
+    if (!forward && !backward && event.key !== 'Home' && event.key !== 'End') return;
+    var slots = picker.body.querySelectorAll('.gw-slot');
+    if (!slots.length) return;
+    var current = -1;
+    for (var index = 0; index < slots.length; index += 1) {
+      if (slots[index] === event.target) current = index;
+    }
+    if (current === -1) return;
+    var next = event.key === 'Home' ? 0
+      : event.key === 'End' ? slots.length - 1
+        : current + (forward ? 1 : -1);
+    if (next < 0 || next >= slots.length) return;
+    if (typeof event.preventDefault === 'function') event.preventDefault();
+    slots[next].focus({ preventScroll: true });
+  };
+
+  // The three questions the booking endpoint accepts, in the shape the lead
+  // builder uses, so they are drawn, labelled and checked by the helpers the
+  // lead form already uses rather than by a second set of them.
+  function bookingFormFields() {
+    return [
+      { id: 'name', label: 'Your name', type: 'text', required: true, options: [], placeholder: '' },
+      // Optional because the server books without one. It simply cannot send the
+      // invite, which is what the label says rather than a rule the visitor
+      // discovers afterwards.
+      { id: 'email', label: 'Email for the invite', type: 'email', required: false, options: [], placeholder: '' },
+      { id: 'notes', label: 'Anything the team should know', type: 'textarea', required: false, options: [], placeholder: '' }
+    ];
+  }
+
+  GarudaWidget.prototype.showBookingForm = function showBookingForm(slot) {
+    var self = this;
+    var picker = this.bookingPicker;
+    if (!picker) return;
+    var entries = bookingFormFields().map(createLeadField);
+    var form = element('form', 'gw-lead-form gw-booking-form');
+    form.noValidate = true;
+    entries.forEach(function (entry) { form.appendChild(entry.group); });
+    var back = element('button', 'gw-secondary-button gw-booking-back', 'Pick another time');
+    back.type = 'button';
+    var submit = element('button', 'gw-primary-button gw-lead-submit', 'Confirm appointment');
+    submit.type = 'submit';
+    var formStatus = element('p', 'gw-form-status');
+    formStatus.setAttribute('role', 'status');
+    form.appendChild(back);
+    form.appendChild(submit);
+    form.appendChild(formStatus);
+    picker.body.replaceChildren(form);
+    this.setBookingNote(
+      'You are booking ' + slot.label + (picker.timezone ? ' (' + picker.timezone + ')' : '') + '.',
+      ''
+    );
+    entries[0].control.focus({ preventScroll: true });
+    this.scrollToBottom(true);
+
+    back.addEventListener('click', function () {
+      if (!self.bookingPicker || submit.disabled) return;
+      self.renderBookingSlots(self.bookingPicker.payload, '');
+    });
+    form.addEventListener('submit', async function (event) {
+      event.preventDefault();
+      // One booking at a time. The button is already disabled while the write is
+      // in flight; this guards the keyboard path that can fire submit again.
+      if (submit.disabled) return;
+      var firstProblem = null;
+      entries.forEach(function (entry) {
+        var problem = leadFieldProblem(entry);
+        setLeadFieldProblem(entry, problem);
+        if (problem && !firstProblem) firstProblem = entry;
+      });
+      if (firstProblem) {
+        formStatus.textContent = 'Check the highlighted fields and try again.';
+        firstProblem.control.focus({ preventScroll: true });
+        return;
+      }
+      var answers = {};
+      entries.forEach(function (entry) { answers[entry.field.id] = leadFieldValue(entry); });
+      setButtonBusy(submit, true, 'Booking…');
+      formStatus.textContent = '';
+      try {
+        await self.ensureSession();
+        var result = await self.withFreshSession(function () {
+          return self.api.createBooking(self.session, {
+            start: slot.start,
+            name: answers.name,
+            email: answers.email,
+            notes: answers.notes
+          });
+        }, false);
+        self.confirmBooking(slot, result);
+      } catch (error) {
+        setButtonBusy(submit, false, '', 'Confirm appointment');
+        await self.bookingSubmitFailed(error, entries, formStatus);
+      }
+    });
+  };
+
+  GarudaWidget.prototype.confirmBooking = function confirmBooking(slot, result) {
+    var picker = this.bookingPicker;
+    var booking = this.agent.booking;
+    var minutes = result.minutes || (picker && picker.minutes) || booking.durationMinutes;
+    var timezone = result.timezone || (picker && picker.timezone) || booking.timezone;
+    var detail = [];
+    if (minutes) detail.push(minutes + ' minutes');
+    if (timezone) detail.push(timezone);
+    this.closeBookingPicker(false);
+    // Into the transcript, which is the panel's live region, so the confirmation
+    // is announced and stays readable after the picker has gone. The time is the
+    // owner's own wording for it.
+    this.appendMessage({
+      id: randomID(),
+      role: 'assistant',
+      content: 'Your appointment is confirmed for ' + slot.label +
+        (detail.length ? ' (' + detail.join(', ') + ')' : '') +
+        '. It is in the team calendar — you can keep typing here if anything changes.'
+    });
+    if (this.nodes.textarea) this.nodes.textarea.focus({ preventScroll: true });
+  };
+
+  GarudaWidget.prototype.bookingSubmitFailed = async function bookingSubmitFailed(error, entries, formStatus) {
+    var code = error instanceof WidgetError ? error.code : '';
+    if (code === 'slot_taken') {
+      // Somebody took that time seconds ago. The visitor is told so plainly and
+      // handed the times that are still free, rather than an error to decode.
+      await this.loadBookingSlots(SLOT_TAKEN_MESSAGE);
+      return;
+    }
+    if (code === 'validation_failed' && showLeadFieldErrors(entries, error.details)) {
+      formStatus.textContent = 'Check the highlighted fields and try again.';
+      return;
+    }
+    if (code === 'calendar_not_connected' || code === 'booking_unavailable') {
+      this.bookingFailed(error, null);
+      return;
+    }
+    formStatus.textContent = error instanceof WidgetError
+      ? error.message
+      : 'The appointment could not be booked. Please try again.';
+  };
+
+  // None of this is the visitor's fault, so none of it is worded as though it
+  // were. A calendar the owner never connected, and an assistant that has
+  // stopped offering appointments, both end with the lead form and the button
+  // gone. Anything else is a calendar the widget could not reach just now, which
+  // is worth another try.
+  GarudaWidget.prototype.bookingFailed = function bookingFailed(error, retry) {
+    var code = error instanceof WidgetError ? error.code : '';
+    if (code === 'calendar_not_connected' || code === 'booking_unavailable') {
+      if (code === 'booking_unavailable') this.agent.booking = normalizeBooking(null);
+      this.closeBookingPicker(false);
+      var offersForm = this.leadCaptureAvailable();
+      this.appendMessage({
+        id: randomID(),
+        role: 'assistant',
+        content: offersForm
+          ? 'Appointments are not available right now. Leave your details below and the team will come back to you with a time.'
+          : 'Appointments are not available right now. Ask me anything else and the team can follow up.'
+      });
+      if (offersForm) this.showLeadForm(normalizeLeadSpec({}, this.agent));
+      return;
+    }
+    this.closeBookingPicker(false);
+    this.showNotice(
+      error instanceof WidgetError
+        ? error.message
+        : 'The calendar could not be reached. Please try again in a moment.',
+      typeof retry === 'function' ? retry : null
+    );
   };
 
   GarudaWidget.prototype.showNotice = function showNotice(message, retry) {
@@ -3075,7 +3628,7 @@
       '.gw-launcher{position:relative;min-width:60px;height:60px;border:0;border-radius:20px;padding:0 7px;background:var(--garuda-accent);color:var(--garuda-accent-text);display:flex;align-items:center;gap:0;box-shadow:0 14px 35px rgba(30,41,59,.22),0 4px 12px rgba(30,41,59,.12);cursor:pointer;transition:transform .2s ease,box-shadow .2s ease,min-width .25s ease;border:1px solid rgba(255,255,255,.18);}',
       '.gw-launcher:hover{transform:translateY(-2px);box-shadow:0 18px 42px rgba(30,41,59,.27),0 5px 14px rgba(30,41,59,.13);}',
       '.gw-launcher:active{transform:translateY(0) scale(.98);}',
-      '.gw-launcher:focus-visible,.gw-icon-button:focus-visible,.gw-send:focus-visible,.gw-suggestion:focus-visible,.gw-primary-button:focus-visible,.gw-secondary-button:focus-visible,.gw-contact-button:focus-visible,.gw-handoff-button:focus-visible,.gw-lead-dismiss:focus-visible,.gw-notice-action:focus-visible,a:focus-visible{outline:3px solid color-mix(in srgb,var(--garuda-accent) 36%,white);outline-offset:3px;}',
+      '.gw-launcher:focus-visible,.gw-icon-button:focus-visible,.gw-send:focus-visible,.gw-suggestion:focus-visible,.gw-primary-button:focus-visible,.gw-secondary-button:focus-visible,.gw-contact-button:focus-visible,.gw-handoff-button:focus-visible,.gw-booking-button:focus-visible,.gw-slot:focus-visible,.gw-lead-dismiss:focus-visible,.gw-notice-action:focus-visible,a:focus-visible{outline:3px solid color-mix(in srgb,var(--garuda-accent) 36%,white);outline-offset:3px;}',
       '.gw-launcher-icon{width:46px;height:46px;border-radius:15px;display:grid;place-items:center;flex:none;background:rgba(255,255,255,.13);}',
       '.gw-launcher-icon svg{width:25px;height:25px;}',
       '.gw-launcher-label{max-width:0;overflow:hidden;white-space:nowrap;font-size:14px;font-weight:720;letter-spacing:-.01em;opacity:0;transition:max-width .25s ease,opacity .18s ease,padding .25s ease;}',
@@ -3142,6 +3695,23 @@
       '@media (prefers-reduced-motion: reduce){.gw-handoff-offered{animation:none;}}',
       '.gw-handoff-hint{margin:0 0 2px 3px;font-size:10px;color:#7A8496;}',
       '.gw-contact-button svg{width:15px;height:15px;}',
+      '.gw-booking-button{min-height:35px;border:0;background:transparent;color:var(--garuda-accent);display:flex;align-items:center;gap:6px;padding:5px 3px;font-size:11px;font-weight:680;cursor:pointer;border-radius:9px;}',
+      '.gw-booking-button:hover{background:color-mix(in srgb,var(--garuda-accent) 8%,transparent);}',
+      '.gw-booking-button svg{width:15px;height:15px;}',
+      '.gw-booking-region{padding:0 15px 13px;}',
+      '.gw-booking-card{border-radius:19px;padding:15px;background:var(--garuda-background);border:1px solid color-mix(in srgb,var(--garuda-accent) 19%,#E4E9F0);box-shadow:0 11px 30px rgba(15,23,42,.08);}',
+      '.gw-booking-card h2{margin:0;color:var(--garuda-text);font-size:15px;letter-spacing:-.015em;}',
+      '.gw-booking-top{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;}',
+      '.gw-booking-eyebrow{display:block;margin-bottom:3px;color:var(--garuda-accent);font-size:9px;font-weight:820;text-transform:uppercase;letter-spacing:.12em;}',
+      '.gw-booking-note{margin:7px 0 0;color:var(--garuda-muted);font-size:10px;line-height:1.5;}',
+      '.gw-booking-note[data-state="notice"]{color:#9A3412;font-weight:650;}',
+      '.gw-booking-days{margin-top:11px;display:flex;flex-direction:column;gap:11px;max-height:232px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;}',
+      '.gw-slot-day-name{margin:0 0 6px;color:var(--garuda-text);font-size:10px;font-weight:780;letter-spacing:.01em;}',
+      '.gw-slot-list{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:6px;}',
+      '.gw-slot{border:1px solid color-mix(in srgb,var(--garuda-accent) 22%,#DCE2EA);border-radius:11px;padding:8px 10px;background:#fff;color:color-mix(in srgb,var(--garuda-accent) 80%,#172033);font-size:11px;font-weight:680;line-height:1.2;cursor:pointer;transition:background .15s,border-color .15s,transform .15s;}',
+      '.gw-slot:hover{background:color-mix(in srgb,var(--garuda-accent) 7%,white);border-color:color-mix(in srgb,var(--garuda-accent) 44%,#DCE2EA);transform:translateY(-1px);}',
+      '.gw-booking-form{margin-top:12px;}',
+      '.gw-booking-back{grid-column:1/-1;width:100%;}',
       '.gw-composer{display:flex;align-items:flex-end;gap:8px;padding:9px 12px 11px;background:var(--garuda-background);border-top:1px solid var(--garuda-line);}',
       '.gw-input-wrap{position:relative;flex:1;min-width:0;}',
       '.gw-input{display:block;width:100%;min-height:44px;max-height:112px;resize:none;border:1px solid var(--garuda-line);border-radius:15px;background:var(--garuda-surface);padding:11px 12px;color:var(--garuda-text);font-size:13px;line-height:1.45;outline:0;overflow-y:auto;transition:border-color .15s,box-shadow .15s,background .15s;}',

@@ -81,7 +81,7 @@ const answers = [
     id: "how-to-cancel",
     question: "How do I cancel?",
     answer:
-      "In the portal: open Billing in the left-hand menu and use Manage in Stripe. That opens your Stripe billing portal, where cancelling schedules the subscription to end when the period you have already paid for runs out. Only the owner of the workspace can open it.",
+      "In the portal: open Billing in the left-hand menu and choose Cancel subscription. Cancelling schedules the subscription to end when the period you have already paid for runs out, so nothing stops the moment you click. Only the owner of the workspace can do it.",
     body: (
       <>
         <ol className="ml-5 list-decimal space-y-2 marker:font-semibold marker:text-slate-400">
@@ -92,8 +92,8 @@ const answers = [
             </Link>{" "}
             in the portal.
           </li>
-          <li>Choose Manage in Stripe. The button opens the Stripe billing portal for your workspace.</li>
-          <li>Cancel the subscription there, and Stripe tells Garuda what you did.</li>
+          <li>Choose Cancel subscription, and confirm in the dialog. It tells you the exact date access ends before you confirm.</li>
+          <li>Nothing else is needed. If you change your mind, Resume subscription appears in the same place.</li>
         </ol>
         <p>
           That is the whole job. There is nothing else to switch off inside Garuda, and you do not need to email anyone to
@@ -120,7 +120,7 @@ const answers = [
             ],
             [
               "Any time before the period ends",
-              "You can undo it in the same Stripe portal and the subscription simply keeps running",
+              "Choose Resume subscription in Billing and it simply keeps running, at the same price",
             ],
             [
               "The end of the paid period",
@@ -180,7 +180,7 @@ const answers = [
           rows={[
             ["The account email", "It is how a workspace is identified. Sending from that address is the quickest evidence"],
             ["The date and amount of the charge", "Matches the request to one payment rather than to a subscription"],
-            ["The invoice or receipt number from Stripe", "Both are in the Stripe billing portal, and Stripe emails the receipt"],
+            ["The invoice number", "Every invoice is listed in Billing in your portal, and Stripe emails the receipt too"],
             ["What went wrong", "A refund decision is a judgement about what happened, so the account of it is the request"],
             ["Whether you have already cancelled", "A refund and a cancellation are separate actions; neither implies the other"],
           ]}
@@ -209,7 +209,7 @@ const answers = [
           head={["Event", "What Garuda does"]}
           rows={[
             ["Stripe reports a failed invoice", "The subscription is marked past due, and published agents stop answering visitors"],
-            ["You update the card", "Billing, then Manage in Stripe, then replace the payment method"],
+            ["You update the card", "Billing, then add a card. Card details are entered on Stripe so they never reach Garuda"],
             ["A later attempt succeeds", "The paid invoice puts the subscription back to active and agents answer again with no further action"],
             ["Stripe ends the subscription", "The workspace is marked cancelled. Your conversations, leads and agents remain"],
           ]}
