@@ -469,6 +469,13 @@ func firstProvidedValue(values ...string) string {
 }
 
 func (s *Server) widgetLead(w http.ResponseWriter, r *http.Request) {
+	// Authorize BEFORE reading the body, as every other widget route does. An
+	// anonymous caller was being told about the consent rule -- and the shape of
+	// the request -- before anyone checked they were entitled to make it.
+	if _, authorized := s.authorizeWidgetSession(r); !authorized {
+		s.writeError(w, r, http.StatusUnauthorized, "invalid_session", "The widget session is invalid or expired", nil)
+		return
+	}
 	var input widgetLeadRequest
 	if !s.decodeJSON(w, r, &input) {
 		return

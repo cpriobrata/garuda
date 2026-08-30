@@ -145,3 +145,33 @@ func assertNothingHugeWasStored(t *testing.T, dataStore *store.FileStore) {
 		t.Fatalf("one rejected request grew the persisted state to %d bytes", size)
 	}
 }
+
+// Authorization comes before validation on every widget route. An anonymous
+// caller being told about the consent rule, or the shape of the request, is
+// telling somebody about an API they were never entitled to call -- and it costs
+// a JSON decode for every probe.
+func TestWidgetRoutesAuthorizeBeforeTheyValidate(t *testing.T) {
+	server, dataStore := newTestServer(t)
+	sessionID, _ := seedLeadBoundsFixture(t, dataStore)
+
+	cases := map[string]http.HandlerFunc{
+		"lead":    server.widgetLead,
+		"message": server.widgetMessage,
+	}
+	for name, handler := range cases {
+		// A body that would certainly fail validation, sent with no session token.
+		// The answer must be about the session, not about the body.
+		request := httptest.NewRequest(http.MethodPost, "/widget/v1/sessions/"+sessionID+"/x", strings.NewReader(`{"content":"","fields":{}}`))
+		request.SetPathValue("sessionID", sessionID)
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		handler(response, request)
+
+		if response.Code != http.StatusUnauthorized {
+			t.Errorf("%s: an anonymous caller got %d, want 401", name, response.Code)
+		}
+		if strings.Contains(response.Body.String(), "consent") || strings.Contains(response.Body.String(), "characters") {
+			t.Errorf("%s: the refusal described the request body: %s", name, response.Body.String())
+		}
+	}
+}
