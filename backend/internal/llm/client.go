@@ -48,9 +48,15 @@ func New(baseURL, apiKey, modelName string) *Client {
 func (c *Client) Enabled() bool { return c.apiKey != "" && c.baseURL != "" && c.model != "" }
 
 const (
-	// chatMaxTokens has to clear the model's thinking budget before any answer
-	// appears, which is why it is not smaller.
-	chatMaxTokens  = 2_000
+	// chatMaxTokens has to clear the model's THINKING budget before a single word
+	// of answer appears, which is why it is not cut to the length of a reply.
+	// Measured on this model, a short exchange spent about 300 tokens thinking.
+	//
+	// It is a ceiling on a runaway answer, not the target. The target is set by
+	// the style rule in promptForAgent, which asks for one or two sentences --
+	// the right lever, because a budget tight enough to enforce brevity would
+	// truncate mid-sentence instead.
+	chatMaxTokens  = 1_200
 	draftMaxTokens = 8_000
 )
 
