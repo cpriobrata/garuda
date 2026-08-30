@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { AlertTriangle, ArrowLeft, Bot, BrainCircuit, CalendarCheck, CalendarClock, Check, ChevronRight, ExternalLink, Palette, Play, RefreshCw, Save, Settings2, Sparkles, Target, UploadCloud } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -302,7 +303,16 @@ export function unlistedFieldMessages(messages: Record<string, string>): string[
 
 export function AgentBuilder({ existing = false, agentId }: { existing?: boolean; agentId?: string }) {
   const demoMode = !process.env.NEXT_PUBLIC_API_URL;
-  const [section, setSection] = useState("identity");
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  // Read once, on mount. Validated against the real list so an unknown or
+  // hand-edited value falls back to Identity rather than rendering a blank
+  // column, and not kept in sync afterwards -- clicking through the sub-nav
+  // should not rewrite the address bar under the reader.
+  const [section, setSection] = useState(() => {
+    const requested = searchParams.get("section");
+    return requested && sections.some((item) => item.id === requested) ? requested : "identity";
+  });
   const [previewDevice, setPreviewDevice] = useState<"desktop" | "mobile">("desktop");
   const [form, setForm] = useState<AgentFormValues>(() => ({
     name: existing ? (demoMode ? "Aria" : "") : "Nova",
@@ -341,6 +351,10 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
   const [recordId, setRecordId] = useState(agentId || "");
   const [revision, setRevision] = useState<number>();
   const [knowledge, setKnowledge] = useState<AgentRecord["knowledge"]>([]);
+  // Held here rather than inside KnowledgeSection, which is a conditional render
+  // and is unmounted by any sub-nav click. Somebody who pastes a page of pricing
+  // and then goes to check a setting should come back to it.
+  const [knowledgeDraft, setKnowledgeDraft] = useState({ title: "", content: "" });
   const [status, setStatus] = useState<"ready" | "saving" | "saved" | "error">("ready");
   const [statusMessage, setStatusMessage] = useState("");
   const [fieldMessages, setFieldMessages] = useState<Record<string, string>>({});
@@ -350,6 +364,11 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
   // before React has re-rendered the button as disabled, and the state read
   // from the first render's closure would still say the builder is idle.
   const runningAction = useRef<AgentBuilderAction>("");
+  // The middle column scrolls independently of the page. Anything that has to be
+  // READ -- a rejected field, a refusal to publish, a different section -- has to
+  // be scrolled to, or it is written hundreds of pixels above the reader and the
+  // action looks like it did nothing at all.
+  const formColumn = useRef<HTMLElement>(null);
 
   function beginAction(action: AgentBuilderAction) {
     if (runningAction.current) return false;
@@ -379,6 +398,41 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
   // switching the chooser asks it again about the new one.
   const calendar = useCalendarConnection(appointmentsInPlay, form.bookingCalendar);
   const calendarName = calendarLabelFor(calendars.options, form.bookingCalendar);
+
+  // What the marks beside each section in the sub-nav mean.
+  //
+  // They used to be `index < 3 && <Check/>` — the first three sections always
+  // showed a green tick, on a brand new agent with every field empty, and the
+  // last three never showed one however carefully they were filled in. A tick
+  // that is always there is not a signal, and somebody reading it as one is
+  // being told their agent is further along than it is.
+  //
+  // "done" is now: this section has nothing left to do. For the two OPTIONAL
+  // features that means switched off as much as it means finished — there is
+  // genuinely nothing outstanding either way. "attention" is the state worth
+  // shouting about: switched ON and missing something it needs, which is the
+  // half-configured case that produces a button failing in front of a visitor.
+  // Everything else gets no mark, so a new agent is not a wall of warnings.
+  const bookingSettingLabel = calendarOptionFor(calendars.options, form.bookingCalendar)?.settingLabel;
+  // Same rule as the section's own green box: a provider list that could not be
+  // read is "we do not know", which is not a tick.
+  const bookingReady = calendars.state === "ready"
+    && Boolean(form.bookingTimezone.trim())
+    && (!bookingSettingLabel || Boolean(form.bookingCalendarSetting.trim()))
+    && calendar.state === "connected";
+  // The amber marks and the things publish() refuses have to be the SAME set,
+  // or the marks are not worth reading. publish() hard-refuses on a blank
+  // allowed domain, and the server refuses a blank name — so both of those are
+  // "attention", not merely unmarked. Anything the marks stay quiet about is
+  // something that genuinely does not stop you.
+  const sectionStates: Record<string, "done" | "attention" | undefined> = {
+    identity: form.name.trim() ? "done" : "attention",
+    goal: form.systemPrompt.trim() ? "done" : undefined,
+    knowledge: knowledge.length ? "done" : undefined,
+    appearance: form.allowedDomain.trim() ? "done" : "attention",
+    handoff: form.handoffEnabled !== "true" ? "done" : form.handoffNumber.trim() ? "done" : "attention",
+    appointments: form.bookingEnabled !== "true" ? "done" : bookingReady ? "done" : "attention",
+  };
 
   // The owner's own zone is right for nearly all of them, but reading it during
   // render would make the server's HTML disagree with the browser's. It is read
@@ -429,6 +483,23 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
     if (rejectedSection) setSection(rejectedSection);
     setStatusMessage(error instanceof ApiError && error.message ? error.message : "");
     setStatus("error");
+    // Unconditionally, not only when the section changed. Every booking.* key
+    // maps to "appointments", so a booking rejection while ON appointments left
+    // setSection a no-op and the reader looking at the same unchanged screen.
+    showTopOfSection();
+  }
+
+  // Puts the top of the form column in front of the reader. Called whenever
+  // something has been written there for them to read.
+  function showTopOfSection() {
+    const column = formColumn.current;
+    if (!column) return;
+    try {
+      column.scrollTo({ top: 0, behavior: "smooth" });
+    } catch {
+      // Older browsers take a number rather than options.
+      column.scrollTop = 0;
+    }
   }
 
   function beginSave() {
@@ -442,10 +513,18 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
   async function saveDraft() {
     beginSave();
     try {
-      const record = recordId ? await garudaApi.updateAgent(recordId, writePayload(), revision) : await garudaApi.createAgent(writePayload());
+      const creating = !recordId;
+      const record = creating ? await garudaApi.createAgent(writePayload()) : await garudaApi.updateAgent(recordId, writePayload(), revision);
       setRecordId(record.id);
       setRevision(record.revision);
       setStatus("saved");
+      // The address bar still said /app/agents/new, so a reload — or a browser
+      // restoring the tab — started a SECOND agent from the same form and saved
+      // that too. replace rather than push, so Back still leaves the builder
+      // instead of returning to a "new agent" page for an agent that exists.
+      if (creating && record.id) {
+        router.replace(`/app/agents/${encodeURIComponent(record.id)}/edit?section=${encodeURIComponent(section)}`);
+      }
       return record.id;
     } catch (error) {
       reportFailure(error);
@@ -468,6 +547,7 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
       setFieldMessages({ "branding.allowed_domains": "Add the website domain where this agent may run." });
       setStatusMessage("Add an allowed domain before publishing");
       setStatus("error");
+      showTopOfSection();
       return;
     }
     // Publishing appointments with no calendar behind them ships a button that
@@ -476,9 +556,14 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
     // evidence, so "unknown" and "checking" go through.
     if (form.bookingEnabled === "true" && (calendar.state === "missing" || calendar.state === "pending")) {
       setSection("appointments");
-      setFieldMessages({});
+      setFieldMessages({
+        "booking.calendar": calendar.state === "pending"
+          ? `The ${calendarName} connection was started but never finished. Finish it on the Integrations page, or switch appointments off to publish without them.`
+          : `Connect ${calendarName} on the Integrations page before publishing appointments, or switch appointments off.`,
+      });
       setStatusMessage(`Connect ${calendarName} before publishing appointments`);
       setStatus("error");
+      showTopOfSection();
       return;
     }
     if (!beginAction("publish")) return;
@@ -552,30 +637,41 @@ export function AgentBuilder({ existing = false, agentId }: { existing?: boolean
   }
 
   return (
-    <div className="-m-4 min-h-[calc(100vh-4rem)] bg-white sm:-m-6 lg:-m-8">
-      <div className="flex min-h-[4rem] flex-wrap items-center gap-y-2 border-b px-4 py-2 sm:h-16 sm:flex-nowrap sm:px-6 sm:py-0"><Button variant="ghost" size="icon" asChild><Link href="/app/agents"><ArrowLeft className="h-4 w-4" /></Link></Button><div className="ml-2 min-w-0 flex-1"><div className="flex min-w-0 items-center gap-2"><h1 className="truncate text-sm font-semibold text-slate-900">{existing ? `Edit ${form.name}` : "Create agent"}</h1><Badge variant={published ? "success" : "secondary"}>{published ? "Live" : "Draft"}</Badge></div><p className={cn("text-[10px]", status === "error" ? "text-red-500" : "text-slate-400")}>{status === "saving" ? "Saving draft…" : status === "saved" ? "Draft saved" : status === "error" ? (statusMessage || "Could not save — try again") : "Review and save your draft"}</p></div><div className="ml-auto flex shrink-0 basis-full justify-end gap-2 sm:basis-auto"><Button variant="outline" size="sm" onClick={saveDraftAction} loading={pendingAction === "save"} loadingLabel="Saving the draft" disabled={pendingAction !== "" && pendingAction !== "save"}><Save className="mr-1.5 h-3.5 w-3.5" /> Save</Button><Button variant="outline" size="sm" onClick={testAgent} loading={pendingAction === "test"} loadingLabel="Saving and testing the agent" disabled={pendingAction !== "" && pendingAction !== "test"}><Play className="mr-1.5 h-3.5 w-3.5" /> Test</Button><Button size="sm" onClick={publish} loading={pendingAction === "publish"} loadingLabel={published ? "Publishing your updates" : "Publishing the agent"} disabled={pendingAction !== "" && pendingAction !== "publish"}><Sparkles className="mr-1.5 h-3.5 w-3.5" /> <span className="hidden sm:inline">{published ? "Publish updates" : "Publish agent"}</span><span className="sm:hidden">Publish</span></Button></div></div>
-      <div className="grid min-h-[calc(100vh-8rem)] lg:grid-cols-[205px_1fr_390px] xl:grid-cols-[230px_1fr_440px]">
-        <aside className="hidden border-r bg-slate-50/60 p-3 lg:block">
+    <div className="-m-4 flex h-[calc(100vh-4rem)] flex-col overflow-hidden bg-white supports-[height:100dvh]:h-[calc(100dvh-4rem)] sm:-m-6 lg:-m-8">
+      <div className="flex min-h-[4rem] shrink-0 flex-wrap items-center gap-y-2 border-b px-4 py-2 sm:h-16 sm:flex-nowrap sm:px-6 sm:py-0"><Button variant="ghost" size="icon" asChild><Link href="/app/agents"><ArrowLeft className="h-4 w-4" /></Link></Button><div className="ml-2 min-w-0 flex-1"><div className="flex min-w-0 items-center gap-2"><h1 className="truncate text-sm font-semibold text-slate-900">{existing ? `Edit ${form.name}` : "Create agent"}</h1><Badge variant={published ? "success" : "secondary"}>{published ? "Live" : "Draft"}</Badge></div><p className={cn("text-[10px]", status === "error" ? "text-red-500" : "text-slate-400")}>{status === "saving" ? "Saving draft…" : status === "saved" ? "Draft saved" : status === "error" ? (statusMessage || "Could not save — try again") : "Review and save your draft"}</p></div><div className="ml-auto flex shrink-0 basis-full justify-end gap-2 sm:basis-auto"><Button variant="outline" size="sm" onClick={saveDraftAction} loading={pendingAction === "save"} loadingLabel="Saving the draft" disabled={pendingAction !== "" && pendingAction !== "save"}><Save className="mr-1.5 h-3.5 w-3.5" /> Save</Button><Button variant="outline" size="sm" onClick={testAgent} loading={pendingAction === "test"} loadingLabel="Saving and testing the agent" disabled={pendingAction !== "" && pendingAction !== "test"}><Play className="mr-1.5 h-3.5 w-3.5" /> Test</Button><Button size="sm" onClick={publish} loading={pendingAction === "publish"} loadingLabel={published ? "Publishing your updates" : "Publishing the agent"} disabled={pendingAction !== "" && pendingAction !== "publish"}><Sparkles className="mr-1.5 h-3.5 w-3.5" /> <span className="hidden sm:inline">{published ? "Publish updates" : "Publish agent"}</span><span className="sm:hidden">Publish</span></Button></div></div>
+      <div className="grid min-h-0 flex-1 lg:grid-cols-[205px_1fr] xl:grid-cols-[205px_1fr_330px] 2xl:grid-cols-[230px_1fr_440px]">
+        <aside className="hidden min-h-0 overflow-y-auto border-r bg-slate-50/60 p-3 lg:block">
           <p className="px-3 py-3 text-[10px] font-bold uppercase tracking-[.16em] text-slate-400">Configure</p>
-          <nav className="space-y-1">{sections.map((item, index) => <button key={item.id} onClick={() => setSection(item.id)} className={cn("flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-xs font-medium transition", section === item.id ? "bg-white text-indigo-700 shadow-sm ring-1 ring-slate-200" : "text-slate-600 hover:bg-white")}><item.icon className={cn("h-4 w-4", section === item.id ? "text-indigo-600" : "text-slate-400")} />{item.label}{index < 3 && <Check className="ml-auto h-3.5 w-3.5 text-emerald-500" />}</button>)}</nav>
+          <nav className="space-y-1">{sections.map((item) => <button key={item.id} onClick={() => { setSection(item.id); showTopOfSection(); }} className={cn("flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-xs font-medium transition", section === item.id ? "bg-white text-indigo-700 shadow-sm ring-1 ring-slate-200" : "text-slate-600 hover:bg-white")}><item.icon className={cn("h-4 w-4 shrink-0", section === item.id ? "text-indigo-600" : "text-slate-400")} /><span className="min-w-0 flex-1 truncate">{item.label}</span>{sectionStates[item.id] === "done" ? <Check className="h-3.5 w-3.5 shrink-0 text-emerald-500" aria-label="Nothing left to do here" /> : sectionStates[item.id] === "attention" ? <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-500" aria-label="Switched on but not finished" /> : null}</button>)}</nav>
           <div className="mt-6 rounded-xl border border-indigo-100 bg-indigo-50 p-3"><p className="flex items-center gap-1.5 text-[10px] font-semibold text-indigo-800"><Sparkles className="h-3.5 w-3.5" /> Garuda tip</p><p className="mt-2 text-[10px] leading-4 text-indigo-700">Give each agent one clear outcome. Focused instructions are easier to review, test, and improve.</p></div>
         </aside>
 
-        <section className="overflow-y-auto px-5 py-7 sm:px-8 lg:max-h-[calc(100vh-8rem)] xl:px-12">
+        <section ref={formColumn} className="min-h-0 overflow-y-auto px-5 py-7 sm:px-8 xl:px-12">
           <div className="mx-auto max-w-2xl">
-            <div className="mb-6 flex gap-2 overflow-x-auto lg:hidden">{sections.map((item) => <button key={item.id} onClick={() => setSection(item.id)} className={cn("shrink-0 rounded-full border px-3 py-1.5 text-xs font-medium", section === item.id ? "border-indigo-200 bg-indigo-50 text-indigo-700" : "bg-white text-slate-500")}>{item.label}</button>)}</div>
+            <div className="mb-6 flex gap-2 overflow-x-auto lg:hidden">{sections.map((item) => <button key={item.id} onClick={() => { setSection(item.id); showTopOfSection(); }} className={cn("shrink-0 rounded-full border px-3 py-1.5 text-xs font-medium", section === item.id ? "border-indigo-200 bg-indigo-50 text-indigo-700" : "bg-white text-slate-500")}>{item.label}</button>)}</div>
             <UnlistedMessages messages={fieldMessages} />
             {section === "identity" && <IdentitySection name={form.name} setName={updateField("name")} description={form.description} setDescription={updateField("description")} greeting={form.greeting} setGreeting={updateField("greeting")} messages={fieldMessages} />}
             {section === "goal" && <GoalSection systemPrompt={form.systemPrompt} setSystemPrompt={updateField("systemPrompt")} messages={fieldMessages} />}
-            {section === "knowledge" && <KnowledgeSection knowledge={knowledge} onAdd={addKnowledge} messages={fieldMessages} saving={pendingAction === "knowledge"} blocked={pendingAction !== "" && pendingAction !== "knowledge"} agentId={recordId} />}
+            {section === "knowledge" && <KnowledgeSection knowledge={knowledge} draft={knowledgeDraft} setDraft={setKnowledgeDraft} onAdd={addKnowledge} messages={fieldMessages} saving={pendingAction === "knowledge"} blocked={pendingAction !== "" && pendingAction !== "knowledge"} agentId={recordId} />}
             {section === "appearance" && <AppearanceSection primaryColor={form.primaryColor} setPrimaryColor={updateField("primaryColor")} accent={form.accent} setAccent={updateField("accent")} launcherText={form.launcherText} setLauncherText={updateField("launcherText")} widgetPosition={form.widgetPosition} setWidgetPosition={updateField("widgetPosition")} allowedDomain={form.allowedDomain} setAllowedDomain={updateField("allowedDomain")} messages={fieldMessages} />}
             {section === "handoff" && <HandoffSection enabled={form.handoffEnabled === "true"} setEnabled={(next) => updateField("handoffEnabled")(next ? "true" : "false")} number={form.handoffNumber} setNumber={updateField("handoffNumber")} label={form.handoffLabel} setLabel={updateField("handoffLabel")} message={form.handoffMessage} setMessage={updateField("handoffMessage")} availability={form.handoffAvailability} setAvailability={updateField("handoffAvailability")} triggers={form.handoffTriggers} setTriggers={updateField("handoffTriggers")} autoOffer={form.handoffAutoOffer} setAutoOffer={updateField("handoffAutoOffer")} notifyEmail={form.handoffNotifyEmail} setNotifyEmail={updateField("handoffNotifyEmail")} messages={fieldMessages} />}
-            {section === "appointments" && <BookingSection enabled={form.bookingEnabled === "true"} setEnabled={(next) => updateField("bookingEnabled")(next ? "true" : "false")} calendars={calendars} calendarToolkit={form.bookingCalendar} setCalendarToolkit={updateField("bookingCalendar")} calendarSetting={form.bookingCalendarSetting} setCalendarSetting={updateField("bookingCalendarSetting")} timezone={form.bookingTimezone} setTimezone={updateField("bookingTimezone")} duration={form.bookingDuration} setDuration={updateField("bookingDuration")} startHour={form.bookingStartHour} setStartHour={updateField("bookingStartHour")} endHour={form.bookingEndHour} setEndHour={updateField("bookingEndHour")} weekdays={form.bookingWeekdays} setWeekdays={updateField("bookingWeekdays")} leadDays={form.bookingLeadDays} setLeadDays={updateField("bookingLeadDays")} noticeHours={form.bookingNoticeHours} setNoticeHours={updateField("bookingNoticeHours")} label={form.bookingLabel} setLabel={updateField("bookingLabel")} title={form.bookingTitle} setTitle={updateField("bookingTitle")} preview={bookingPreviewSentence(form, form.name, calendars.options)} calendar={calendar} messages={fieldMessages} />}
-            <div className="mt-8 flex justify-between border-t pt-5"><Button variant="ghost" size="sm" disabled={section === "identity"} onClick={() => setSection(sections[Math.max(0, sections.findIndex((item) => item.id === section) - 1)].id)}>Previous</Button><Button size="sm" onClick={() => { const index = sections.findIndex((item) => item.id === section); if (index < sections.length - 1) setSection(sections[index + 1].id); }}>Next section <ChevronRight className="ml-1.5 h-3.5 w-3.5" /></Button></div>
+            {section === "appointments" && <BookingSection live={published} enabled={form.bookingEnabled === "true"} setEnabled={(next) => updateField("bookingEnabled")(next ? "true" : "false")} calendars={calendars} calendarToolkit={form.bookingCalendar} setCalendarToolkit={updateField("bookingCalendar")} calendarSetting={form.bookingCalendarSetting} setCalendarSetting={updateField("bookingCalendarSetting")} timezone={form.bookingTimezone} setTimezone={updateField("bookingTimezone")} duration={form.bookingDuration} setDuration={updateField("bookingDuration")} startHour={form.bookingStartHour} setStartHour={updateField("bookingStartHour")} endHour={form.bookingEndHour} setEndHour={updateField("bookingEndHour")} weekdays={form.bookingWeekdays} setWeekdays={updateField("bookingWeekdays")} leadDays={form.bookingLeadDays} setLeadDays={updateField("bookingLeadDays")} noticeHours={form.bookingNoticeHours} setNoticeHours={updateField("bookingNoticeHours")} label={form.bookingLabel} setLabel={updateField("bookingLabel")} title={form.bookingTitle} setTitle={updateField("bookingTitle")} preview={bookingPreviewSentence(form, form.name, calendars.options)} calendar={calendar} messages={fieldMessages} />}
+            <div className="mt-8 flex flex-wrap items-center justify-between gap-3 border-t pt-5">
+              <Button variant="ghost" size="sm" disabled={section === "identity"} onClick={() => { setSection(sections[Math.max(0, sections.findIndex((item) => item.id === section) - 1)].id); showTopOfSection(); }}>Previous</Button>
+              {section === sections[sections.length - 1].id ? (
+                <Button size="sm" onClick={publish} loading={pendingAction === "publish"} loadingLabel={published ? "Publishing your updates" : "Publishing the agent"} disabled={pendingAction !== "" && pendingAction !== "publish"}>
+                  <Sparkles className="mr-1.5 h-3.5 w-3.5" /> {published ? "Publish updates" : "Publish agent"}
+                </Button>
+              ) : (
+                <Button size="sm" onClick={() => { const index = sections.findIndex((item) => item.id === section); setSection(sections[index + 1].id); showTopOfSection(); }}>
+                  Next section <ChevronRight className="ml-1.5 h-3.5 w-3.5" />
+                </Button>
+              )}
+            </div>
           </div>
         </section>
 
-        <aside className="hidden border-l bg-[#f7f8fb] p-5 lg:block">
+        <aside className="hidden min-h-0 overflow-y-auto border-l bg-[#f7f8fb] p-5 xl:block">
           <div className="mb-3 flex items-center justify-between"><p className="text-xs font-semibold text-slate-700">Live preview</p><div className="flex rounded-lg border bg-white p-0.5">{(["desktop", "mobile"] as const).map((device) => <button key={device} type="button" onClick={() => setPreviewDevice(device)} aria-pressed={previewDevice === device} className={cn("rounded-md px-2 py-1 text-[9px] capitalize", previewDevice === device ? "bg-slate-100 font-semibold text-slate-900" : "text-slate-400")}>{device}</button>)}</div></div>
           <ChatPreview name={form.name} greeting={form.greeting} accent={form.accent} previewReply={previewReply} device={previewDevice} />
         </aside>
@@ -614,10 +710,11 @@ function GoalSection({ systemPrompt, setSystemPrompt, messages }: { systemPrompt
   return <><SectionHeading eyebrow="Goal & behavior" title="Give every conversation a clear purpose." description="These instructions are persisted with the agent and used by the private preview and published widget." /><div className="space-y-5"><div><p className="text-xs font-semibold text-slate-800">Start from a template</p><div className="mt-3 grid gap-2 sm:grid-cols-3">{templates.map((template) => <button key={template.title} type="button" onClick={() => setSystemPrompt(template.prompt)} className="rounded-xl border p-3 text-left text-xs font-semibold text-slate-700 transition hover:border-indigo-300 hover:bg-indigo-50">{template.title}</button>)}</div></div><div className="space-y-2"><Label htmlFor="agent-instructions">Agent instructions</Label><Textarea id="agent-instructions" value={systemPrompt} onChange={(event) => setSystemPrompt(event.target.value)} className="min-h-[180px]" /><FieldMessage message={messages.system_prompt} /><p className="text-[10px] text-slate-400">Keep instructions focused. Knowledge sources provide the factual context.</p></div></div></>;
 }
 
-function KnowledgeSection({ knowledge, onAdd, messages, saving, blocked, agentId }: { knowledge: AgentRecord["knowledge"]; onAdd: (title: string, content: string) => Promise<boolean>; messages: Record<string, string>; saving: boolean; blocked: boolean; agentId: string }) {
-  const [title, setTitle] = useState("");
-  const [content, setContent] = useState("");
-  return <><SectionHeading eyebrow="Knowledge" title="Teach your agent what your team already knows." description="Add approved text Garuda can use when it answers. Each source is stored and processed separately." /><div className="space-y-4">{knowledge.map((source, index) => { const sourceStatus = source.status || "ready"; return <div key={source.id || `${source.title}-${index}`} className="flex items-center gap-3 rounded-xl border p-4"><span className="grid h-10 w-10 place-items-center rounded-xl bg-indigo-50 text-indigo-600"><BrainCircuit className="h-5 w-5" /></span><div className="min-w-0 flex-1"><p className="truncate text-xs font-semibold text-slate-900">{source.title}</p><p className="mt-1 text-[10px] text-slate-400">Text source · {source.content.length} characters</p></div><Badge variant={sourceStatus === "ready" ? "success" : sourceStatus === "failed" ? "warning" : "secondary"} className="capitalize">{sourceStatus}</Badge></div>; })}<div className="rounded-xl border border-dashed p-4"><p className="flex items-center gap-2 text-xs font-semibold text-slate-800"><UploadCloud className="h-4 w-4 text-indigo-600" /> Add a text knowledge source</p><div className="mt-3 space-y-2"><Input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Source title, e.g. Pricing FAQ" /><Textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="Paste accurate product, service, pricing or policy information…" className="min-h-[110px]" /><FieldMessage message={messages.knowledge} /><Button variant="outline" loading={saving} loadingLabel="Saving the knowledge source" disabled={blocked || !title.trim() || !content.trim()} onClick={async () => { if (await onAdd(title.trim(), content.trim())) { setTitle(""); setContent(""); } }}>Add and save source</Button></div></div><WebsiteImport agentId={agentId} onSave={onAdd} blocked={blocked} /></div></>;
+function KnowledgeSection({ knowledge, draft, setDraft, onAdd, messages, saving, blocked, agentId }: { knowledge: AgentRecord["knowledge"]; draft: { title: string; content: string }; setDraft: (next: { title: string; content: string }) => void; onAdd: (title: string, content: string) => Promise<boolean>; messages: Record<string, string>; saving: boolean; blocked: boolean; agentId: string }) {
+  const { title, content } = draft;
+  const setTitle = (next: string) => setDraft({ title: next, content });
+  const setContent = (next: string) => setDraft({ title, content: next });
+  return <><SectionHeading eyebrow="Knowledge" title="Teach your agent what your team already knows." description="Add approved text Garuda can use when it answers. Each source is stored and processed separately." /><div className="space-y-4">{knowledge.map((source, index) => { const sourceStatus = source.status || "ready"; return <div key={source.id || `${source.title}-${index}`} className="flex items-center gap-3 rounded-xl border p-4"><span className="grid h-10 w-10 place-items-center rounded-xl bg-indigo-50 text-indigo-600"><BrainCircuit className="h-5 w-5" /></span><div className="min-w-0 flex-1"><p className="truncate text-xs font-semibold text-slate-900">{source.title}</p><p className="mt-1 text-[10px] text-slate-400">Text source · {source.content.length} characters</p></div><Badge variant={sourceStatus === "ready" ? "success" : sourceStatus === "failed" ? "warning" : "secondary"} className="capitalize">{sourceStatus}</Badge></div>; })}<div className="rounded-xl border border-dashed p-4"><p className="flex items-center gap-2 text-xs font-semibold text-slate-800"><UploadCloud className="h-4 w-4 text-indigo-600" /> Add a text knowledge source</p><div className="mt-3 space-y-2"><Input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Source title, e.g. Pricing FAQ" /><Textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="Paste accurate product, service, pricing or policy information…" className="min-h-[110px]" /><FieldMessage message={messages.knowledge} /><Button variant="outline" loading={saving} loadingLabel="Saving the knowledge source" disabled={blocked || !title.trim() || !content.trim()} onClick={async () => { if (await onAdd(title.trim(), content.trim())) setDraft({ title: "", content: "" }); }}>Add and save source</Button></div></div><WebsiteImport agentId={agentId} onSave={onAdd} blocked={blocked} /></div></>;
 }
 
 function AppearanceSection({ primaryColor, setPrimaryColor, accent, setAccent, launcherText, setLauncherText, widgetPosition, setWidgetPosition, allowedDomain, setAllowedDomain, messages }: { primaryColor: string; setPrimaryColor: (value: string) => void; accent: string; setAccent: (value: string) => void; launcherText: string; setLauncherText: (value: string) => void; widgetPosition: string; setWidgetPosition: (value: string) => void; allowedDomain: string; setAllowedDomain: (value: string) => void; messages: Record<string, string> }) {
@@ -725,6 +822,7 @@ function HandoffSection({ enabled, setEnabled, number, setNumber, label, setLabe
 }
 
 type BookingSectionProps = {
+  live: boolean;
   enabled: boolean;
   setEnabled: (value: boolean) => void;
   calendars: CalendarOptions;
@@ -803,9 +901,14 @@ function CalendarChooser({ calendars, toolkit, setToolkit, setting, setSetting, 
     <div className="space-y-4">
       <div className="space-y-2">
         <Label htmlFor="booking-calendar">Calendar to book into</Label>
-        <select id="booking-calendar" value={chosen} onChange={(event) => setToolkit(event.target.value)} disabled={calendars.state !== "ready"} className="h-11 w-full rounded-lg border bg-white px-3 text-sm disabled:bg-slate-50 disabled:text-slate-500">
+        <select id="booking-calendar" value={chosen} onChange={(event) => setToolkit(event.target.value)} disabled={calendars.state !== "ready"} aria-describedby="booking-calendar-state" className="h-11 w-full rounded-lg border bg-white px-3 text-sm disabled:bg-slate-50 disabled:text-slate-500">
           {choices.map((entry) => <option key={entry.toolkit} value={entry.toolkit}>{entry.label}</option>)}
         </select>
+        {calendars.state !== "ready" && (
+          <p id="booking-calendar-state" className="flex items-center gap-1.5 text-[10px] text-slate-500">
+            {calendars.state === "loading" ? <><RefreshCw className="h-3 w-3 animate-spin" aria-hidden /> Loading the calendars you can choose from…</> : "You cannot change calendar until the list below loads. This agent keeps the one it already has."}
+          </p>
+        )}
         <FieldMessage message={messages["booking.calendar"]} />
         <p className="text-[10px] leading-4 text-slate-400">{option?.useCase || "One agent books into one calendar, so every answer it gives about your free time comes from the same place."}</p>
       </div>
@@ -818,12 +921,12 @@ function CalendarChooser({ calendars, toolkit, setToolkit, setting, setSetting, 
         </div>
       )}
 
-      {option?.settingLabel && (
+      {(option?.settingLabel || (calendars.state !== "ready" && setting.trim())) && (
         <div className="space-y-2">
-          <Label htmlFor="booking-calendar-setting">{option.settingLabel}</Label>
+          <Label htmlFor="booking-calendar-setting">{option?.settingLabel || "What this calendar needs"}</Label>
           <Input id="booking-calendar-setting" value={setting} onChange={(event) => setSetting(event.target.value)} autoComplete="off" spellCheck={false} aria-describedby="booking-calendar-setting-hint" />
           <FieldMessage message={messages["booking.calendar_setting"]} />
-          <p id="booking-calendar-setting-hint" className="text-[10px] leading-4 text-slate-400">{option.settingHint} {option.label} cannot offer a time without it, and this draft will not save while it is empty.</p>
+          <p id="booking-calendar-setting-hint" className="text-[10px] leading-4 text-slate-400">{option ? `${option.settingHint} ${option.label} cannot offer a time without it, and this draft will not save while it is empty.` : "The list of calendars could not be loaded, so this is shown as it was saved. It is the one value your calendar needs beyond the connection itself."}</p>
         </div>
       )}
 
@@ -876,7 +979,7 @@ function CalendarPrerequisite({ calendar, label, option }: { calendar: CalendarC
   );
 }
 
-function BookingSection({ enabled, setEnabled, calendars, calendarToolkit, setCalendarToolkit, calendarSetting, setCalendarSetting, timezone, setTimezone, duration, setDuration, startHour, setStartHour, endHour, setEndHour, weekdays, setWeekdays, leadDays, setLeadDays, noticeHours, setNoticeHours, label, setLabel, title, setTitle, preview, calendar, messages }: BookingSectionProps) {
+function BookingSection({ live, enabled, setEnabled, calendars, calendarToolkit, setCalendarToolkit, calendarSetting, setCalendarSetting, timezone, setTimezone, duration, setDuration, startHour, setStartHour, endHour, setEndHour, weekdays, setWeekdays, leadDays, setLeadDays, noticeHours, setNoticeHours, label, setLabel, title, setTitle, preview, calendar, messages }: BookingSectionProps) {
   const [zoneChoices, setZoneChoices] = useState<string[]>([]);
   const selectedDays = weekdaysFrom(weekdays);
 
@@ -901,13 +1004,17 @@ function BookingSection({ enabled, setEnabled, calendars, calendarToolkit, setCa
   // the server on save, so it is one of the things standing between this draft
   // and a working button.
   const settingMissing = Boolean(chosen?.settingLabel) && !calendarSetting.trim();
-  const ready = enabled && Boolean(timezone.trim()) && !settingMissing && calendar.state === "connected";
-  const blockedReason = !enabled ? "Switch appointments on, then publish."
+  // calendars.state must be "ready" too. Without the provider list nothing here
+  // knows what the chosen calendar requires, so a green tick would be asserting
+  // something this screen cannot actually check.
+  const ready = enabled && calendars.state === "ready" && Boolean(timezone.trim()) && !settingMissing && calendar.state === "connected";
+  const blockedReason = !enabled ? (live ? "Switch appointments on and save, and visitors can book straight away." : "Switch appointments on, then publish.")
+    : calendars.state !== "ready" ? "The list of calendars could not be loaded, so this page cannot confirm your settings are complete. Your saved configuration is untouched."
     : !timezone.trim() ? "Choose the time zone your working hours are in — without it the widget will not offer appointments at all."
     : settingMissing ? `${calendarName} needs its ${(chosen?.settingLabel || "").toLowerCase()} before it can offer a single time.`
     : calendar.state === "connected" ? ""
     : calendar.state === "checking" ? `Waiting on the ${calendarName} check.`
-    : `Connect ${calendarName} on the Integrations page. Publishing without it gives visitors a button that cannot book anything.`;
+    : `Connect ${calendarName} on the Integrations page. ${live ? "Saving without it leaves visitors a button that cannot book anything." : "Publishing without it gives visitors a button that cannot book anything."}`;
 
   return <><SectionHeading eyebrow="Appointments" title="Let visitors book a real slot in your calendar." description="The assistant offers times that are genuinely free in the calendar you choose below, and the visitor picks one before they close the tab." />
     <div className="space-y-6">
@@ -992,7 +1099,7 @@ function BookingSection({ enabled, setEnabled, calendars, calendarToolkit, setCa
       <div className={cn("rounded-xl border p-4", ready ? "border-emerald-200 bg-emerald-50" : "border-dashed bg-slate-50")}>
         <p className={cn("flex items-center gap-1.5 text-[10px] font-semibold", ready ? "text-emerald-800" : "text-slate-700")}>
           {ready ? <CalendarCheck className="h-3.5 w-3.5 shrink-0" /> : <CalendarClock className="h-3.5 w-3.5 shrink-0 text-indigo-500" />}
-          {ready ? "Ready after you publish" : "Not active yet"}
+          {ready ? (live ? "Live for visitors as soon as you save" : "Ready after you publish") : "Not active yet"}
         </p>
         <p className={cn("mt-2 text-[10px] leading-4", ready ? "text-emerald-700" : "text-slate-500")}>{preview}</p>
         {blockedReason && <p className="mt-2 text-[10px] leading-4 text-slate-500">{blockedReason}</p>}

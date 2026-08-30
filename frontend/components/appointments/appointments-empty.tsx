@@ -27,7 +27,7 @@ export function emptyReason(setup: BookingSetup | null): EmptyReason {
   const ready: BookingAgent[] = [];
   const problems: Array<{ agent: BookingAgent; reason: string }> = [];
   for (const agent of setup.agents) {
-    const readiness = bookingReadiness(agent, setup.calendars);
+    const readiness = bookingReadiness(agent, setup.calendars, setup.connectedToolkits);
     if (!readiness) continue;
     if (readiness.state === "ready") ready.push(agent);
     else problems.push({ agent, reason: readiness.reason });
@@ -80,7 +80,7 @@ export function AppointmentsEmpty({ setup, scope }: { setup: BookingSetup | null
         <ul className="mt-3 space-y-1.5">
           {reason.problems.map(({ agent, reason: detail }) => (
             <li key={agent.id} className="flex flex-wrap items-baseline gap-x-1.5 text-[11px] leading-4 text-amber-900">
-              <Link href={`/app/agents/${encodeURIComponent(agent.id)}/edit`} className="font-semibold underline underline-offset-2 hover:text-amber-950">{agent.name}</Link>
+              <Link href={`/app/agents/${encodeURIComponent(agent.id)}/edit?section=appointments`} className="font-semibold underline underline-offset-2 hover:text-amber-950">{agent.name}</Link>
               <span className="text-amber-800">cannot take bookings because {detail}.</span>
             </li>
           ))}
@@ -119,7 +119,7 @@ function AgentLinks({ agents }: { agents: BookingAgent[] }) {
     <div className="flex flex-wrap gap-2">
       {agents.map((agent) => (
         <Button key={agent.id} size="sm" variant="outline" asChild>
-          <Link href={`/app/agents/${encodeURIComponent(agent.id)}/edit`}><Settings2 className="mr-1.5 h-3.5 w-3.5" /> {agent.name}</Link>
+          <Link href={`/app/agents/${encodeURIComponent(agent.id)}/edit?section=appointments`}><Settings2 className="mr-1.5 h-3.5 w-3.5" /> {agent.name}</Link>
         </Button>
       ))}
     </div>

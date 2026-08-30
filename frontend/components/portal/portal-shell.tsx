@@ -90,7 +90,12 @@ export async function resolvePortalAccess(pathname: string): Promise<{ access: P
 // lib/api.ts adds: nothing here was rejected by the server, there was simply no
 // session to present.
 function signInDestination(pathname: string) {
-  return `/auth/sign-in?next=${encodeURIComponent(pathname)}`;
+  const search = typeof window === "undefined" ? "" : window.location.search;
+  // The QUERY STRING has to travel too. Links into the product carry meaning
+  // there -- /app/agents/x/edit?section=appointments is the one screen that
+  // sends an owner to the Appointments step -- and dropping it on the way past
+  // the sign-in returns them to a page that has forgotten why they came.
+  return `/auth/sign-in?next=${encodeURIComponent(pathname + search)}`;
 }
 
 export function PortalShell({ children }: { children: React.ReactNode }) {

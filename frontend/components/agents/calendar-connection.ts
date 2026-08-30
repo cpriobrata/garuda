@@ -191,7 +191,13 @@ export function useCalendarConnection(active: boolean, toolkit: string): Calenda
   const [attempt, setAttempt] = useState(0);
   const [answer, setAnswer] = useState<CalendarAnswer>({ toolkit: "", state: "idle", detail: "" });
 
-  const recheck = useCallback(() => setAttempt((current) => current + 1), []);
+  const recheck = useCallback(() => {
+    // Dropping the answer is what makes the panel say "Checking…" and disable
+    // the button: state is derived from whether the answer is about the calendar
+    // being asked about, and an answer about nothing is not.
+    setAnswer({ toolkit: "", state: "checking", detail: "" });
+    setAttempt((current) => current + 1);
+  }, []);
 
   // Latched rather than followed: leaving the Appointments section must not
   // throw the answer away and asking again must not be the price of coming back.

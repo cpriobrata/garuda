@@ -78,7 +78,7 @@ var appRoles = []AppRole{
 	{
 		Toolkit: "calendly", Capability: CapabilityCalendar, Label: "Calendly",
 		UseCase:      "Visitors see your Calendly availability and are handed the booking link for the time they pick.",
-		SettingLabel: "Event type URL", SettingHint: "The Calendly event type link visitors should book, for example calendly.com/you/30min.",
+		SettingLabel: "Event type URL", SettingHint: "The full Calendly link visitors should open, starting https:// — for example https://calendly.com/you/30min. Not the API address from Calendly's developer settings.",
 		Partial: true,
 		// Calendly deliberately has no third-party create-booking API: booking
 		// happens on their own page. Saying so is better than a Book button that

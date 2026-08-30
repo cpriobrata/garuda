@@ -58,7 +58,11 @@ type AgentBooking = { enabled?: boolean; calendar?: string; calendar_setting?: s
 
 export type BookingAgent = { id: string; name: string; status: string; booking: AgentBooking };
 
-export type BookingSetup = { agents: BookingAgent[]; calendars: CalendarOption[] };
+// connectedToolkits is the set of calendars this workspace can actually reach.
+// It is undefined when the connections could not be listed, which is a different
+// answer from "none" and is treated as such: an unreadable list must not invent
+// a problem, the same rule this file already applies to an empty calendar table.
+export type BookingSetup = { agents: BookingAgent[]; calendars: CalendarOption[]; connectedToolkits?: Set<string> };
 
 // The calendar an agent books into. Empty means Google Calendar, exactly as
 // bookingCalendar does in backend/internal/api/booking.go: every agent
@@ -76,7 +80,7 @@ export type BookingReadiness =
   | { state: "ready"; calendar: CalendarOption | null }
   | { state: "incomplete"; reason: string };
 
-export function bookingReadiness(agent: BookingAgent, calendars: CalendarOption[]): BookingReadiness | null {
+export function bookingReadiness(agent: BookingAgent, calendars: CalendarOption[], connectedToolkits?: Set<string>): BookingReadiness | null {
   if (!agent.booking?.enabled) return null;
   // No visitor can reach an agent that is not live, so it cannot be "offering
   // appointments" however well its booking is configured. Counting it as ready
@@ -103,6 +107,12 @@ export function bookingReadiness(agent: BookingAgent, calendars: CalendarOption[
   }
   if (calendar?.setting_label && !(agent.booking.calendar_setting || "").trim()) {
     return { state: "incomplete", reason: `its ${calendar.label} ${calendar.setting_label.toLowerCase()} has not been filled in` };
+  }
+  // Last, because it is the only one that needs a third request and the only
+  // one that can be unknown. Undefined means the connections could not be
+  // listed, and an unreadable list is not evidence of a disconnected calendar.
+  if (connectedToolkits && !connectedToolkits.has(toolkit)) {
+    return { state: "incomplete", reason: `${calendar?.label || toolkit} is not connected, so it cannot offer a visitor a time` };
   }
   return { state: "ready", calendar };
 }
@@ -144,7 +154,7 @@ export function fetchAppointments(scope: AppointmentScope): Promise<AppointmentL
 // list: they only sharpen the empty state, so losing them costs a less specific
 // sentence rather than a screen.
 export async function fetchBookingSetup(): Promise<BookingSetup> {
-  const [agents, roles] = await Promise.all([
+  const [agents, roles, connections] = await Promise.all([
     apiRequest<Array<Record<string, unknown>>>("/agents?page_size=100", {
       mock: () => [
         { id: "aria-sales", name: "Aria", status: "published", booking: { enabled: true, calendar: "googlecalendar", timezone: "Europe/London" } },
@@ -161,6 +171,14 @@ export async function fetchBookingSetup(): Promise<BookingSetup> {
         ],
       }),
     }),
+    // Without this, an agent whose calendar connection has expired was reported
+    // as "offering appointments, and no visitor has taken one so far" — and the
+    // only button offered was "Check the widget is installed", sending the owner
+    // to debug an embed script over a calendar problem the builder already knew
+    // about. A refusal here keeps the old answer rather than inventing one.
+    apiRequest<Array<{ toolkit?: string; status?: string }>>("/integrations/connections", {
+      mock: () => [{ toolkit: "googlecalendar", status: "ACTIVE" }, { toolkit: "cal", status: "ACTIVE" }],
+    }).catch(() => null),
   ]);
 
   return {
@@ -171,5 +189,8 @@ export async function fetchBookingSetup(): Promise<BookingSetup> {
       booking: (agent.booking || {}) as AgentBooking,
     })),
     calendars: Array.isArray(roles.calendars) ? roles.calendars : [],
+    connectedToolkits: Array.isArray(connections)
+      ? new Set(connections.filter((entry) => String(entry.status || "").toUpperCase() === "ACTIVE").map((entry) => String(entry.toolkit || "").toLowerCase()))
+      : undefined,
   };
 }

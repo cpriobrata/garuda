@@ -100,7 +100,7 @@ export function AppointmentsBoard() {
   const elsewhere = useMemo(() => {
     if (!setup) return [];
     return setup.agents.flatMap((agent) => {
-      const readiness = bookingReadiness(agent, setup.calendars);
+      const readiness = bookingReadiness(agent, setup.calendars, setup.connectedToolkits);
       if (readiness?.state !== "ready" || !readiness.calendar || readiness.calendar.books_in_chat) return [];
       return [{ agent: agent.name, calendar: readiness.calendar.label }];
     });

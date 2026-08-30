@@ -420,3 +420,45 @@ func TestACalendarThatFinishesElsewhereNeedsALinkVisitorsCanOpen(t *testing.T) {
 		t.Fatalf("the widget has no link to send the visitor to: %q", resolved.SchedulingURL)
 	}
 }
+
+// A setting hint that gives an example the server refuses is worse than no hint:
+// the person types exactly what they were told to and the save is rejected with
+// an error pointing at the field whose own help text produced it. This shipped
+// once -- "for example calendly.com/you/30min" against a check demanding https --
+// so it is pinned here rather than left to review.
+func TestEverySettingHintGivesAnExampleTheServerWouldAccept(t *testing.T) {
+	for _, role := range composio.AllRoles() {
+		if role.SettingHint == "" {
+			continue
+		}
+		// Only the calendars that finish elsewhere have a checkable format; the
+		// rest take opaque identifiers no test can validate.
+		provider, known := composio.CalendarProviderFor(role.Toolkit)
+		if !known || provider.BookInProduct {
+			continue
+		}
+		examples := extractExamples(role.SettingHint)
+		if len(examples) == 0 {
+			t.Errorf("%s finishes bookings elsewhere and its hint shows no example link at all: %q", role.Toolkit, role.SettingHint)
+			continue
+		}
+		for _, example := range examples {
+			if _, usable := schedulingLink(example); !usable {
+				t.Errorf("%s's hint tells somebody to type %q, which the server refuses", role.Toolkit, example)
+			}
+		}
+	}
+}
+
+// extractExamples pulls the address-looking words out of a hint. Deliberately
+// crude: it only has to find what a person would copy.
+func extractExamples(hint string) []string {
+	var examples []string
+	for _, word := range strings.FieldsFunc(hint, func(r rune) bool { return r == ' ' || r == ',' || r == '\n' }) {
+		word = strings.TrimRight(word, ".;:")
+		if strings.Contains(word, ".") && (strings.HasPrefix(word, "http") || strings.Contains(word, "/")) {
+			examples = append(examples, word)
+		}
+	}
+	return examples
+}
