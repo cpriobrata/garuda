@@ -175,6 +175,10 @@ func (s *Server) Handler() http.Handler {
 	// the exclusive lock. The handler now declines to write when a batch changes
 	// nothing, and the limit matches what the widget actually needs.
 	mux.Handle("POST /widget/v1/sessions/{sessionID}/activity", s.rateLimit("widget.activity", 30, time.Minute, http.HandlerFunc(s.recordVisitorJourney)))
+	// A visitor speaking instead of typing. Capped far tighter than the typed
+	// path because every call reaches a provider that bills per minute, and the
+	// bill lands on the customer whose website this is.
+	mux.Handle("POST /widget/v1/sessions/{sessionID}/voice", s.rateLimit("widget.voice", 12, time.Minute, http.HandlerFunc(s.transcribeWidgetVoice)))
 	// Appointment booking. Both calls reach the customer's own calendar through
 	// Composio, so they are capped far tighter than the routes that only touch
 	// state we own -- and the booking call writes to a real person's diary.
